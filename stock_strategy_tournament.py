@@ -4,7 +4,12 @@ Kripto botundaki turnuva metodolojisinin (checkpoint bazli, komisyon dusulmus
 ort. net getiri) hisse senedi verisine uyarlanmis hali.
 
 BIST: gunluk mumlar, checkpoint'ler gun bazinda (1g/3g/5g/10g)
-ABD:  15 dakikalik gun ici mumlar, checkpoint'ler saat bazinda (1sa/4sa/gun sonu)
+ABD:  15 dakikalik gun ici mumlar, checkpoint'ler kullanicinin gercek islem
+      tarzina (gun ici/saatlik) gore kalibre edildi: 15dk/30dk/1sa/2sa/4sa.
+      14 farkli strateji test ediliyor - sadece tersine donus (mean-reversion)
+      degil, momentum/kirilim tarzi stratejiler de (EMA/MACD kesisimi, ATR
+      kirilimi) dahil, cunku ilk turda tum reversion stratejileri zararli
+      cikmisti.
 
 NOT: yfinance'ta 15m veri sadece ~son 60 gun icin tutuluyor, bu yuzden ABD
 gun ici orneklemi BIST'e gore cok daha kucuk olacak. Bu normal, sonuclari
@@ -12,19 +17,40 @@ yorumlarken orneklem buyuklugune dikkat et.
 
 Calistirmak icin: pip install yfinance pandas numpy --break-system-packages
                   python3 stock_strategy_tournament.py
-Sonuc: stok_turnuva_bist.csv ve stok_turnuva_abd.csv + konsola ozet tablo
+Sonuc: stok_turnuva_bist.csv, stok_turnuva_abd.csv, stok_turnuva_abd_swing.csv
+       + konsola ozet tablo
 """
 
+import os
 import time
 from datetime import datetime
 
 import numpy as np
 import pandas as pd
+import requests
 
 try:
     import yfinance as yf
 except ImportError:
     yf = None  # test/mock modunda yfinance gerekmez
+
+
+TELEGRAM_TOKEN = os.environ.get("TELEGRAM_TOKEN")
+TELEGRAM_CHAT_ID = os.environ.get("TELEGRAM_CHAT_ID")
+
+
+def send_telegram_message(text: str):
+    """Canli bottaki ile ayni ortam degiskenlerini kullanir, Railway'de ayrica ayar gerekmez."""
+    if not TELEGRAM_TOKEN or not TELEGRAM_CHAT_ID:
+        print("(Telegram token/chat id yok, sadece konsola yaziliyor)")
+        return
+    url = f"https://api.telegram.org/bot{TELEGRAM_TOKEN}/sendMessage"
+    try:
+        # Telegram mesaj limiti ~4096 karakter, guvenli olmak icin parcala
+        for i in range(0, len(text), 3500):
+            requests.post(url, data={"chat_id": TELEGRAM_CHAT_ID, "text": text[i:i + 3500]}, timeout=15)
+    except Exception as e:
+        print(f"Telegram gonderim hatasi: {e}")
 
 
 # ---------------------------------------------------------------------------
@@ -55,7 +81,16 @@ BIST_CHECKPOINTS = [(1, "1g", 1.0), (3, "3g", 2.0), (5, "5g", 3.0), (10, "10g", 
 
 # ABD gun ici checkpoint'leri (15m mum sayisi): (mum_sayisi, etiket, hedef_yuzde)
 # 4 mum = 1sa, 16 mum = 4sa, 26 mum = ~gun sonu (6.5sa'lik ABD seansi)
-US_CHECKPOINTS = [(4, "1sa", 0.3), (16, "4sa", 0.6), (26, "gunsonu", 1.0)]
+# ABD gun ici checkpoint'leri (15m mum sayisi): (mum_sayisi, etiket, hedef_yuzde)
+# Kullanicinin gercek islem tarzina (gun ici/saatlik) gore kalibre edildi - buyuk-cap
+# ABD hisseleri kripto kadar oynak olmadigi icin hedefler kucuk tutuldu.
+US_CHECKPOINTS = [
+    (1, "15dk", 0.15),
+    (2, "30dk", 0.25),
+    (4, "1sa", 0.40),
+    (8, "2sa", 0.60),
+    (16, "4sa", 0.90),
+]
 
 
 # ---------------------------------------------------------------------------
@@ -106,6 +141,12 @@ def compute_indicators(df: pd.DataFrame, rsi_period: int = 14) -> pd.DataFrame:
     df["rsi"] = 100 - (100 / (1 + rs))
     df["rsi"] = df["rsi"].fillna(50)
 
+    # ikinci, kisa periyotlu RSI (6) - RSI periyodu farkli bir strateji varyasyonu icin
+    avg_gain6 = gain.ewm(alpha=1 / 6, adjust=False).mean()
+    avg_loss6 = loss.ewm(alpha=1 / 6, adjust=False).mean()
+    rs6 = avg_gain6 / avg_loss6.replace(0, np.nan)
+    df["rsi6"] = (100 - (100 / (1 + rs6))).fillna(50)
+
     candle_range = (df["high"] - df["low"]).replace(0, np.nan)
     df["lower_wick_ratio"] = ((df[["open", "close"]].min(axis=1) - df["low"]) / candle_range).fillna(0)
     df["upper_wick_ratio"] = ((df["high"] - df[["open", "close"]].max(axis=1)) / candle_range).fillna(0)
@@ -114,6 +155,41 @@ def compute_indicators(df: pd.DataFrame, rsi_period: int = 14) -> pd.DataFrame:
     boll_std = df["close"].rolling(20).std()
     df["boll_upper"] = boll_mid + 2 * boll_std
     df["boll_lower"] = boll_mid - 2 * boll_std
+
+    # trend/momentum indikatorleri
+    df["ema20"] = df["close"].ewm(span=20, adjust=False).mean()
+    df["ema50"] = df["close"].ewm(span=50, adjust=False).mean()
+    ema12 = df["close"].ewm(span=12, adjust=False).mean()
+    ema26 = df["close"].ewm(span=26, adjust=False).mean()
+    df["macd"] = ema12 - ema26
+    df["macd_signal"] = df["macd"].ewm(span=9, adjust=False).mean()
+
+    high_low = df["high"] - df["low"]
+    high_close = (df["high"] - df["close"].shift()).abs()
+    low_close = (df["low"] - df["close"].shift()).abs()
+    tr = pd.concat([high_low, high_close, low_close], axis=1).max(axis=1)
+    df["atr14"] = tr.rolling(14).mean()
+
+    # stochastic %K (14)
+    low14 = df["low"].rolling(14).min()
+    high14 = df["high"].rolling(14).max()
+    df["stoch_k"] = ((df["close"] - low14) / (high14 - low14).replace(0, np.nan) * 100).fillna(50)
+
+    # Williams %R (14)
+    df["williams_r"] = ((high14 - df["close"]) / (high14 - low14).replace(0, np.nan) * -100).fillna(-50)
+
+    # CCI (20)
+    typical = (df["high"] + df["low"] + df["close"]) / 3
+    sma_tp = typical.rolling(20).mean()
+    mad = typical.rolling(20).apply(lambda x: np.mean(np.abs(x - x.mean())), raw=True)
+    df["cci"] = (typical - sma_tp) / (0.015 * mad.replace(0, np.nan))
+
+    # gercek gun ici VWAP (gunluk resetlenir) - sadece intraday veri icin anlamli
+    if "timestamp" in df.columns:
+        day = pd.to_datetime(df["timestamp"]).dt.date
+        pv = typical * df["volume"]
+        df["vwap"] = pv.groupby(day).cumsum() / df["volume"].groupby(day).cumsum()
+        df["vwap_dev_pct"] = (df["close"] - df["vwap"]) / df["vwap"] * 100
 
     return df
 
@@ -194,6 +270,108 @@ def s6_sma_deviation(df, i, dev_th=5.0):
     return None
 
 
+def s7_real_vwap_deviation(df, i, dev_th=0.5):
+    """Gercek gun ici VWAP'tan sapma (gunluk resetlenen VWAP) - sadece intraday veri icin anlamli."""
+    row = df.iloc[i]
+    if pd.isna(row.get("vwap_dev_pct")):
+        return None
+    if row["vwap_dev_pct"] <= -dev_th:
+        return "LONG"
+    if row["vwap_dev_pct"] >= dev_th:
+        return "SHORT"
+    return None
+
+
+def s8_ema_cross_momentum(df, i):
+    """Momentum/trend takip: EMA20, EMA50'yi yeni kesmisse o yonde devam beklentisi (tersine donus DEGIL)."""
+    row = df.iloc[i]
+    prev = df.iloc[i - 1]
+    if pd.isna(row["ema20"]) or pd.isna(row["ema50"]) or pd.isna(prev["ema20"]) or pd.isna(prev["ema50"]):
+        return None
+    crossed_up = prev["ema20"] <= prev["ema50"] and row["ema20"] > row["ema50"]
+    crossed_down = prev["ema20"] >= prev["ema50"] and row["ema20"] < row["ema50"]
+    if crossed_up:
+        return "LONG"
+    if crossed_down:
+        return "SHORT"
+    return None
+
+
+def s9_macd_cross_momentum(df, i):
+    """Momentum: MACD, sinyal cizgisini yeni kesmisse o yonde devam beklentisi."""
+    row = df.iloc[i]
+    prev = df.iloc[i - 1]
+    if pd.isna(row["macd"]) or pd.isna(row["macd_signal"]) or pd.isna(prev["macd"]) or pd.isna(prev["macd_signal"]):
+        return None
+    crossed_up = prev["macd"] <= prev["macd_signal"] and row["macd"] > row["macd_signal"]
+    crossed_down = prev["macd"] >= prev["macd_signal"] and row["macd"] < row["macd_signal"]
+    if crossed_up:
+        return "LONG"
+    if crossed_down:
+        return "SHORT"
+    return None
+
+
+def s10_atr_breakout_momentum(df, i, atr_mult=1.5):
+    """Momentum/kirilim: fiyat, onceki kapanistan ATR'nin katlari kadar uzaklasmissa o yonde devam beklentisi."""
+    row = df.iloc[i]
+    prev_close = df.iloc[i - 1]["close"]
+    if pd.isna(row["atr14"]) or row["atr14"] == 0:
+        return None
+    move = row["close"] - prev_close
+    if move >= atr_mult * row["atr14"]:
+        return "LONG"
+    if move <= -atr_mult * row["atr14"]:
+        return "SHORT"
+    return None
+
+
+def s11_stochastic_reversal(df, i, os_th=20, ob_th=80):
+    """Tersine donus: Stochastic %K asiri uc."""
+    row = df.iloc[i]
+    if pd.isna(row["stoch_k"]):
+        return None
+    if row["stoch_k"] <= os_th:
+        return "LONG"
+    if row["stoch_k"] >= ob_th:
+        return "SHORT"
+    return None
+
+
+def s12_williams_r_reversal(df, i, os_th=-80, ob_th=-20):
+    """Tersine donus: Williams %R asiri uc."""
+    row = df.iloc[i]
+    if pd.isna(row["williams_r"]):
+        return None
+    if row["williams_r"] <= os_th:
+        return "LONG"
+    if row["williams_r"] >= ob_th:
+        return "SHORT"
+    return None
+
+
+def s13_cci_reversal(df, i, os_th=-100, ob_th=100):
+    """Tersine donus: CCI asiri uc."""
+    row = df.iloc[i]
+    if pd.isna(row["cci"]):
+        return None
+    if row["cci"] <= os_th:
+        return "LONG"
+    if row["cci"] >= ob_th:
+        return "SHORT"
+    return None
+
+
+def s14_rsi6_reversal(df, i, rsi_os=20, rsi_ob=80):
+    """Tersine donus: kisa periyotlu (6) RSI, cok daha oynak/hizli tepki verir."""
+    row = df.iloc[i]
+    if row["rsi6"] <= rsi_os:
+        return "LONG"
+    if row["rsi6"] >= rsi_ob:
+        return "SHORT"
+    return None
+
+
 STRATEGIES_DAILY = [
     ("01-Fitil+RSI+Hacim (mevcut sistem)", lambda df, i: s1_wick_rsi_volume(df, i)),
     ("02-Fitil+RSI (hacimsiz)", lambda df, i: s2_wick_rsi(df, i)),
@@ -210,6 +388,14 @@ STRATEGIES_INTRADAY = [
     ("04-Hacim Z-Skor", lambda df, i: s4_volume_zscore(df, i)),
     ("05-Bollinger Disi+RSI (gercek sart)", lambda df, i: s5_bollinger_touch_rsi(df, i, rsi_os=30, rsi_ob=70)),
     ("06-SMA20 Sapmasi %2", lambda df, i: s6_sma_deviation(df, i, dev_th=2.0)),
+    ("07-Gercek VWAP Sapmasi %0.5", lambda df, i: s7_real_vwap_deviation(df, i, dev_th=0.5)),
+    ("08-EMA20/50 Kesisimi (momentum)", lambda df, i: s8_ema_cross_momentum(df, i)),
+    ("09-MACD Kesisimi (momentum)", lambda df, i: s9_macd_cross_momentum(df, i)),
+    ("10-ATR Kirilimi (momentum)", lambda df, i: s10_atr_breakout_momentum(df, i, atr_mult=1.5)),
+    ("11-Stochastic (tersine donus)", lambda df, i: s11_stochastic_reversal(df, i, os_th=20, ob_th=80)),
+    ("12-Williams %R (tersine donus)", lambda df, i: s12_williams_r_reversal(df, i, os_th=-80, ob_th=-20)),
+    ("13-CCI (tersine donus)", lambda df, i: s13_cci_reversal(df, i, os_th=-100, ob_th=100)),
+    ("14-RSI6 (tersine donus, hizli)", lambda df, i: s14_rsi6_reversal(df, i, rsi_os=20, rsi_ob=80)),
 ]
 
 
@@ -311,6 +497,7 @@ def tournament_bist():
     print("\n--- BIST SONUCLARI ---")
     print(table.to_string(index=False))
     table.to_csv("stok_turnuva_bist.csv", index=False)
+    send_telegram_message("📊 BIST GUNLUK TURNUVA SONUCLARI\n\n" + table.to_string(index=False))
     return table
 
 
@@ -336,6 +523,7 @@ def tournament_us():
     print("\n--- ABD GUN ICI SONUCLARI ---")
     print(table.to_string(index=False))
     table.to_csv("stok_turnuva_abd.csv", index=False)
+    send_telegram_message("📊 ABD GUN ICI (15m) TURNUVA SONUCLARI\n\n" + table.to_string(index=False))
     return table
 
 
@@ -362,6 +550,7 @@ def tournament_swing_generic(tickers: list, market_label: str, out_filename: str
     print(f"\n--- {market_label} SWING SONUCLARI ---")
     print(table.to_string(index=False))
     table.to_csv(out_filename, index=False)
+    send_telegram_message(f"📊 {market_label} SWING (GUNLUK) TURNUVA SONUCLARI\n\n" + table.to_string(index=False))
     return table
 
 
@@ -372,7 +561,10 @@ def tournament_us_swing():
 if __name__ == "__main__":
     if yf is None:
         raise RuntimeError("yfinance kurulu degil. 'pip install yfinance --break-system-packages' calistir.")
+    send_telegram_message("🏁 Strateji turnuvasi basliyor (BIST + ABD gun ici + ABD swing)...")
     tournament_bist()
     tournament_us()
     tournament_us_swing()
-    print(f"\nTamamlandi - {datetime.now().isoformat()}")
+    finish_msg = f"✅ Turnuva tamamlandi - {datetime.now().isoformat()}"
+    print(f"\n{finish_msg}")
+    send_telegram_message(finish_msg)
