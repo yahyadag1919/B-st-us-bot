@@ -168,6 +168,23 @@ def check_exhaustion(df: pd.DataFrame):
     return None
 
 
+def check_rsi_only(df: pd.DataFrame):
+    """
+    Turnuvada BIST icin 2. en iyi ort. net getiriyi veren sistem
+    (571 sinyal, %69.2 isabet, +%0.759 ort. net) - tek sart: RSI asiri uc.
+    """
+    if len(df) < max(BOLLINGER_PERIOD, 20) + 2:
+        return None
+
+    row = df.iloc[-1]
+    if row["rsi"] <= RSI_OVERSOLD:
+        return "LONG", row
+    if row["rsi"] >= RSI_OVERBOUGHT:
+        return "SHORT", row
+
+    return None
+
+
 def compute_invalidation(direction: str, row) -> float:
     atr = row["atr14"] if pd.notna(row["atr14"]) else 0
     buffer = atr * INVALIDATION_ATR_BUFFER
@@ -269,16 +286,16 @@ def check_us_candidate_confirmation(ticker: str, df: pd.DataFrame):
 SIGNAL_LOG_FILE = "stock_signal_history.csv"
 
 
-def log_signal(ticker: str, market: str, direction: str, row, breakdown: list):
+def log_signal(ticker: str, market: str, strategy: str, direction: str, row, breakdown: list):
     file_exists = os.path.isfile(SIGNAL_LOG_FILE)
     with open(SIGNAL_LOG_FILE, "a", newline="") as f:
         writer = csv.writer(f)
         if not file_exists:
             writer.writerow([
-                "date", "ticker", "market", "direction", "price", "rsi", "breakdown"
+                "date", "ticker", "market", "strategy", "direction", "price", "rsi", "breakdown"
             ])
         writer.writerow([
-            datetime.now().isoformat(), ticker, market, direction,
+            datetime.now().isoformat(), ticker, market, strategy, direction,
             row["close"], row["rsi"], " | ".join(breakdown)
         ])
 
@@ -299,34 +316,47 @@ def scan_bist(tickers: list, market_label: str):
                 continue
             df = compute_indicators(df)
 
-            gate_result = check_exhaustion(df)
-            if not gate_result:
+            fired_directions = set()
+
+            for strategy_name, gate_fn in [
+                ("Fitil+RSI+Hacim", check_exhaustion),
+                ("Sadece RSI", check_rsi_only),
+            ]:
+                gate_result = gate_fn(df)
+                if not gate_result:
+                    continue
+
+                direction, row = gate_result
+                # ayni ticker'da ayni yonde iki strateji birden tetiklenirse tekrar mesaj atma
+                if direction in fired_directions:
+                    continue
+                fired_directions.add(direction)
+
+                breakdown = []
+                pts, note = score_bollinger(row)
+                breakdown.append(f"Bollinger: {note}")
+                pts_trend, note_trend = score_trend(df, direction)
+                breakdown.append(f"Kendi trendi: {note_trend}")
+
+                if pts_trend < 0:
+                    print(f"{ticker}: {direction} ({strategy_name}) tespit edildi ama kendi trendi tersine guclu, atlandi")
+                    continue
+
+                invalidation = compute_invalidation(direction, row)
+                log_signal(ticker, market_label, strategy_name, direction, row, breakdown)
+
+                results.append({
+                    "ticker": ticker,
+                    "strategy": strategy_name,
+                    "direction": direction,
+                    "price": row["close"],
+                    "rsi": row["rsi"],
+                    "invalidation": invalidation,
+                    "breakdown": breakdown,
+                })
+
+            if not fired_directions:
                 print(f"{ticker}: kriter yok")
-                continue
-
-            direction, row = gate_result
-
-            breakdown = []
-            pts, note = score_bollinger(row)
-            breakdown.append(f"Bollinger: {note}")
-            pts_trend, note_trend = score_trend(df, direction)
-            breakdown.append(f"Kendi trendi: {note_trend}")
-
-            if pts_trend < 0:
-                print(f"{ticker}: {direction} tespit edildi ama kendi trendi tersine guclu, atlandi")
-                continue
-
-            invalidation = compute_invalidation(direction, row)
-            log_signal(ticker, market_label, direction, row, breakdown)
-
-            results.append({
-                "ticker": ticker,
-                "direction": direction,
-                "price": row["close"],
-                "rsi": row["rsi"],
-                "invalidation": invalidation,
-                "breakdown": breakdown,
-            })
 
         except Exception as e:
             print(f"{ticker} hata: {e}")
@@ -336,7 +366,7 @@ def scan_bist(tickers: list, market_label: str):
         for r in results:
             yon_emoji = "🟢 LONG" if r["direction"] == "LONG" else "🔴 SHORT"
             lines.append(
-                f"{yon_emoji} {r['ticker']}\n"
+                f"{yon_emoji} {r['ticker']} [{r['strategy']}]\n"
                 f"Fiyat: {r['price']:.2f} | RSI: {r['rsi']:.1f}\n"
                 f"Geçersizlik seviyesi: {r['invalidation']:.2f}\n"
                 f"{' | '.join(r['breakdown'])}\n"
@@ -398,7 +428,7 @@ def scan_us_intraday():
             breakdown.append(f"Bollinger: {note}")
 
             invalidation = compute_invalidation(direction, exhaustion_row)
-            log_signal(ticker, "ABD-gunici", direction, row, breakdown)
+            log_signal(ticker, "ABD-gunici", "Fitil+RSI+Hacim", direction, row, breakdown)
 
             yon_emoji = "🟢 LONG" if direction == "LONG" else "🔴 SHORT"
             msg = (
@@ -433,12 +463,13 @@ def run_forever():
     send_telegram_message(
         "BIST + ABD hisse tarama botu baslatildi.\n"
         f"BIST: {len(BIST_TICKERS)} hisse, her gun ~{BIST_CHECK_HOUR:02d}:{BIST_CHECK_MINUTE:02d} (Istanbul) taranacak.\n"
-        f"ABD: {len(US_TICKERS)} hisse, piyasa acikken (9:30-16:00 New York saati) surekli taranacak."
+        f"İki strateji paralel: Fitil+RSI+Hacim (mevcut) + Sadece RSI (turnuvada test edilmiş 2. kol).\n\n"
+        f"ABD gün içi (15m) tarama GEÇİCİ OLARAK DURDURULDU — turnuvada test edilen 6 varyantın "
+        f"6'sı da net zararlı çıktı. ABD için günlük/swing bazlı test tamamlanınca yeniden açılacak."
     )
 
     while True:
         istanbul_now = datetime.now(ZoneInfo("Europe/Istanbul"))
-        ny_now = datetime.now(ZoneInfo("America/New_York"))
 
         if istanbul_now.weekday() < 5:  # Pazartesi-Cuma
             if _within_window(istanbul_now, BIST_CHECK_HOUR, BIST_CHECK_MINUTE, CHECK_WINDOW_MINUTES):
@@ -446,11 +477,13 @@ def run_forever():
                     scan_bist(BIST_TICKERS, "BIST")
                     _last_bist_run_date = istanbul_now.date()
 
-        ny_minutes = ny_now.hour * 60 + ny_now.minute
-        market_open = 9 * 60 + 30
-        market_close = 16 * 60
-        if ny_now.weekday() < 5 and market_open <= ny_minutes < market_close:
-            scan_us_intraday()
+        # ABD gun ici tarama gecici olarak kapali (bkz. yukaridaki baslangic mesaji)
+        # ny_now = datetime.now(ZoneInfo("America/New_York"))
+        # ny_minutes = ny_now.hour * 60 + ny_now.minute
+        # market_open = 9 * 60 + 30
+        # market_close = 16 * 60
+        # if ny_now.weekday() < 5 and market_open <= ny_minutes < market_close:
+        #     scan_us_intraday()
 
         time.sleep(LOOP_INTERVAL_SECONDS)
 

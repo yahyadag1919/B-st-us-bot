@@ -339,9 +339,40 @@ def tournament_us():
     return table
 
 
+def tournament_swing_generic(tickers: list, market_label: str, out_filename: str):
+    """BIST'teki gunluk/swing yaklasimin ayni sekilde baska bir ticker listesine uygulanmasi."""
+    print(f"\n=== {market_label} SWING (GUNLUK) TURNUVA ===")
+    combined = {name: [] for name, _ in STRATEGIES_DAILY}
+    for ticker in tickers:
+        try:
+            df = fetch_daily_df(ticker)
+            if len(df) < 40:
+                print(f"{ticker}: yetersiz veri, atlandi")
+                continue
+            df = compute_indicators(df)
+            res = run_backtest(df, STRATEGIES_DAILY, BIST_CHECKPOINTS)
+            for name, outcomes in res.items():
+                combined[name].extend(outcomes)
+            print(f"{ticker}: tamamlandi ({len(df)} mum)")
+            time.sleep(0.3)
+        except Exception as e:
+            print(f"{ticker}: hata - {e}")
+
+    table = summarize(combined)
+    print(f"\n--- {market_label} SWING SONUCLARI ---")
+    print(table.to_string(index=False))
+    table.to_csv(out_filename, index=False)
+    return table
+
+
+def tournament_us_swing():
+    return tournament_swing_generic(US_TICKERS, "ABD", "stok_turnuva_abd_swing.csv")
+
+
 if __name__ == "__main__":
     if yf is None:
         raise RuntimeError("yfinance kurulu degil. 'pip install yfinance --break-system-packages' calistir.")
     tournament_bist()
     tournament_us()
+    tournament_us_swing()
     print(f"\nTamamlandi - {datetime.now().isoformat()}")
