@@ -22,24 +22,62 @@ if not TELEGRAM_TOKEN or not TELEGRAM_CHAT_ID:
 # Hisse listeleri
 # ---------------------------------------------------------------------------
 
-# BIST30 (yfinance ".IS" uzantisiyla). Endeks icerigi zaman zaman degisir,
-# bu listeyi periyodik olarak gozden gecirmek gerekebilir.
+# BIST100 (yfinance ".IS" uzantisiyla). Endeks icerigi UC AYDA BIR degisir
+# (Ocak-Mart / Nisan-Haziran / Temmuz-Eylul / Ekim-Aralik donemleri), bu yuzden
+# bu liste zamanla eskiyebilir. Bot acilista her kodu dogrular ve veri
+# gelmeyenleri otomatik eler (validate_tickers), o yuzden yanlis/endeksten
+# cikmis bir kod sessiz hataya degil, tek seferlik bir uyariya yol acar.
 BIST_TICKERS = [
-    "AKBNK.IS", "ARCLK.IS", "ASELS.IS", "BIMAS.IS", "EKGYO.IS",
-    "ENKAI.IS", "EREGL.IS", "FROTO.IS", "GARAN.IS", "GUBRF.IS",
-    "HALKB.IS", "ISCTR.IS", "KCHOL.IS", "KOZAL.IS", "KRDMD.IS",
-    "MGROS.IS", "ODAS.IS", "PETKM.IS", "PGSUS.IS", "SAHOL.IS",
-    "SASA.IS", "SISE.IS", "TAVHL.IS", "TCELL.IS", "THYAO.IS",
-    "TOASO.IS", "TUPRS.IS", "VAKBN.IS", "YKBNK.IS", "ALARK.IS",
+    "AEFES.IS", "AGHOL.IS", "AKBNK.IS", "AKCNS.IS", "AKFGY.IS", "AKSA.IS",
+    "AKSEN.IS", "ALARK.IS", "ALBRK.IS", "ALFAS.IS", "ANSGR.IS", "ARCLK.IS",
+    "ASELS.IS", "ASTOR.IS", "BAGFS.IS", "BERA.IS", "BIENY.IS", "BIMAS.IS",
+    "BOBET.IS", "BRSAN.IS", "BRYAT.IS", "BUCIM.IS", "CANTE.IS", "CCOLA.IS",
+    "CIMSA.IS", "CWENE.IS", "DOAS.IS", "DOHOL.IS", "ECILC.IS", "ECZYT.IS",
+    "EGEEN.IS", "EKGYO.IS", "ENERY.IS", "ENJSA.IS", "ENKAI.IS", "EREGL.IS",
+    "EUPWR.IS", "FROTO.IS", "GARAN.IS", "GESAN.IS", "GLYHO.IS", "GUBRF.IS",
+    "GWIND.IS", "HALKB.IS", "HEKTS.IS", "IPEKE.IS", "ISCTR.IS", "ISGYO.IS",
+    "ISMEN.IS", "IZMDC.IS", "KARSN.IS", "KCAER.IS", "KCHOL.IS", "KLSER.IS",
+    "KONTR.IS", "KONYA.IS", "KORDS.IS", "KOZAA.IS", "KOZAL.IS", "KRDMD.IS",
+    "MAVI.IS", "MGROS.IS", "MIATK.IS", "ODAS.IS", "OTKAR.IS", "OYAKC.IS",
+    "PENTA.IS", "PETKM.IS", "PGSUS.IS", "QUAGR.IS", "SAHOL.IS", "SASA.IS",
+    "SDTTR.IS", "SISE.IS", "SKBNK.IS", "SMRTG.IS", "SOKM.IS", "TAVHL.IS",
+    "TCELL.IS", "THYAO.IS", "TKFEN.IS", "TOASO.IS", "TSKB.IS", "TTKOM.IS",
+    "TTRAK.IS", "TUKAS.IS", "TUPRS.IS", "TURSG.IS", "ULKER.IS", "VAKBN.IS",
+    "VESBE.IS", "VESTL.IS", "YEOTK.IS", "YKBNK.IS", "YYLGD.IS", "ZOREN.IS",
+    "ARDYZ.IS", "KMPUR.IS", "AGROT.IS", "TABGD.IS",
 ]
 
-# ABD'de likit, tanınan buyuk sirketler
+# ABD: S&P 500'un genis, likit bir kesiti (gunluk swing taramasi icin)
 US_TICKERS = [
-    "AAPL", "MSFT", "GOOGL", "AMZN", "NVDA", "META", "TSLA", "BRK-B",
-    "JPM", "V", "UNH", "MA", "HD", "PG", "COST", "XOM", "JNJ", "ABBV",
-    "MRK", "AVGO", "PEP", "KO", "BAC", "WMT", "CRM", "ADBE", "AMD",
-    "NFLX", "DIS", "CSCO", "ORCL", "INTC", "QCOM", "TXN", "PFE",
-    "NKE", "MCD", "GS", "CAT", "BA",
+    "AAPL", "MSFT", "GOOGL", "AMZN", "NVDA", "META",
+    "TSLA", "BRK-B", "JPM", "V", "UNH", "MA",
+    "HD", "PG", "COST", "XOM", "JNJ", "ABBV",
+    "MRK", "AVGO", "PEP", "KO", "BAC", "WMT",
+    "CRM", "ADBE", "AMD", "NFLX", "DIS", "CSCO",
+    "ORCL", "INTC", "QCOM", "TXN", "PFE", "NKE",
+    "MCD", "GS", "CAT", "BA", "LLY", "TMO",
+    "ABT", "DHR", "ACN", "LIN", "MDT", "NEE",
+    "PM", "UNP", "RTX", "HON", "SBUX", "LOW",
+    "INTU", "AMGN", "IBM", "GE", "CVX", "WFC",
+    "MS", "SCHW", "BLK", "SPGI", "AXP", "C",
+    "T", "VZ", "CMCSA", "AMAT", "MU", "LRCX",
+    "ADI", "KLAC", "SNPS", "CDNS", "PANW", "CRWD",
+    "NOW", "UBER", "ABNB", "PYPL", "SQ", "SHOP",
+    "COIN", "MRNA", "GILD", "BMY", "CVS", "CI",
+    "ELV", "HCA", "DE", "MMM", "LMT", "NOC",
+    "GD", "EOG", "SLB", "COP", "PSX", "MPC",
+    "VLO", "NEM", "FCX", "DOW",
+]
+
+# Gun ici tarama 15 dakikada bir calistigi icin AYRI ve DAR bir liste kullanir -
+# 100+ hisseyi 15 dakikada bir cekmek yfinance hiz limitine takilir ve tarama
+# bir dongude bitmeyebilir. Burada sadece en likit / en cok opsiyon hacmi olan
+# isimler var.
+US_INTRADAY_TICKERS = [
+    "AAPL", "MSFT", "GOOGL", "AMZN", "NVDA", "META",
+    "TSLA", "AMD", "NFLX", "AVGO", "MU", "INTC",
+    "JPM", "BAC", "XOM", "COIN", "PLTR", "UBER",
+    "DIS", "BA", "WMT", "COST", "CRM", "ORCL",
 ]
 
 # ---------------------------------------------------------------------------
@@ -72,8 +110,33 @@ LOOP_INTERVAL_SECONDS = 120                        # her 2 dakikada bir kontrol
 _last_bist_run_date = None
 _last_us_swing_run_date = None
 _last_us_gunici_scan_time = None
+# Piyasa Beyni gun ici tarama durdurma bildirimi icin - ayni rejimde tekrar
+# tekrar "durduruldu" mesaji atmamak icin son bildirilen rejimi hatirlar.
+_last_gunici_halt_regime = None
 US_GUNICI_SCAN_INTERVAL_MINUTES = 15  # yfinance'i asiri yormamak icin 15dk'da bir tara
 _us_candidates = {}  # ABD gun ici tukenme adaylari - onay mumu bekleniyor
+
+
+# ---------------------------------------------------------------------------
+# Kalici depolama (Railway Volume)
+# ---------------------------------------------------------------------------
+# Railway'de her re-deploy/restart konteyner dosya sistemini sifirlar. Takip
+# CSV'leri burada tutulmazsa acik sinyallerin cikis takibi sessizce kaybolur -
+# kullanici parsiyel TP / stop uyarisi beklerken hicbir sey gelmez. Bu yuzden
+# DATA_DIR bir Railway Volume'a (ornek: /data) bagli olmalidir.
+# NOT: Railway'de Volume tanimlanip DATA_DIR=/data ayarlanmazsa dosyalar yine
+# calisma dizinine yazilir ve re-deploy'da kaybolur - bu durumda asagidaki
+# uyari acilista Telegram'a duser.
+DATA_DIR = os.environ.get("DATA_DIR", ".")
+try:
+    os.makedirs(DATA_DIR, exist_ok=True)
+except Exception as e:
+    print(f"DATA_DIR olusturulamadi ({e}) - calisma dizini kullanilacak")
+    DATA_DIR = "."
+
+
+def _data_path(filename: str) -> str:
+    return os.path.join(DATA_DIR, filename)
 
 
 # ---------------------------------------------------------------------------
@@ -90,28 +153,286 @@ def send_telegram_message(text: str):
 
 
 # ---------------------------------------------------------------------------
+# 4. KATMAN: SİSTEM DEDEKTİFİ (hata izleme)
+# ---------------------------------------------------------------------------
+# Kripto botundaki Dedektif'in bu bota uyarlanmis hali. Onemli fark: burada
+# bot kendisi islem acmadigi icin hata = "sinyal uretemedim / veri gelmedi"
+# demektir. Sessizce gecmek tehlikeli, cunku kullanici sinyal beklerken
+# botun aslinda calismadigini fark etmeyebilir.
+
+_ERROR_HINTS = {
+    "no data": "yfinance veri dondurmedi - sembol degismis ya da borsa tatil olabilir",
+    "not found": "sembol yfinance'te bulunamadi - ticker listesi guncellenmeli",
+    "delisted": "hisse borsadan cikarilmis olabilir - ticker listesini guncelle",
+    "timeout": "yfinance/ag zaman asimi - gecici olabilir",
+    "connection": "ag baglanti hatasi - gecici olabilir",
+    "rate limit": "yfinance hiz limiti - tarama araligi artirilmali",
+    "429": "yfinance hiz limiti - tarama araligi artirilmali",
+    "index out of": "yetersiz mum verisi - hisse yeni islem gormeye baslamis olabilir",
+    "permission denied": "dosya yazma izni yok - Railway ayarini kontrol et",
+}
+
+# Ayni hatayi her dongude tekrar tekrar bildirmemek icin basit bir bogucu -
+# kripto botunda yasadigimiz "yuzlerce ayni bildirim" sorununu bastan onler.
+_reported_errors = {}
+ERROR_REPORT_COOLDOWN_MINUTES = 60
+
+
+def _guess_root_cause(e: Exception) -> str:
+    text = str(e).lower()
+    for key, hint in _ERROR_HINTS.items():
+        if key in text:
+            return hint
+    return "Bilinen bir kaliba uymuyor - detaylari incele."
+
+
+def dedektif_report(context: str, e: Exception, ticker: str = "-"):
+    """Hata bildirir, ama ayni hata/ticker kombinasyonu icin saatte en fazla bir kez."""
+    key = f"{context}|{ticker}|{type(e).__name__}"
+    now = datetime.now()
+    last = _reported_errors.get(key)
+    if last and (now - last).total_seconds() < ERROR_REPORT_COOLDOWN_MINUTES * 60:
+        return
+    _reported_errors[key] = now
+    send_telegram_message(
+        f"🚨 [DEDEKTİF UYARISI]\n"
+        f"Yer: {context} | Hisse: {ticker}\n"
+        f"Hata: {e}\n"
+        f"Tahmini kök neden: {_guess_root_cause(e)}"
+    )
+
+
+# ---------------------------------------------------------------------------
+# 1. KATMAN: PİYASA BEYNİ (Market Allocator)
+# ---------------------------------------------------------------------------
+# BIST icin XU100, ABD icin SPY endeks trendini olcer. Endeks yatay/dususte
+# ise o piyasanin taramasi durdurulur - "gurultulu piyasada sinyal uretme".
+# NOT: kripto botundaki gibi ADX + EMA200 kullaniyoruz, ama burada karar
+# ikili degil uclu: YUKSELIS (tara) / YATAY (durdur) / DUSUS (durdur).
+
+INDEX_TICKERS = {"BIST": "XU100.IS", "ABD": "SPY"}
+REGIME_ADX_PERIOD = 14
+REGIME_ADX_TREND_MIN = 20.0      # bunun altinda trend "yok" sayilir (yatay)
+REGIME_EMA_PERIOD = 200
+
+# Endeks verisi saatte bir yenilenir - her taramada tekrar cekmek gereksiz.
+_regime_cache = {}
+REGIME_CACHE_MINUTES = 60
+
+
+def _compute_adx(df: pd.DataFrame, period: int = REGIME_ADX_PERIOD) -> pd.Series:
+    """Standart Wilder ADX - kripto botundaki _compute_adx ile ayni mantik."""
+    high, low, close = df["high"], df["low"], df["close"]
+    plus_dm = high.diff()
+    minus_dm = -low.diff()
+    plus_dm = plus_dm.where((plus_dm > minus_dm) & (plus_dm > 0), 0.0)
+    minus_dm = minus_dm.where((minus_dm > plus_dm) & (minus_dm > 0), 0.0)
+
+    tr = pd.concat([
+        high - low,
+        (high - close.shift()).abs(),
+        (low - close.shift()).abs(),
+    ], axis=1).max(axis=1)
+
+    atr = tr.ewm(alpha=1 / period, adjust=False).mean()
+    plus_di = 100 * plus_dm.ewm(alpha=1 / period, adjust=False).mean() / atr.replace(0, np.nan)
+    minus_di = 100 * minus_dm.ewm(alpha=1 / period, adjust=False).mean() / atr.replace(0, np.nan)
+    dx = 100 * (plus_di - minus_di).abs() / (plus_di + minus_di).replace(0, np.nan)
+    return dx.ewm(alpha=1 / period, adjust=False).mean()
+
+
+def get_market_regime(market: str):
+    """(rejim, aciklama) doner. rejim: 'YUKSELIS' | 'YATAY' | 'DUSUS' | 'BILINMIYOR'.
+    BILINMIYOR = endeks verisi cekilemedi; bu durumda taramayi DURDURMUYORUZ
+    (veri sorunu yuzunden butun sinyalleri kaybetmek, gurultulu piyasada
+    islem yapmaktan daha kotu bir hata olurdu) - sadece uyari notu dusuyoruz."""
+    cached = _regime_cache.get(market)
+    if cached and (datetime.now() - cached["time"]).total_seconds() < REGIME_CACHE_MINUTES * 60:
+        return cached["regime"], cached["note"]
+
+    ticker = INDEX_TICKERS[market]
+    try:
+        df = fetch_daily_df(ticker, period="2y")
+        if df.empty or len(df) < REGIME_EMA_PERIOD + 5:
+            raise ValueError(f"endeks verisi yetersiz ({len(df)} mum)")
+
+        df["adx"] = _compute_adx(df)
+        df["ema200"] = df["close"].ewm(span=REGIME_EMA_PERIOD, adjust=False).mean()
+        row = df.iloc[-1]
+        adx, close, ema200 = row["adx"], row["close"], row["ema200"]
+
+        if pd.isna(adx) or pd.isna(ema200):
+            raise ValueError("ADX/EMA200 hesaplanamadi")
+
+        if adx < REGIME_ADX_TREND_MIN:
+            regime = "YATAY"
+            note = f"ADX {adx:.1f} (<{REGIME_ADX_TREND_MIN}) - trend yok"
+        elif close > ema200:
+            regime = "YUKSELIS"
+            note = f"ADX {adx:.1f}, endeks EMA200 üstünde"
+        else:
+            regime = "DUSUS"
+            note = f"ADX {adx:.1f}, endeks EMA200 altında"
+
+    except Exception as e:
+        dedektif_report(f"{market} piyasa rejimi", e, ticker)
+        regime, note = "BILINMIYOR", f"endeks verisi alınamadı ({e})"
+
+    _regime_cache[market] = {"regime": regime, "note": note, "time": datetime.now()}
+    return regime, note
+
+
+def market_scan_allowed(market: str):
+    """(izin_var_mi, izinli_yon, rejim, aciklama)
+
+    Gemini'nin nihai karari (2026-07-28): rejim filtresi taramayi tamamen
+    durdurmak yerine YONLENDIRIR -
+      YUKSELIS -> sadece LONG sinyalleri
+      DUSUS    -> sadece SHORT sinyalleri (dusus trendi SHORT icin en verimli
+                  ortam; eski hali bu firsatlari tamamen bloke ediyordu)
+      YATAY    -> tarama durdurulur (gurultu / hatali sinyal onlemi)
+    izinli_yon None ise her iki yon de serbest (sadece BILINMIYOR durumunda)."""
+    regime, note = get_market_regime(market)
+    if regime == "YUKSELIS":
+        return True, "LONG", regime, note
+    if regime == "DUSUS":
+        return True, "SHORT", regime, note
+    if regime == "BILINMIYOR":
+        # Endeks verisi alinamadi - taramaya devam, yon kisiti yok.
+        return True, None, regime, note
+    return False, None, regime, note  # YATAY
+
+
+# ---------------------------------------------------------------------------
+# 2. KATMAN: PORTFÖY VE RİSK BEYNİ (Portfolio Manager)
+# ---------------------------------------------------------------------------
+# Sinyalde "kac lot / kac adet" alinmasi gerektigini hesaplar. Bot islem
+# ACMIYOR - bu sadece emir talimati. Hesap: risk_tutari / stop_mesafesi.
+
+def _optional_float_env(name: str):
+    """Ayarlanmamis ya da bos birakilmis degiskenler icin None doner.
+    DERS (2026-07-28): eskiden burada 100000/10000 gibi varsayilanlar vardi ve
+    kullanici bakiyesini girmediginde bot bunlarin uzerinden 'EMIR: 200 adet al'
+    gibi KESIN ama gercekle ilgisiz bir sayi yaziyordu. Yanlis sayi, hic sayi
+    olmamasindan daha kotu - o yuzden artik varsayilan yok."""
+    raw = os.environ.get(name, "").strip()
+    if not raw:
+        return None
+    try:
+        return float(raw)
+    except ValueError:
+        print(f"{name} sayiya cevrilemedi ('{raw}') - yok sayiliyor")
+        return None
+
+
+PORTFOLIO_BALANCE_TRY = _optional_float_env("PORTFOLIO_BALANCE_TRY")
+PORTFOLIO_BALANCE_USD = _optional_float_env("PORTFOLIO_BALANCE_USD")
+RISK_PER_TRADE_PCT = float(os.environ.get("RISK_PER_TRADE_PCT", "2.0"))
+# Tek pozisyonun portfoyun bu yuzdesinden fazlasini kaplamasini engelle
+# (dar stop mesafelerinde miktar patlamasin - kripto botunda ogrenilen ders).
+MAX_POSITION_PCT_OF_BALANCE = float(os.environ.get("MAX_POSITION_PCT_OF_BALANCE", "20"))
+
+# Gemini'nin karari (2026-07-28): opsiyon/varant icin ayri bir matematik modulu
+# kurmak yerine, hesabin neyi kapsadigini acikca yazan bir not yeterli.
+OPTIONS_SIZING_NOTE = (
+    "⚠️ Bu hesaplama spot hisse alımı içindir. Opsiyon/Varant işlemlerinde "
+    "riske edilecek toplam tutarı aşmayacak şekilde prim bazlı pozisyon açınız."
+)
+
+
+def _balance_for(market: str):
+    return PORTFOLIO_BALANCE_TRY if market == "BIST" else PORTFOLIO_BALANCE_USD
+
+
+def sizing_line(market: str, entry_price: float, stop_price: float) -> str:
+    """Sinyal mesajindaki tek satirlik boyutlandirma bilgisi.
+    Bakiye ayarliysa 'kac adet al', degilse stop mesafesini yuzde olarak
+    gosterir - kullanici kendi riskini ona gore ayarlar."""
+    if _balance_for(market) is not None:
+        qty, risk_amount, currency, note = compute_position_size(market, entry_price, stop_price)
+        if qty > 0:
+            return (f"➡️ EMİR: {qty} adet al (risk: {risk_amount:.0f} {currency})"
+                    + (f" — {note}" if note else ""))
+        return f"⚠️ Miktar hesaplanamadı: {note}"
+
+    if entry_price > 0 and stop_price > 0:
+        pct = abs(entry_price - stop_price) / entry_price * 100
+        return (f"📏 Stop mesafesi: %{pct:.2f} ({entry_price:.2f} → {stop_price:.2f}) — "
+                f"pozisyon büyüklüğünü kendi riskine göre ayarla")
+    return "📏 Stop mesafesi hesaplanamadı"
+
+
+def compute_position_size(market: str, entry_price: float, stop_price: float):
+    """(adet, risk_tutari, para_birimi, uyari_notu) doner.
+    adet=0 ise sinyal yine gonderilir ama miktar hesaplanamamis demektir."""
+    balance = _balance_for(market)
+    currency = "TL" if market == "BIST" else "$"
+    if balance is None:
+        return 0, 0.0, currency, "portföy bakiyesi ayarlı değil"
+
+    stop_distance = abs(entry_price - stop_price)
+    if stop_distance <= 0 or entry_price <= 0:
+        return 0, 0.0, currency, "stop mesafesi hesaplanamadı"
+
+    risk_amount = balance * (RISK_PER_TRADE_PCT / 100)
+    qty_by_risk = risk_amount / stop_distance
+
+    # Pozisyon buyuklugu tavani (kaldirac yok, nakit alim varsayimi)
+    max_position_value = balance * (MAX_POSITION_PCT_OF_BALANCE / 100)
+    qty_by_cap = max_position_value / entry_price
+
+    qty = int(min(qty_by_risk, qty_by_cap))
+    note = ""
+    if qty <= 0:
+        return 0, risk_amount, currency, "hesaplanan miktar 1 adetin altında (stop çok geniş ya da bakiye küçük)"
+    if qty_by_cap < qty_by_risk:
+        note = f"pozisyon tavanı (%{MAX_POSITION_PCT_OF_BALANCE:.0f}) devrede"
+    return qty, risk_amount, currency, note
+
+
+# ---------------------------------------------------------------------------
 # Veri ve indikatorler
 # ---------------------------------------------------------------------------
 
-def fetch_daily_df(ticker: str, period: str = "6mo") -> pd.DataFrame:
-    df = yf.Ticker(ticker).history(period=period, interval="1d")
+YF_TIMEOUT_SECONDS = int(os.environ.get("YF_TIMEOUT_SECONDS", "20"))
+_EXPECTED_COLS = ["timestamp", "open", "high", "low", "close", "volume"]
+
+
+def _normalize_df(df: pd.DataFrame) -> pd.DataFrame:
+    """yfinance bazen beklenen kolonlari eksik/farkli isimle dondurebiliyor -
+    burada tek yerde normalize edip, eksikse bos DataFrame donuyoruz ki
+    cagiran taraf 'yetersiz veri' olarak sessizce atlasin (KeyError ile
+    tarama komple cokmesin)."""
+    if df is None or df.empty:
+        return pd.DataFrame(columns=_EXPECTED_COLS)
     df = df.reset_index()
     df = df.rename(columns={
-        "Date": "timestamp", "Open": "open", "High": "high",
-        "Low": "low", "Close": "close", "Volume": "volume",
+        "Datetime": "timestamp", "Date": "timestamp", "index": "timestamp",
+        "Open": "open", "High": "high", "Low": "low",
+        "Close": "close", "Volume": "volume",
     })
-    return df[["timestamp", "open", "high", "low", "close", "volume"]]
+    if not all(c in df.columns for c in _EXPECTED_COLS):
+        return pd.DataFrame(columns=_EXPECTED_COLS)
+    return df[_EXPECTED_COLS]
+
+
+def fetch_daily_df(ticker: str, period: str = "6mo") -> pd.DataFrame:
+    try:
+        df = yf.Ticker(ticker).history(period=period, interval="1d",
+                                       timeout=YF_TIMEOUT_SECONDS)
+    except TypeError:
+        # Eski yfinance surumlerinde timeout parametresi yok
+        df = yf.Ticker(ticker).history(period=period, interval="1d")
+    return _normalize_df(df)
 
 
 def fetch_intraday_df(ticker: str, interval: str = "15m", period: str = "5d") -> pd.DataFrame:
-    df = yf.Ticker(ticker).history(period=period, interval=interval)
-    df = df.reset_index()
-    # yfinance intraday index kolonu "Datetime" olarak gelir
-    df = df.rename(columns={
-        "Datetime": "timestamp", "Date": "timestamp", "Open": "open", "High": "high",
-        "Low": "low", "Close": "close", "Volume": "volume",
-    })
-    return df[["timestamp", "open", "high", "low", "close", "volume"]]
+    try:
+        df = yf.Ticker(ticker).history(period=period, interval=interval,
+                                       timeout=YF_TIMEOUT_SECONDS)
+    except TypeError:
+        df = yf.Ticker(ticker).history(period=period, interval=interval)
+    return _normalize_df(df)
 
 
 def compute_indicators(df: pd.DataFrame, rsi_period: int = RSI_PERIOD) -> pd.DataFrame:
@@ -371,10 +692,163 @@ def check_us_candidate_confirmation(ticker: str, df: pd.DataFrame):
 # Loglama
 # ---------------------------------------------------------------------------
 
-SIGNAL_LOG_FILE = "stock_signal_history.csv"
+SIGNAL_LOG_FILE = _data_path("stock_signal_history.csv")
 
-US_SWING_PENDING_FILE = "us_swing_pending.csv"
-US_SWING_OUTCOME_FILE = "us_swing_outcomes.csv"
+# ---------------------------------------------------------------------------
+# 3. KATMAN: HİBRİT ÇIKIŞ UYARI SİSTEMİ
+# ---------------------------------------------------------------------------
+# Bot islem acmadigi icin burada "pozisyon yonetimi" degil, EMİR TALİMATI
+# uretiliyor. Sinyal verilen her hisse takibe alinir ve fiyat seviyelere
+# geldikce Telegram'a ne yapmasi gerektigi yazilir:
+#   1.5R  -> "%50 sat + stop'u girise cek"
+#   sonra -> ATR trailing stop seviyesi guncellendikce uyari
+#   stop  -> "stop seviyesi gecildi, cik"
+# Onemli: bu takip yalnizca UYARI verir; gercekte islemi kullanici yapar,
+# bu yuzden bot "kapandi" varsaymaz - kullanici /iptal ile dusurene ya da
+# stop/son hedef tetiklenene kadar takipte tutar.
+
+TRACKING_FILE = _data_path("signal_tracking.csv")
+TRACKING_FIELDNAMES = [
+    "ticker", "market", "strategy", "direction", "entry_price", "stop_price",
+    "tp_price", "entry_time", "qty", "partial_done", "trail_stop", "closed",
+]
+PARTIAL_TP_R_MULT = float(os.environ.get("PARTIAL_TP_R_MULT", "1.5"))
+TRAIL_ATR_MULT = float(os.environ.get("TRAIL_ATR_MULT", "2.0"))
+# Trailing stop her kucuk oynamada mesaj atmasin - en az bu kadar iyilesme sart.
+TRAIL_MIN_MOVE_PCT = float(os.environ.get("TRAIL_MIN_MOVE_PCT", "1.0"))
+
+
+def _read_tracking():
+    if not os.path.isfile(TRACKING_FILE):
+        return []
+    with open(TRACKING_FILE, newline="") as f:
+        return [r for r in csv.DictReader(f) if r.get("closed") != "1"]
+
+
+def _write_tracking(rows):
+    with open(TRACKING_FILE, "w", newline="") as f:
+        writer = csv.DictWriter(f, fieldnames=TRACKING_FIELDNAMES)
+        writer.writeheader()
+        for r in rows:
+            writer.writerow({k: r.get(k, "") for k in TRACKING_FIELDNAMES})
+
+
+def track_new_signal(ticker, market, strategy, direction, entry_price, stop_price, tp_price, qty):
+    rows = _read_tracking()
+    # Ayni hissede ayni yonde zaten acik takip varsa tekrar ekleme.
+    for r in rows:
+        if r["ticker"] == ticker and r["direction"] == direction:
+            return
+    rows.append({
+        "ticker": ticker, "market": market, "strategy": strategy, "direction": direction,
+        "entry_price": entry_price, "stop_price": stop_price, "tp_price": tp_price,
+        "entry_time": datetime.now().isoformat(), "qty": qty,
+        "partial_done": "0", "trail_stop": "", "closed": "0",
+    })
+    _write_tracking(rows)
+    # Gemini'nin istegi (2026-07-28): CSV kaybolursa takip zinciri kopmasin diye
+    # her takibe alma Telegram'a da log dusuyor - boylece kullanicinin elinde
+    # her zaman seviyelerin yazili bir kaydi kalir.
+    send_telegram_message(
+        f"📋 [TAKİBE ALINDI] {ticker} ({direction}) — {market} / {strategy}\n"
+        f"Giriş: {entry_price:.2f} | 🛑 Stop: {stop_price:.2f} | 🎯 TP: {tp_price:.2f} | Adet: {qty}\n"
+        f"(Bu kayıt sistem sıfırlansa bile elinde kalsın diye gönderildi.)"
+    )
+
+
+def check_exit_alerts():
+    """Takipteki her sinyal icin guncel fiyati kontrol edip gerekirse
+    Telegram'a EMİR TALİMATI gonderir."""
+    rows = _read_tracking()
+    if not rows:
+        return
+
+    still_open = []
+    for r in rows:
+        ticker = r["ticker"]
+        try:
+            direction = r["direction"]
+            entry = float(r["entry_price"])
+            stop = float(r["stop_price"])
+            tp = float(r["tp_price"])
+            partial_done = r.get("partial_done") == "1"
+            trail_stop = float(r["trail_stop"]) if r.get("trail_stop") else None
+
+            df = fetch_daily_df(ticker, period="3mo")
+            if df.empty:
+                still_open.append(r)
+                continue
+            df = compute_indicators(df)
+            last = df.iloc[-1]
+            price = float(last["close"])
+            atr = float(last["atr14"]) if not pd.isna(last["atr14"]) else None
+
+            effective_stop = trail_stop if trail_stop is not None else stop
+            stopped = (price <= effective_stop) if direction == "LONG" else (price >= effective_stop)
+            if stopped:
+                pct = ((price - entry) / entry * 100) * (1 if direction == "LONG" else -1)
+                if trail_stop is None:
+                    label = "STOP"
+                elif abs(trail_stop - entry) < 1e-9:
+                    label = "BREAKEVEN"
+                else:
+                    label = "TRAILING STOP"
+                send_telegram_message(
+                    f"🛑 [{label}] {ticker} ({direction})\n"
+                    f"Fiyat {price:.2f}, stop seviyesi {effective_stop:.2f} geçildi.\n"
+                    f"➡️ POZİSYONU KAPAT.\n"
+                    f"Giriş: {entry:.2f} | Sonuç: {pct:+.2f}%"
+                )
+                r["closed"] = "1"
+                continue
+
+            if not partial_done:
+                tp_hit = (price >= tp) if direction == "LONG" else (price <= tp)
+                if tp_hit:
+                    pct = ((price - entry) / entry * 100) * (1 if direction == "LONG" else -1)
+                    qty = r.get("qty", "")
+                    half = ""
+                    try:
+                        half = f" (~{int(int(qty) / 2)} adet)"
+                    except Exception:
+                        pass
+                    send_telegram_message(
+                        f"🎯 [PARSİYEL TP] {ticker} ({direction}) {PARTIAL_TP_R_MULT}R seviyesine ulaştı!\n"
+                        f"Fiyat: {price:.2f} | Giriş: {entry:.2f} | Kâr: {pct:+.2f}%\n"
+                        f"➡️ %50 SATIŞ YAP{half} ve STOP'U GİRİŞE ({entry:.2f}) ÇEK!"
+                    )
+                    r["partial_done"] = "1"
+                    r["trail_stop"] = str(entry)  # breakeven
+                    still_open.append(r)
+                    continue
+
+            # Parsiyel alindiysa ATR trailing stop uyarisi
+            if partial_done and atr:
+                if direction == "LONG":
+                    candidate = price - atr * TRAIL_ATR_MULT
+                    improved = trail_stop is None or candidate > trail_stop * (1 + TRAIL_MIN_MOVE_PCT / 100)
+                else:
+                    candidate = price + atr * TRAIL_ATR_MULT
+                    improved = trail_stop is None or candidate < trail_stop * (1 - TRAIL_MIN_MOVE_PCT / 100)
+                if improved:
+                    send_telegram_message(
+                        f"📈 [TRAILING STOP GÜNCELLE] {ticker} ({direction})\n"
+                        f"Fiyat: {price:.2f} | Trend devam ediyor.\n"
+                        f"➡️ STOP'U {candidate:.2f} SEVİYESİNE ÇEK ({TRAIL_ATR_MULT}×ATR)."
+                    )
+                    r["trail_stop"] = str(candidate)
+
+            still_open.append(r)
+
+        except Exception as e:
+            dedektif_report("çıkış takibi", e, ticker)
+            still_open.append(r)
+
+    _write_tracking(still_open)
+
+
+US_SWING_PENDING_FILE = _data_path("us_swing_pending.csv")
+US_SWING_OUTCOME_FILE = _data_path("us_swing_outcomes.csv")
 
 # (gun_sayisi, etiket, hedef_yuzde) - turnuvadaki BIST_CHECKPOINTS ile ayni yapida
 US_SWING_CHECKPOINTS = [(1, "1g", 1.0), (3, "3g", 2.0), (5, "5g", 3.0), (10, "10g", 5.0)]
@@ -499,6 +973,16 @@ def scan_us_swing(tickers: list):
 
     check_us_swing_outcomes()
 
+    # 1. KATMAN: Piyasa Beyni (SPY endeksi) - yonlendirici filtre
+    allowed, allowed_direction, regime, regime_note = market_scan_allowed("ABD")
+    if not allowed:
+        send_telegram_message(
+            f"⏸️ [PİYASA BEYNİ] ABD swing: piyasa gürültülü (YATAY), hisse taraması durduruldu.\n"
+            f"SPY rejimi: {regime} ({regime_note})"
+        )
+        print(f"ABD swing: rejim {regime} - tarama atlandi")
+        return
+
     today = datetime.now(ZoneInfo("America/New_York")).date()
     results = []
 
@@ -521,23 +1005,42 @@ def scan_us_swing(tickers: list):
                     continue
 
                 direction, row = gate_result
+                if allowed_direction and direction != allowed_direction:
+                    print(f"{ticker}: {direction} sinyali rejim ({regime}) ile uyusmuyor, atlandi")
+                    continue
                 if direction in fired_directions:
                     continue
                 fired_directions.add(direction)
 
-                entry_price = row["close"]
+                entry_price = float(row["close"])
                 detail = (f"Hacim Z-Skor: {row['vol_zscore']:.2f}" if strategy_name == "Hacim Z-Skor"
                           else f"ATR: {row['atr14']:.2f}, hareket: {row['close'] - df.iloc[-2]['close']:+.2f}")
 
                 log_signal(ticker, "ABD-swing", strategy_name, direction, row, [detail])
                 log_us_swing_pending(ticker, strategy_name, direction, entry_price, today)
 
+                # 2. KATMAN: Portfoy Beyni (bakiye ayarliysa adet, degilse stop mesafesi)
+                stop_price = compute_invalidation(direction, row)
+                stop_distance = abs(entry_price - stop_price)
+                tp_price = (entry_price + stop_distance * PARTIAL_TP_R_MULT if direction == "LONG"
+                            else entry_price - stop_distance * PARTIAL_TP_R_MULT)
+                emir = sizing_line("ABD", entry_price, stop_price)
+
+                # 3. KATMAN: cikis uyarilari icin takibe al.
+                # ONEMLI: takip, pozisyon boyutundan BAGIMSIZ olmali - bakiye
+                # ayarli olmasa bile parsiyel TP / stop uyarilari gelmeli.
+                qty_for_tracking, _, _, _ = compute_position_size("ABD", entry_price, stop_price)
+                if stop_distance > 0:
+                    track_new_signal(ticker, "ABD", strategy_name, direction,
+                                     entry_price, stop_price, tp_price, qty_for_tracking)
+
                 checkpoint_text = " / ".join(f"{label}(%{target})" for _, label, target in US_SWING_CHECKPOINTS)
                 results.append(
                     f"{'🟢 LONG' if direction == 'LONG' else '🔴 SHORT'} {ticker} [{strategy_name}]\n"
                     f"Giriş: {entry_price:.2f} | {detail}\n"
+                    f"{emir}\n"
+                    f"🛑 Stop: {stop_price:.2f} | 🎯 Parsiyel TP ({PARTIAL_TP_R_MULT}R): {tp_price:.2f}\n"
                     f"Checkpoint hedefleri: {checkpoint_text}\n"
-                    f"İlk tutan hedefte kapanmış sayılır, en geç 10 günde değerlendirme gelir.\n"
                 )
 
             if not fired_directions:
@@ -545,17 +1048,21 @@ def scan_us_swing(tickers: list):
 
         except Exception as e:
             print(f"{ticker} hata: {e}")
+            dedektif_report("ABD swing taramasi", e, ticker)
 
     if results:
-        msg = "📊 ABD Swing Sinyalleri\n\n" + "\n".join(results)
+        msg = (f"📊 ABD Swing Sinyalleri\n"
+               f"🧠 Piyasa rejimi: {regime} ({regime_note})\n\n" + "\n".join(results))
+        if PORTFOLIO_BALANCE_USD is not None:
+            msg += "\n" + OPTIONS_SIZING_NOTE
         print(msg)
         send_telegram_message(msg)
     else:
         print("ABD swing: bugun kriterlere uyan hisse bulunamadi")
 
 
-US_GUNICI_PENDING_FILE = "us_gunici_pending.csv"
-US_GUNICI_OUTCOME_FILE = "us_gunici_outcomes.csv"
+US_GUNICI_PENDING_FILE = _data_path("us_gunici_pending.csv")
+US_GUNICI_OUTCOME_FILE = _data_path("us_gunici_outcomes.csv")
 
 # (dakika, etiket, hedef_yuzde) - genisletilmis turnuvadaki US_CHECKPOINTS ile ayni
 US_GUNICI_CHECKPOINTS = [
@@ -676,9 +1183,26 @@ def check_us_gunici_outcomes():
 
 
 def scan_us_gunici(tickers: list):
+    global _last_gunici_halt_regime
     print(f"\n[{datetime.now().strftime('%H:%M:%S')}] ABD gun ici (RSI21) taramasi basliyor...")
 
     check_us_gunici_outcomes()
+
+    # 1. KATMAN: Piyasa Beyni. Bu tarama gun icinde sik calistigi icin
+    # her seferinde "durduruldu" mesaji atmak spam olur - rejim degisimi
+    # oldugunda bir kez haber verip sonra sessizce atliyoruz.
+    allowed, allowed_direction, regime, regime_note = market_scan_allowed("ABD")
+    if not allowed:
+        if _last_gunici_halt_regime != regime:
+            send_telegram_message(
+                f"⏸️ [PİYASA BEYNİ] ABD gün içi: piyasa gürültülü (YATAY), tarama durduruldu.\n"
+                f"SPY rejimi: {regime} ({regime_note})\n"
+                f"Rejim düzelene kadar gün içi sinyal üretilmeyecek."
+            )
+            _last_gunici_halt_regime = regime
+        print(f"ABD gun ici: rejim {regime} - tarama atlandi")
+        return
+    _last_gunici_halt_regime = None
 
     now_ny = datetime.now(ZoneInfo("America/New_York"))
     results = []
@@ -697,6 +1221,9 @@ def scan_us_gunici(tickers: list):
                 continue
 
             direction, row = gate_result
+            if allowed_direction and direction != allowed_direction:
+                print(f"{ticker}: {direction} sinyali rejim ({regime}) ile uyusmuyor, atlandi")
+                continue
             entry_price = row["close"]
 
             log_signal(ticker, "ABD-gunici", "RSI21", direction, row, [f"RSI21: {row['rsi21']:.1f}"])
@@ -707,14 +1234,17 @@ def scan_us_gunici(tickers: list):
                 f"{'🟢 LONG' if direction == 'LONG' else '🔴 SHORT'} {ticker} [RSI21, sinyal-amaçlı]\n"
                 f"Giriş: {entry_price:.2f} | RSI21: {row['rsi21']:.1f}\n"
                 f"Checkpoint hedefleri: {checkpoint_text}\n"
+                f"⚡ Gün içi hızlı sinyal - Manuel takip önerilir.\n"
                 f"Not: bu HAM fiyat hareketi test ediyor, otomatik işlem yapmıyor — kendi opsiyon maliyetine göre değerlendir.\n"
             )
 
         except Exception as e:
             print(f"{ticker} hata: {e}")
+            dedektif_report("ABD gün içi taramasi", e, ticker)
 
     if results:
-        msg = "📊 ABD Gün İçi - RSI21 Sinyalleri (test amaçlı)\n\n" + "\n".join(results)
+        msg = (f"📊 ABD Gün İçi - RSI21 Sinyalleri (test amaçlı)\n"
+               f"🧠 Piyasa rejimi: {regime} ({regime_note})\n\n" + "\n".join(results))
         print(msg)
         send_telegram_message(msg)
     else:
@@ -741,6 +1271,17 @@ def log_signal(ticker: str, market: str, strategy: str, direction: str, row, bre
 
 def scan_bist(tickers: list, market_label: str):
     print(f"\n[{datetime.now().strftime('%H:%M:%S')}] {market_label} taramasi basliyor...")
+
+    # 1. KATMAN: Piyasa Beyni - rejim artik taramayi durdurmak yerine yonlendirir.
+    allowed, allowed_direction, regime, regime_note = market_scan_allowed("BIST")
+    if not allowed:
+        send_telegram_message(
+            f"⏸️ [PİYASA BEYNİ] {market_label}: piyasa gürültülü (YATAY), hisse taraması durduruldu.\n"
+            f"Endeks rejimi: {regime} ({regime_note})"
+        )
+        print(f"{market_label}: rejim {regime} - tarama atlandi")
+        return
+
     results = []
 
     for ticker in tickers:
@@ -762,6 +1303,11 @@ def scan_bist(tickers: list, market_label: str):
                     continue
 
                 direction, row = gate_result
+                # Rejim yon filtresi: yukselen piyasada sadece LONG, dusen
+                # piyasada sadece SHORT sinyali gecerli sayilir.
+                if allowed_direction and direction != allowed_direction:
+                    print(f"{ticker}: {direction} sinyali rejim ({regime}) ile uyusmuyor, atlandi")
+                    continue
                 # ayni ticker'da ayni yonde iki strateji birden tetiklenirse tekrar mesaj atma
                 if direction in fired_directions:
                     continue
@@ -780,13 +1326,32 @@ def scan_bist(tickers: list, market_label: str):
                 invalidation = compute_invalidation(direction, row)
                 log_signal(ticker, market_label, strategy_name, direction, row, breakdown)
 
+                # 2. KATMAN: Portfoy Beyni (bakiye ayarliysa adet, degilse stop mesafesi)
+                entry_price = float(row["close"])
+
+                # 1.5R parsiyel TP seviyesi
+                stop_distance = abs(entry_price - invalidation)
+                tp_price = (entry_price + stop_distance * PARTIAL_TP_R_MULT if direction == "LONG"
+                            else entry_price - stop_distance * PARTIAL_TP_R_MULT)
+                emir = sizing_line("BIST", entry_price, invalidation)
+
+                # 3. KATMAN: cikis uyarilari icin takibe al.
+                # ONEMLI: takip, pozisyon boyutundan BAGIMSIZ olmali - bakiye
+                # ayarli olmasa bile parsiyel TP / stop uyarilari gelmeli.
+                qty_for_tracking, _, _, _ = compute_position_size("BIST", entry_price, invalidation)
+                if stop_distance > 0:
+                    track_new_signal(ticker, "BIST", strategy_name, direction,
+                                     entry_price, invalidation, tp_price, qty_for_tracking)
+
                 results.append({
                     "ticker": ticker,
                     "strategy": strategy_name,
                     "direction": direction,
-                    "price": row["close"],
+                    "price": entry_price,
                     "rsi": row["rsi"],
                     "invalidation": invalidation,
+                    "tp_price": tp_price,
+                    "emir": emir,
                     "breakdown": breakdown,
                 })
 
@@ -795,23 +1360,44 @@ def scan_bist(tickers: list, market_label: str):
 
         except Exception as e:
             print(f"{ticker} hata: {e}")
+            dedektif_report(f"{market_label} taramasi", e, ticker)
 
     if results:
-        lines = [f"📊 {market_label} - Kapanışa Yakın Tarama Sonuçları\n"]
+        lines = [
+            f"📊 {market_label} - Kapanışa Yakın Tarama Sonuçları",
+            f"🧠 Piyasa rejimi: {regime} ({regime_note})\n",
+        ]
         for r in results:
-            yon_emoji = "🟢 LONG" if r["direction"] == "LONG" else "🔴 SHORT"
+            if r["direction"] == "SHORT":
+                # Gemini'nin karari: BIST'te aciga satis bireysel yatirimci icin
+                # pratikte yok - sinyali gizlemek yerine ne ise yarayacagini
+                # acikca yaziyoruz.
+                baslik = f"🔴 [BIST - BİLGİ AMAÇLI SHORT] {r['ticker']} [{r['strategy']}]"
+                short_note = ("ℹ️ Varant/VİOP tarafında Put pozisyonu veya eldeki hisse için "
+                              "kâr alma/stop uyarısıdır.\n")
+            else:
+                baslik = f"🟢 LONG {r['ticker']} [{r['strategy']}]"
+                short_note = ""
+
             lines.append(
-                f"{yon_emoji} {r['ticker']} [{r['strategy']}]\n"
+                f"{baslik}\n"
+                f"{short_note}"
                 f"Fiyat: {r['price']:.2f} | RSI: {r['rsi']:.1f}\n"
-                f"Geçersizlik seviyesi: {r['invalidation']:.2f}\n"
+                f"{r['emir']}\n"
+                f"🛑 Stop: {r['invalidation']:.2f} | 🎯 Parsiyel TP ({PARTIAL_TP_R_MULT}R): {r['tp_price']:.2f}\n"
                 f"{' | '.join(r['breakdown'])}\n"
             )
+        if PORTFOLIO_BALANCE_TRY is not None:
+            lines.append(OPTIONS_SIZING_NOTE)
         msg = "\n".join(lines)
         print(msg)
         send_telegram_message(msg)
     else:
         print(f"{market_label}: bugun kriterlere uyan hisse bulunamadi")
-        send_telegram_message(f"📊 {market_label}: bugün kriterlere uyan hisse bulunamadı.")
+        send_telegram_message(
+            f"📊 {market_label}: bugün kriterlere uyan hisse bulunamadı.\n"
+            f"🧠 Piyasa rejimi: {regime} ({regime_note})"
+        )
 
 
 def scan_us_intraday():
@@ -882,6 +1468,59 @@ def scan_us_intraday():
             print(f"{ticker} hata: {e}")
 
 
+def validate_tickers(tickers: list, label: str) -> list:
+    """Acilista her kodu bir kez test eder, veri gelmeyenleri listeden eler.
+    Kripto botundaki load_markets() filtresinin bu bota uyarlanmis hali.
+    Gerekce: BIST100 icerigi uc ayda bir degisiyor ve elle tutulan bir liste
+    kacinilmaz olarak eskiyor - dogrulama olmadan her taramada ayni olu kod
+    icin hata uretilir. Boylece tek seferlik bir ozet uyari aliyoruz."""
+    valid, dead = [], []
+    for t in tickers:
+        try:
+            df = fetch_daily_df(t, period="1mo")
+            if df.empty or len(df) < 5:
+                dead.append(t)
+            else:
+                valid.append(t)
+        except Exception:
+            dead.append(t)
+        time.sleep(0.15)  # yfinance'i yormamak icin nazik bir ara
+
+    if dead:
+        send_telegram_message(
+            f"⚠️ [TICKER DOĞRULAMA] {label}: {len(dead)} kod için veri alınamadı, "
+            f"taramadan çıkarıldı.\n"
+            f"{', '.join(d.replace('.IS', '') for d in dead)}\n"
+            f"(Endeksten çıkmış ya da kodu değişmiş olabilir — listeyi güncellemek isteyebilirsin.)"
+        )
+    print(f"{label}: {len(valid)} gecerli, {len(dead)} elendi")
+    return valid
+
+
+def bist_is_open(now_ist=None) -> bool:
+    """BIST seans saatleri: hafta ici 10:00-18:10 (Istanbul). Tatil gunleri
+    takvimi burada tutulmuyor - tatilde yfinance zaten bos veri doner ve
+    Dedektif'in bogucu sayesinde spam olusmaz."""
+    now = now_ist or datetime.now(ZoneInfo("Europe/Istanbul"))
+    if now.weekday() >= 5:
+        return False
+    minutes = now.hour * 60 + now.minute
+    return (10 * 60) <= minutes < (18 * 60 + 10)
+
+
+def us_is_open(now_ny=None) -> bool:
+    """ABD seans saatleri: hafta ici 09:30-16:00 (New York)."""
+    now = now_ny or datetime.now(ZoneInfo("America/New_York"))
+    if now.weekday() >= 5:
+        return False
+    minutes = now.hour * 60 + now.minute
+    return (9 * 60 + 30) <= minutes < (16 * 60)
+
+
+def any_market_open() -> bool:
+    return bist_is_open() or us_is_open()
+
+
 # ---------------------------------------------------------------------------
 # Zamanlama
 # ---------------------------------------------------------------------------
@@ -892,19 +1531,58 @@ def _within_window(now, target_hour, target_minute, window_minutes):
     return 0 <= (now_total - target_total) < window_minutes
 
 
+EXIT_CHECK_INTERVAL_MINUTES = int(os.environ.get("EXIT_CHECK_INTERVAL_MINUTES", "30"))
+_last_exit_check_time = None
+
+
 def run_forever():
     global _last_bist_run_date, _last_us_swing_run_date, _last_us_gunici_scan_time
+    global _last_exit_check_time
+    global BIST_TICKERS, US_TICKERS, US_INTRADAY_TICKERS
+
+    print("Ticker dogrulamasi basliyor (bir kez, acilista)...")
+    BIST_TICKERS = validate_tickers(BIST_TICKERS, "BIST")
+    US_TICKERS = validate_tickers(US_TICKERS, "ABD swing")
+    US_INTRADAY_TICKERS = validate_tickers(US_INTRADAY_TICKERS, "ABD gün içi")
+
+    storage_warning = ""
+    if DATA_DIR == ".":
+        storage_warning = (
+            "\n\n⚠️ DİKKAT: Kalıcı depolama (Railway Volume) ayarlı değil — "
+            "her re-deploy'da takip kayıtları silinir. Railway'de Volume ekleyip "
+            "DATA_DIR=/data ayarlaman önerilir. (Takibe alınan her sinyal ayrıca "
+            "Telegram'a loglanıyor, yani kayıt tamamen kaybolmaz.)"
+        )
+
+    if PORTFOLIO_BALANCE_TRY is not None or PORTFOLIO_BALANCE_USD is not None:
+        bist_bal = f"{PORTFOLIO_BALANCE_TRY:,.0f} TL" if PORTFOLIO_BALANCE_TRY is not None else "ayarsız"
+        usd_bal = f"{PORTFOLIO_BALANCE_USD:,.0f} $" if PORTFOLIO_BALANCE_USD is not None else "ayarsız"
+        portfoy_satiri = (
+            f"💰 Portföy: BIST {bist_bal} / ABD {usd_bal} | "
+            f"işlem başı risk %{RISK_PER_TRADE_PCT} | pozisyon tavanı %{MAX_POSITION_PCT_OF_BALANCE}\n"
+        )
+    else:
+        portfoy_satiri = (
+            "📏 Portföy bakiyesi ayarlanmadı — sinyallerde adet yerine stop mesafesi (%) gösterilecek, "
+            "pozisyon büyüklüğü kararı sende.\n"
+        )
 
     send_telegram_message(
-        "BIST + ABD hisse tarama botu baslatildi.\n"
-        f"BIST: {len(BIST_TICKERS)} hisse, her gun ~{BIST_CHECK_HOUR:02d}:{BIST_CHECK_MINUTE:02d} (Istanbul) taranacak.\n"
-        f"İki strateji paralel: Fitil+RSI+Hacim (mevcut) + Sadece RSI (turnuvada test edilmiş 2. kol).\n\n"
-        f"ABD gün içi: {len(US_TICKERS)} hisse, piyasa açıkken sürekli taranacak. Strateji: RSI21 asırı uç "
-        f"(genişletilmiş turnuvada en yüksek HAM edge, ama komisyon sonrası hisse bazında hafif zararlı — "
-        f"SİNYAL AMAÇLI, otomatik işlem yapmıyor, kendi opsiyon maliyetine göre değerlendir).\n\n"
-        f"ABD swing (günlük): ABD kapanışından sonra (~{US_SWING_CHECK_HOUR:02d}:{US_SWING_CHECK_MINUTE:02d} New York) "
-        f"taranacak. İki strateji: Hacim Z-Skor + ATR Kırılımı (genişletilmiş turnuvada yeni lider, +%0.749 ort. net). "
-        f"Checkpoint bazlı takip var, kripto botundaki gibi."
+        "🚀 BIST + ABD hisse tarama botu (4 KATMANLI MİMARİ) başlatıldı.\n"
+        "1️⃣ Piyasa Beyni | 2️⃣ Portföy/Risk Beyni | 3️⃣ Hibrit Çıkış Uyarıları | 4️⃣ Sistem Dedektifi\n\n"
+        f"🧠 Piyasa Beyni: BIST için XU100, ABD için SPY (ADX+EMA200). "
+        f"YÜKSELİŞ → sadece LONG, DÜŞÜŞ → sadece SHORT, YATAY → tarama durur.\n"
+        + portfoy_satiri +
+        f"🎯 Çıkış: {PARTIAL_TP_R_MULT}R'de %50 satış + breakeven uyarısı, sonra {TRAIL_ATR_MULT}×ATR trailing stop "
+        f"(her {EXIT_CHECK_INTERVAL_MINUTES} dk, sadece piyasa açıkken).\n\n"
+        f"BIST: {len(BIST_TICKERS)} hisse, her gün ~{BIST_CHECK_HOUR:02d}:{BIST_CHECK_MINUTE:02d} (İstanbul). "
+        f"İki strateji: Fitil+RSI+Hacim + Sadece RSI.\n"
+        f"ABD gün içi: {len(US_INTRADAY_TICKERS)} hisse (dar liste, 15 dk'da bir), piyasa açıkken. Strateji: RSI21 aşırı uç "
+        f"(SİNYAL AMAÇLI — kendi opsiyon maliyetine göre değerlendir).\n"
+        f"ABD swing: {len(US_TICKERS)} hisse, ABD kapanışından sonra (~{US_SWING_CHECK_HOUR:02d}:{US_SWING_CHECK_MINUTE:02d} New York). "
+        f"İki strateji: Hacim Z-Skor + ATR Kırılımı.\n\n"
+        f"⚠️ Bot işlem AÇMIYOR — sadece emir talimatı ve takip uyarısı gönderir."
+        + storage_warning
     )
 
     while True:
@@ -929,8 +1607,24 @@ def run_forever():
         if ny_now.weekday() < 5 and market_open <= ny_minutes < market_close:
             if (_last_us_gunici_scan_time is None or
                     (ny_now - _last_us_gunici_scan_time).total_seconds() >= US_GUNICI_SCAN_INTERVAL_MINUTES * 60):
-                scan_us_gunici(US_TICKERS)
+                scan_us_gunici(US_INTRADAY_TICKERS)
                 _last_us_gunici_scan_time = ny_now
+
+        # 3. KATMAN: acik sinyaller icin cikis uyarilarini kontrol et.
+        # Piyasa saatleri kontrolu (Gemini'nin istegi): iki piyasa da kapaliyken
+        # fiyat degismeyecegi icin yfinance'e istek atmak gereksiz - hem hiz
+        # limitini yer hem de bos veri yuzunden gereksiz hata uretir.
+        # NOT: bu kontrol SADECE cikis takibi icin - planli taramalarin kendi
+        # zaman pencereleri var ve ABD swing taramasi BILEREK piyasa
+        # kapandiktan sonra calisir, o yuzden onlari kapilamiyoruz.
+        if any_market_open():
+            if (_last_exit_check_time is None or
+                    (datetime.now() - _last_exit_check_time).total_seconds() >= EXIT_CHECK_INTERVAL_MINUTES * 60):
+                try:
+                    check_exit_alerts()
+                except Exception as e:
+                    dedektif_report("çıkış uyarı döngüsü", e)
+                _last_exit_check_time = datetime.now()
 
         time.sleep(LOOP_INTERVAL_SECONDS)
 
