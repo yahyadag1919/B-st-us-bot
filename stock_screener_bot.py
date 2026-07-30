@@ -1388,7 +1388,7 @@ def scan_bist_radar(tickers: list, label: str):
     send_telegram_message(msg)
 
 
-
+def scan_bist(tickers: list, market_label: str):
     print(f"\n[{datetime.now().strftime('%H:%M:%S')}] {market_label} taramasi basliyor...")
 
     # 1. KATMAN: Piyasa Beyni - rejim artik taramayi durdurmak yerine yonlendirir.
@@ -1707,12 +1707,41 @@ HEARTBEAT_HOUR = int(os.environ.get("HEARTBEAT_HOUR", "19"))
 _last_exit_check_time = None
 
 
+def _self_check():
+    """Acilista zorunlu fonksiyonlarin var oldugunu dogrular.
+
+    NEDEN VAR: bu projede tekrarlayan bir hata deseni var - buyuk bir
+    duzenleme sirasinda bir fonksiyonun 'def' satiri kazara silinip govdesi
+    bir onceki fonksiyona yapisiyor. Sozdizimi gecerli kaldigi icin
+    py_compile bunu YAKALAMAZ; hata ancak o fonksiyon cagrildigi anda
+    (ornegin gunun 17:35 taramasinda) NameError olarak ortaya cikiyor ve o
+    gunun sinyali kayboluyor. Bu kontrol boyle bir durumu aciliste, ilk
+    saniyede yakalar."""
+    required = [
+        "scan_bist", "scan_bist_radar", "scan_us_swing", "scan_us_gunici",
+        "check_exit_alerts", "track_new_signal", "market_scan_allowed",
+        "compute_indicators", "compute_invalidation", "sizing_line",
+        "validate_tickers", "should_run_daily_scan", "mark_daily_scan_done",
+    ]
+    missing = [name for name in required
+               if not callable(globals().get(name))]
+    if missing:
+        msg = ("🚨 [BAŞLATMA HATASI] Şu fonksiyonlar bulunamadı: "
+               + ", ".join(missing)
+               + "\nKod bozulmuş olabilir (silinmiş def satırı?) — bot güvenli şekilde durduruluyor.")
+        print(msg)
+        send_telegram_message(msg)
+        raise SystemExit(1)
+    print(f"Oz-kontrol tamam: {len(required)} zorunlu fonksiyon yerinde.")
+
+
 def run_forever():
     global _last_us_gunici_scan_time
     global _last_exit_check_time
     global BIST_TICKERS, US_TICKERS, US_INTRADAY_TICKERS
 
     print("Ticker dogrulamasi basliyor (bir kez, acilista)...")
+    _self_check()
     BIST_TICKERS = validate_tickers(BIST_TICKERS, "BIST")
     US_TICKERS = validate_tickers(US_TICKERS, "ABD swing")
     US_INTRADAY_TICKERS = validate_tickers(US_INTRADAY_TICKERS, "ABD gün içi")
