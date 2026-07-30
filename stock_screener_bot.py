@@ -1,5 +1,6 @@
 import os
 import csv
+import json
 import time
 from datetime import datetime, date
 from zoneinfo import ZoneInfo
@@ -107,8 +108,9 @@ US_SWING_CHECK_HOUR, US_SWING_CHECK_MINUTE = 16, 5  # America/New_York, ABD kapa
 CHECK_WINDOW_MINUTES = 5
 LOOP_INTERVAL_SECONDS = 120                        # her 2 dakikada bir kontrol
 
-_last_bist_run_date = None
-_last_us_swing_run_date = None
+# Planli taramalarin son calisma tarihi artik RAM'de degil, DATA_DIR icindeki
+# run_state.json'da tutuluyor (bkz. should_run_daily_scan) - yeniden
+# baslatmalarda kaybolmasin diye.
 _last_us_gunici_scan_time = None
 # Piyasa Beyni gun ici tarama durdurma bildirimi icin - ayni rejimde tekrar
 # tekrar "durduruldu" mesaji atmamak icin son bildirilen rejimi hatirlar.
@@ -1269,7 +1271,124 @@ def log_signal(ticker: str, market: str, strategy: str, direction: str, row, bre
 # Tarama
 # ---------------------------------------------------------------------------
 
-def scan_bist(tickers: list, market_label: str):
+# ---------------------------------------------------------------------------
+# GÜN İÇİ ÖN UYARI (RADAR) TARAMASI — B/C hibrit modeli
+# ---------------------------------------------------------------------------
+# Gemini'nin karari (2026-07-30): gunluk stratejilerin istatistiksel gucunu
+# korumak icin KESIN sinyal yine SADECE kapanmis bar ile (17:35 taramasi)
+# uretilir. Bu radar taramasi seans ortasinda calisir, sartlar OLUSMAKTA olan
+# gunluk mumda saglaniyorsa "ON UYARI" gonderir.
+#
+# KRITIK AYRIM - bu radar bilerek sunlari YAPMAZ:
+#   * track_new_signal cagirmaz  -> cikis takibine girmez (takip sadece teyit
+#     edilmis sinyaller icin; yoksa kapanista gecersizlesen bir kurulum
+#     sonsuza kadar takipte kalirdi)
+#   * pozisyon boyutu / EMIR satiri basmaz -> emir talimati degil, radar
+#   * turnuva istatistikleri (%78.2) bu uyarilar icin GECERLI DEGILDIR, cunku
+#     kapanmamis mum uzerinde olculuyor. Mesajda bu acikca yazili.
+BIST_RADAR_TIMES = [(13, 0), (15, 30)]  # Europe/Istanbul
+
+
+def _radar_alert_key(now) -> str:
+    return f"radar_alerts_{now.date().isoformat()}"
+
+
+def _already_radar_alerted(now, ticker: str, direction: str) -> bool:
+    """Ayni hisse+yon icin gunde bir kez uyarir. 13:00 ve 15:30 taramalarinin
+    ayni kurulumu iki kez bildirmesini onler; ayrica diske yazildigi icin
+    yeniden baslatma da tekrar uyariya yol acmaz."""
+    state = _load_run_state()
+    return f"{ticker}|{direction}" in state.get(_radar_alert_key(now), [])
+
+
+def _mark_radar_alerted(now, ticker: str, direction: str):
+    state = _load_run_state()
+    key = _radar_alert_key(now)
+    alerted = state.get(key, [])
+    alerted.append(f"{ticker}|{direction}")
+    # Sadece bugunun listesini tut - eski gunlerin kayitlari birikmesin.
+    state = {k: v for k, v in state.items() if not k.startswith("radar_alerts_") or k == key}
+    state[key] = alerted
+    _save_run_state(state)
+
+
+def scan_bist_radar(tickers: list, label: str):
+    now = datetime.now(ZoneInfo("Europe/Istanbul"))
+    print(f"\n[{now.strftime('%H:%M:%S')}] {label} ÖN UYARI (radar) taramasi basliyor...")
+
+    # Rejim filtresi kesin sinyalle ayni mantikta uygulanir - radar da
+    # rejime aykiri yonde uyari vermesin.
+    allowed, allowed_direction, regime, regime_note = market_scan_allowed("BIST")
+    if not allowed:
+        print(f"{label} radar: rejim {regime} - atlandi")
+        return
+
+    found = []
+    for ticker in tickers:
+        try:
+            df = fetch_daily_df(ticker)
+            if df.empty or len(df) < 25:
+                continue
+            df = compute_indicators(df)
+
+            fired = set()
+            for strategy_name, gate_fn in [
+                ("Fitil+RSI+Hacim", check_exhaustion),
+                ("Sadece RSI", check_rsi_only),
+            ]:
+                gate_result = gate_fn(df)
+                if not gate_result:
+                    continue
+                direction, row = gate_result
+                if allowed_direction and direction != allowed_direction:
+                    continue
+                if direction in fired:
+                    continue
+
+                pts_trend, _ = score_trend(df, direction)
+                if pts_trend < 0:
+                    continue
+                if _already_radar_alerted(now, ticker, direction):
+                    continue
+
+                fired.add(direction)
+                _mark_radar_alerted(now, ticker, direction)
+                found.append({
+                    "ticker": ticker, "strategy": strategy_name, "direction": direction,
+                    "price": float(row["close"]), "rsi": float(row["rsi"]),
+                    "stop": compute_invalidation(direction, row),
+                })
+        except Exception as e:
+            print(f"{ticker} radar hatasi: {e}")
+            dedektif_report(f"{label} radar taramasi", e, ticker)
+
+    if not found:
+        print(f"{label} radar: su an sartlari olusan hisse yok")
+        return
+
+    lines = [
+        f"⏳ [ÖN UYARI / RADAR] {now.strftime('%H:%M')} — {label}",
+        f"🧠 Rejim: {regime} ({regime_note})\n",
+    ]
+    for f in found:
+        yon = "🟢 LONG" if f["direction"] == "LONG" else "🔴 SHORT"
+        lines.append(
+            f"{yon} {f['ticker']} [{f['strategy']}]\n"
+            f"Şartlar şu an oluşuyor. Fiyat: {f['price']:.2f} | RSI: {f['rsi']:.1f} | "
+            f"olası stop: {f['stop']:.2f}\n"
+            f"Kapanışta ({BIST_CHECK_HOUR:02d}:{BIST_CHECK_MINUTE:02d}) teyit edilirse KESİN SİNYAL gelecektir.\n"
+        )
+    lines.append(
+        "ℹ️ Bu bir ön uyarıdır, emir talimatı DEĞİLDİR. Mum henüz kapanmadığı için "
+        "turnuvada doğrulanmış isabet oranı bu uyarılar için geçerli değildir — "
+        "kapanışa kadar şartlar bozulabilir."
+    )
+    msg = "\n".join(lines)
+    print(msg)
+    send_telegram_message(msg)
+
+
+
     print(f"\n[{datetime.now().strftime('%H:%M:%S')}] {market_label} taramasi basliyor...")
 
     # 1. KATMAN: Piyasa Beyni - rejim artik taramayi durdurmak yerine yonlendirir.
@@ -1364,7 +1483,7 @@ def scan_bist(tickers: list, market_label: str):
 
     if results:
         lines = [
-            f"📊 {market_label} - Kapanışa Yakın Tarama Sonuçları",
+            f"✅ [KESİN SİNYAL / KAPANIŞ TEYİDİ] {market_label} - Kapanışa Yakın Tarama",
             f"🧠 Piyasa rejimi: {regime} ({regime_note})\n",
         ]
         for r in results:
@@ -1531,12 +1650,65 @@ def _within_window(now, target_hour, target_minute, window_minutes):
     return 0 <= (now_total - target_total) < window_minutes
 
 
+# ---------------------------------------------------------------------------
+# Tarama durumu (yeniden baslatmaya dayanikli zamanlama)
+# ---------------------------------------------------------------------------
+# SORUN (2026-07-29 tespit): planli taramalar SADECE 5 dakikalik bir pencerede
+# (ornek 17:35-17:40) tetikleniyordu ve son-calisma tarihi yalnizca RAM'de
+# tutuluyordu. Bot o pencerede yeniden baslarsa (Railway redeploy, cokme,
+# acilistaki 226 ticker dogrulamasi birkac dakika surdugu icin ozellikle
+# riskli) o gunun taramasi TAMAMEN ve SESSIZCE atlaniyordu - kullanici
+# sinyal beklerken hicbir mesaj gelmiyordu ve nedenini anlamanin yolu yoktu.
+# COZUM: son calisma tarihini diske yaz + pencereyi kacirdiysak ayni gun
+# icinde telafi et (gunluk barlar kapanis sonrasi kesinlestigi icin gec
+# calisan bir tarama hala degerlidir).
+RUN_STATE_FILE = _data_path("run_state.json")
+
+
+def _load_run_state() -> dict:
+    try:
+        with open(RUN_STATE_FILE) as f:
+            return json.load(f)
+    except Exception:
+        return {}
+
+
+def _save_run_state(state: dict):
+    try:
+        with open(RUN_STATE_FILE, "w") as f:
+            json.dump(state, f)
+    except Exception as e:
+        print(f"run_state yazilamadi ({e})")
+
+
+def should_run_daily_scan(key: str, now, target_hour: int, target_minute: int) -> bool:
+    """Bugun bu tarama henuz calismadiysa VE planlanan saati gectiyse True.
+    Pencere yerine 'gectiyse telafi et' mantigi - yeniden baslatmalara
+    dayaniklidir."""
+    if now.weekday() >= 5:
+        return False
+    now_total = now.hour * 60 + now.minute
+    if now_total < target_hour * 60 + target_minute:
+        return False
+    state = _load_run_state()
+    return state.get(key) != now.date().isoformat()
+
+
+def mark_daily_scan_done(key: str, now):
+    state = _load_run_state()
+    state[key] = now.date().isoformat()
+    _save_run_state(state)
+
+
 EXIT_CHECK_INTERVAL_MINUTES = int(os.environ.get("EXIT_CHECK_INTERVAL_MINUTES", "30"))
+# Gunluk yasam sinyali saati (Istanbul). BIST taramasindan sonraya koyuyoruz
+# ki o gunun durumunu da yansitsin.
+HEARTBEAT_HOUR = int(os.environ.get("HEARTBEAT_HOUR", "19"))
 _last_exit_check_time = None
 
 
 def run_forever():
-    global _last_bist_run_date, _last_us_swing_run_date, _last_us_gunici_scan_time
+    global _last_us_gunici_scan_time
     global _last_exit_check_time
     global BIST_TICKERS, US_TICKERS, US_INTRADAY_TICKERS
 
@@ -1575,8 +1747,11 @@ def run_forever():
         + portfoy_satiri +
         f"🎯 Çıkış: {PARTIAL_TP_R_MULT}R'de %50 satış + breakeven uyarısı, sonra {TRAIL_ATR_MULT}×ATR trailing stop "
         f"(her {EXIT_CHECK_INTERVAL_MINUTES} dk, sadece piyasa açıkken).\n\n"
-        f"BIST: {len(BIST_TICKERS)} hisse, her gün ~{BIST_CHECK_HOUR:02d}:{BIST_CHECK_MINUTE:02d} (İstanbul). "
+        f"BIST: {len(BIST_TICKERS)} hisse, her gün ~{BIST_CHECK_HOUR:02d}:{BIST_CHECK_MINUTE:02d} (İstanbul) KESİN SİNYAL (kapanmış bar). "
         f"İki strateji: Fitil+RSI+Hacim + Sadece RSI.\n"
+        f"⏳ BIST ÖN UYARI (radar): "
+        + ", ".join(f"{h:02d}:{m:02d}" for h, m in BIST_RADAR_TIMES)
+        + " — şartlar oluşuyorsa haber verir, kapanış teyidi beklenir (emir talimatı değil).\n"
         f"ABD gün içi: {len(US_INTRADAY_TICKERS)} hisse (dar liste, 15 dk'da bir), piyasa açıkken. Strateji: RSI21 aşırı uç "
         f"(SİNYAL AMAÇLI — kendi opsiyon maliyetine göre değerlendir).\n"
         f"ABD swing: {len(US_TICKERS)} hisse, ABD kapanışından sonra (~{US_SWING_CHECK_HOUR:02d}:{US_SWING_CHECK_MINUTE:02d} New York). "
@@ -1585,21 +1760,45 @@ def run_forever():
         + storage_warning
     )
 
+    # Bir onceki dongude cokme olsa bile bot yasamaya devam etsin: her tarama
+    # kendi try/except'inde. ONCEDEN: taramalar ciplak cagriliyordu, yani
+    # tarama fonksiyonunun kendi ic hata yakalayicilarinin DISINDA olusan bir
+    # istisna butun run_forever dongusunu oldururdu - hicbir Telegram bildirimi
+    # gonderilmeden. Bot olmus mu yoksa sinyal mi yok, ayirt edilemiyordu.
+    heartbeat_key = "heartbeat"
+
     while True:
         istanbul_now = datetime.now(ZoneInfo("Europe/Istanbul"))
         ny_now = datetime.now(ZoneInfo("America/New_York"))
 
-        if istanbul_now.weekday() < 5:  # Pazartesi-Cuma
-            if _within_window(istanbul_now, BIST_CHECK_HOUR, BIST_CHECK_MINUTE, CHECK_WINDOW_MINUTES):
-                if _last_bist_run_date != istanbul_now.date():
-                    scan_bist(BIST_TICKERS, "BIST")
-                    _last_bist_run_date = istanbul_now.date()
+        # GÜN İÇİ ÖN UYARI (RADAR): seans ortasinda, kesin sinyalden ONCE.
+        # Her saat icin ayri bir durum anahtari kullaniyoruz ki 13:00 ve 15:30
+        # bagimsiz calissin; telafi mantigi burada da gecerli, ama radar
+        # kapanistan SONRA anlamsizlastigi icin sadece seans icinde tetiklenir.
+        if bist_is_open(istanbul_now):
+            for r_hour, r_minute in BIST_RADAR_TIMES:
+                radar_key = f"bist_radar_{r_hour:02d}{r_minute:02d}"
+                if should_run_daily_scan(radar_key, istanbul_now, r_hour, r_minute):
+                    try:
+                        scan_bist_radar(BIST_TICKERS, "BIST")
+                        mark_daily_scan_done(radar_key, istanbul_now)
+                    except Exception as e:
+                        dedektif_report("BIST radar taraması (döngü)", e)
 
-        if ny_now.weekday() < 5:
-            if _within_window(ny_now, US_SWING_CHECK_HOUR, US_SWING_CHECK_MINUTE, CHECK_WINDOW_MINUTES):
-                if _last_us_swing_run_date != ny_now.date():
-                    scan_us_swing(US_TICKERS)
-                    _last_us_swing_run_date = ny_now.date()
+        if should_run_daily_scan("bist", istanbul_now, BIST_CHECK_HOUR, BIST_CHECK_MINUTE):
+            try:
+                scan_bist(BIST_TICKERS, "BIST")
+                mark_daily_scan_done("bist", istanbul_now)
+            except Exception as e:
+                dedektif_report("BIST taraması (döngü)", e)
+                # Tarihi ISARETLEMIYORUZ - bir sonraki dongude tekrar denesin.
+
+        if should_run_daily_scan("us_swing", ny_now, US_SWING_CHECK_HOUR, US_SWING_CHECK_MINUTE):
+            try:
+                scan_us_swing(US_TICKERS)
+                mark_daily_scan_done("us_swing", ny_now)
+            except Exception as e:
+                dedektif_report("ABD swing taraması (döngü)", e)
 
         ny_minutes = ny_now.hour * 60 + ny_now.minute
         market_open = 9 * 60 + 30
@@ -1607,8 +1806,29 @@ def run_forever():
         if ny_now.weekday() < 5 and market_open <= ny_minutes < market_close:
             if (_last_us_gunici_scan_time is None or
                     (ny_now - _last_us_gunici_scan_time).total_seconds() >= US_GUNICI_SCAN_INTERVAL_MINUTES * 60):
-                scan_us_gunici(US_INTRADAY_TICKERS)
+                try:
+                    scan_us_gunici(US_INTRADAY_TICKERS)
+                except Exception as e:
+                    dedektif_report("ABD gün içi taraması (döngü)", e)
                 _last_us_gunici_scan_time = ny_now
+
+        # Gunluk yasam sinyali: bot ayakta ama sinyal uretmiyorsa bunu
+        # sessizlikten ayirt edebilmek icin gunde bir kez ozet gonderiyoruz.
+        if should_run_daily_scan(heartbeat_key, istanbul_now, HEARTBEAT_HOUR, 0):
+            try:
+                bist_reg, bist_note = get_market_regime("BIST")
+                us_reg, us_note = get_market_regime("ABD")
+                open_count = len(_read_tracking())
+                send_telegram_message(
+                    f"💓 [GÜNLÜK DURUM] Bot çalışıyor.\n"
+                    f"BIST rejimi: {bist_reg} ({bist_note})\n"
+                    f"ABD rejimi: {us_reg} ({us_note})\n"
+                    f"Takipteki açık sinyal: {open_count}\n"
+                    f"Bugün sinyal gelmediyse sebebi ya rejim filtresi ya da kriterlere uyan hisse olmamasıdır."
+                )
+                mark_daily_scan_done(heartbeat_key, istanbul_now)
+            except Exception as e:
+                dedektif_report("günlük durum mesajı", e)
 
         # 3. KATMAN: acik sinyaller icin cikis uyarilarini kontrol et.
         # Piyasa saatleri kontrolu (Gemini'nin istegi): iki piyasa da kapaliyken
@@ -1630,4 +1850,22 @@ def run_forever():
 
 
 if __name__ == "__main__":
-    run_forever()
+    # En ust seviye guvenlik agi: run_forever beklenmedik bir sekilde cokerse
+    # sessizce olmek yerine haber verip yeniden basliyor. Onceden ciplak
+    # cagriliyordu, yani tek bir istisna botu tamamen susturabiliyordu.
+    while True:
+        try:
+            run_forever()
+        except KeyboardInterrupt:
+            print("Manuel olarak durduruldu.")
+            break
+        except Exception as e:
+            print(f"KRITIK: run_forever coktu ({e}) - 60 saniye sonra yeniden baslatiliyor")
+            try:
+                send_telegram_message(
+                    f"🚨 [KRİTİK] Bot beklenmedik şekilde çöktü:\n{e}\n"
+                    f"60 saniye içinde yeniden başlatılıyor."
+                )
+            except Exception:
+                pass
+            time.sleep(60)
