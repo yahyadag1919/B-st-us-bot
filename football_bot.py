@@ -61,8 +61,10 @@ FOOTBALL_ODDS_SCAN_INTERVAL_MINUTES = int(os.environ.get("FOOTBALL_ODDS_SCAN_INT
 
 REQUIRED_ENV_VARS = [
     "FOOTBALL_DATA_KEY", "ODDS_API_KEY", "FOOTBALL_TELEGRAM_TOKEN",
-    "FOOTBALL_TELEGRAM_CHAT_ID", "API_FOOTBALL_KEY",
+    "FOOTBALL_TELEGRAM_CHAT_ID",
 ]
+# NOT: API_FOOTBALL_KEY kasitli olarak zorunlu degil - Sueper Lig su an
+# devre disi (bkz. ENABLE_SUPERLIG), key olmasa da bot calisir.
 
 
 def validate_football_config():
@@ -250,14 +252,54 @@ def _af_current_season_year():
     return now.year if now.month >= 7 else now.year - 1
 
 
+AF_DISABLE_FILENAME = "api_football_disabled_until.json"
+AF_DISABLE_HOURS_ON_PLAN_ERROR = 24  # sezon/plan kisitiyla karsilasirsa bu kadar saat tekrar denemez
+
+
+def _af_disable_path():
+    return os.path.join(DATA_DIR, AF_DISABLE_FILENAME)
+
+
+def _af_is_temporarily_disabled():
+    path = _af_disable_path()
+    if not os.path.exists(path):
+        return False
+    try:
+        with open(path, "r", encoding="utf-8") as f:
+            until = datetime.fromisoformat(json.load(f)["until"])
+    except (json.JSONDecodeError, OSError, KeyError, ValueError):
+        return False
+    return datetime.now(timezone.utc) < until
+
+
+def _af_disable_temporarily(hours, reason):
+    until = datetime.now(timezone.utc) + timedelta(hours=hours)
+    try:
+        with open(_af_disable_path(), "w", encoding="utf-8") as f:
+            json.dump({"until": until.isoformat(), "reason": reason}, f)
+    except OSError as e:
+        print(f"football_bot: API-Football disable durumu kaydedilemedi ({e})")
+
+
 def get_fixtures_superlig(date_from, date_to, season=None):
+    if _af_is_temporarily_disabled():
+        return []  # kota korumak icin - bkz. AF_DISABLE_HOURS_ON_PLAN_ERROR
+
     league_id = get_superlig_league_id()
     if league_id is None:
         print("football_bot: Sueper Lig ID'si bulunamadi, tarama atlandi.")
         return []
 
     season = season if season is not None else _af_current_season_year()
-    data = _af_get("/fixtures", params={"league": league_id, "season": season, "from": date_from, "to": date_to})
+    try:
+        data = _af_get("/fixtures", params={"league": league_id, "season": season, "from": date_from, "to": date_to})
+    except ApiFootballError as e:
+        if "plan" in str(e).lower() and "season" in str(e).lower():
+            _af_disable_temporarily(
+                AF_DISABLE_HOURS_ON_PLAN_ERROR,
+                f"Ücretsiz plan {season} sezonuna erişemiyor: {e}",
+            )
+        raise
 
     fixtures = []
     for item in data.get("response", []):
@@ -1072,8 +1114,17 @@ def _load_model_cache():
         return None
 
 
+ENABLE_SUPERLIG = os.environ.get("ENABLE_SUPERLIG", "false").lower() == "true"
+# Simdilik kapali: API-Football'in ucretsiz plani sadece 2022-2024 sezonlarina
+# erisim veriyor, guncel sezona (2026) erisemiyor - bkz. Gemini Rapor 3.
+# Bir cozum bulununca ENABLE_SUPERLIG=true env variable'i ile acilabilir,
+# kod tarafinda baska bir degisiklik gerekmez.
+
+
 def _fetch_all_fixtures(date_from, date_to):
     fixtures = get_fixtures_main(date_from, date_to)
+    if not ENABLE_SUPERLIG:
+        return fixtures
     try:
         fixtures.extend(get_fixtures_superlig(date_from, date_to))
     except ApiFootballError as e:
