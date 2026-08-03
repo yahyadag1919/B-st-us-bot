@@ -12,6 +12,9 @@ import os
 # --- API anahtarlari ---
 FOOTBALL_DATA_KEY = os.environ.get("FOOTBALL_DATA_KEY", "")
 ODDS_API_KEY = os.environ.get("ODDS_API_KEY", "")
+# API-Football (dashboard.api-football.com uzerinden dogrudan alindi, RapidAPI degil).
+# SADECE Sueper Lig icin kullanilir - gunluk kota 100 istek, dikkatli kullanilmali.
+API_FOOTBALL_KEY = os.environ.get("API_FOOTBALL_KEY", "")
 
 # --- Ayri Telegram botu (hisse botundan farkli token/chat) ---
 FOOTBALL_TELEGRAM_TOKEN = os.environ.get("FOOTBALL_TELEGRAM_TOKEN", "")
@@ -28,9 +31,12 @@ EV_THRESHOLD = float(os.environ.get("FOOTBALL_EV_THRESHOLD", "0.05"))     # %5 u
 KELLY_FRACTION = float(os.environ.get("FOOTBALL_KELLY_FRACTION", "0.25"))  # tam Kelly riskli, fraksiyonel kullaniyoruz
 
 # --- Takip edilecek ligler (football-data.org kodlari) ---
-# NOT: Super Lig'in ucretsiz planda olup olmadigi henuz DOGRULANMADI.
-# Deploy sonrasi football_data_fetcher.list_available_competitions() ile
-# gercek erisilebilir ligleri kontrol edip bu listeyi guncelleyecegiz.
+# DOGRULANDI (2026-08-03 arastirmasi): football-data.org ucretsiz plani
+# TAM OLARAK bu 9 lig + WC/EC/BSA'yi icerir. Sueper Lig ve Avrupa Ligi (EL)
+# bu ucretsiz planda YOK - Gemini'nin PRD'sinde ikisi de istenmisti ama
+# mevcut kaynaklarla karsilanamiyor. Sueper Lig ayri bir kaynaktan
+# (football_data_fetcher_apifootball.py) cekiliyor; Avrupa Ligi icin
+# simdilik ucretsiz bir kaynak yok, kapsam disi birakildi.
 TRACKED_COMPETITIONS = [
     "PL",   # Premier League
     "PD",   # La Liga
@@ -38,16 +44,27 @@ TRACKED_COMPETITIONS = [
     "BL1",  # Bundesliga
     "FL1",  # Ligue 1
     "CL",   # Sampiyonlar Ligi
+    "DED",  # Eredivisie
+    "PPL",  # Primeira Liga
+    "ELC",  # EFL Championship
 ]
 
 # --- Bildirim seli onlemi ---
 FOOTBALL_NOTIFY_THROTTLE_MINUTES = int(os.environ.get("FOOTBALL_NOTIFY_THROTTLE_MINUTES", "60"))
+
+# --- Ayristirilmis frekans mimarisi (Gemini'nin onayladigi tasarim) ---
+# Fikstur + Poisson modeli sik calisir (football-data.org bol kotali).
+FOOTBALL_MODEL_SCAN_INTERVAL_MINUTES = int(os.environ.get("FOOTBALL_MODEL_SCAN_INTERVAL_MINUTES", "10"))
+# Oran (odds) cekme + value bet hesabi seyrek calisir (The Odds API 500/ay,
+# API-Football 100/gun kotasi icin).
+FOOTBALL_ODDS_SCAN_INTERVAL_MINUTES = int(os.environ.get("FOOTBALL_ODDS_SCAN_INTERVAL_MINUTES", "240"))
 
 REQUIRED_ENV_VARS = [
     "FOOTBALL_DATA_KEY",
     "ODDS_API_KEY",
     "FOOTBALL_TELEGRAM_TOKEN",
     "FOOTBALL_TELEGRAM_CHAT_ID",
+    "API_FOOTBALL_KEY",
 ]
 
 

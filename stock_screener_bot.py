@@ -124,8 +124,10 @@ _us_candidates = {}  # ABD gun ici tukenme adaylari - onay mumu bekleniyor
 
 # Mac analiz botu (SPO-QUANT) - ayri, izole bir tarama kolu. Kendi verisi,
 # kendi Telegram botu, kendi try/except'i var; hisse tarafini etkilemez.
-_last_football_scan_time = None
-FOOTBALL_SCAN_INTERVAL_MINUTES = int(os.environ.get("FOOTBALL_SCAN_INTERVAL_MINUTES", "180"))
+# Ayristirilmis frekans: model taramasi sik, oran taramasi seyrek (Gemini'nin
+# onayladigi tasarim - Odds API / API-Football gunluk-aylik kotalarini korur).
+_last_football_model_scan_time = None
+_last_football_odds_scan_time = None
 
 
 # ---------------------------------------------------------------------------
@@ -1747,7 +1749,8 @@ def _self_check():
 def run_forever():
     global _last_us_gunici_scan_time
     global _last_exit_check_time
-    global _last_football_scan_time
+    global _last_football_model_scan_time
+    global _last_football_odds_scan_time
     global BIST_TICKERS, US_TICKERS, US_INTRADAY_TICKERS
 
     print("Ticker dogrulamasi basliyor (bir kez, acilista)...")
@@ -1759,8 +1762,10 @@ def run_forever():
     football_ok = fm.self_check_football()
     if football_ok:
         ftn.send_football_message(
-            f"⚽ Maç analiz botu (SPO-QUANT) başladı. Her {FOOTBALL_SCAN_INTERVAL_MINUTES} "
-            f"dakikada bir önümüzdeki maçları tarayıp EV≥%{fcfg.EV_THRESHOLD*100:.0f} sinyalleri bildirir."
+            f"⚽ Maç analiz botu (SPO-QUANT) başladı. Model taraması her "
+            f"{fcfg.FOOTBALL_MODEL_SCAN_INTERVAL_MINUTES} dakikada, oran taraması her "
+            f"{fcfg.FOOTBALL_ODDS_SCAN_INTERVAL_MINUTES} dakikada bir çalışır. "
+            f"EV≥%{fcfg.EV_THRESHOLD*100:.0f} sinyalleri bildirir."
         )
 
     storage_warning = ""
@@ -1893,21 +1898,36 @@ def run_forever():
                 _last_exit_check_time = datetime.now()
 
         # Mac analiz botu (SPO-QUANT) - hisse taramalarindan tamamen
-        # bagimsiz, kendi zaman araligi ve kendi try/except'i. Burada bir
-        # hata olursa hisse tarama dongusu ETKILENMEZ.
-        if (_last_football_scan_time is None or
-                (datetime.now(timezone.utc) - _last_football_scan_time).total_seconds()
-                >= FOOTBALL_SCAN_INTERVAL_MINUTES * 60):
+        # bagimsiz, kendi zaman araliklari ve kendi try/except'i. Burada bir
+        # hata olursa hisse tarama dongusu ETKILENMEZ. Ayristirilmis frekans:
+        # model taramasi sik, oran taramasi seyrek (kota koruma).
+        if (_last_football_model_scan_time is None or
+                (datetime.now(timezone.utc) - _last_football_model_scan_time).total_seconds()
+                >= fcfg.FOOTBALL_MODEL_SCAN_INTERVAL_MINUTES * 60):
             try:
-                football_result = fm.scan_football()
-                if football_result["errors"]:
+                model_result = fm.run_model_scan()
+                if model_result["errors"]:
                     dedektif_report(
-                        "Futbol taraması (döngü)",
-                        Exception("; ".join(football_result["errors"])),
+                        "Futbol model taraması (döngü)",
+                        Exception("; ".join(model_result["errors"])),
                     )
             except Exception as e:
-                dedektif_report("Futbol taraması (döngü)", e)
-            _last_football_scan_time = datetime.now(timezone.utc)
+                dedektif_report("Futbol model taraması (döngü)", e)
+            _last_football_model_scan_time = datetime.now(timezone.utc)
+
+        if (_last_football_odds_scan_time is None or
+                (datetime.now(timezone.utc) - _last_football_odds_scan_time).total_seconds()
+                >= fcfg.FOOTBALL_ODDS_SCAN_INTERVAL_MINUTES * 60):
+            try:
+                odds_result = fm.run_odds_scan()
+                if odds_result["errors"]:
+                    dedektif_report(
+                        "Futbol oran taraması (döngü)",
+                        Exception("; ".join(odds_result["errors"])),
+                    )
+            except Exception as e:
+                dedektif_report("Futbol oran taraması (döngü)", e)
+            _last_football_odds_scan_time = datetime.now(timezone.utc)
 
         time.sleep(LOOP_INTERVAL_SECONDS)
 
