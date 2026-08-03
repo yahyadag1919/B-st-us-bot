@@ -10,9 +10,7 @@ import pandas as pd
 import requests
 import yfinance as yf
 
-import football_main as fm
-import football_config as fcfg
-import football_telegram_notifier as ftn
+import football_bot as fb
 
 TELEGRAM_TOKEN = os.environ.get("TELEGRAM_TOKEN", "")
 TELEGRAM_CHAT_ID = os.environ.get("TELEGRAM_CHAT_ID", "")
@@ -128,6 +126,8 @@ _us_candidates = {}  # ABD gun ici tukenme adaylari - onay mumu bekleniyor
 # onayladigi tasarim - Odds API / API-Football gunluk-aylik kotalarini korur).
 _last_football_model_scan_time = None
 _last_football_odds_scan_time = None
+_last_football_results_update_time = None
+FOOTBALL_RESULTS_UPDATE_INTERVAL_MINUTES = int(os.environ.get("FOOTBALL_RESULTS_UPDATE_INTERVAL_MINUTES", "60"))
 
 
 # ---------------------------------------------------------------------------
@@ -1751,6 +1751,7 @@ def run_forever():
     global _last_exit_check_time
     global _last_football_model_scan_time
     global _last_football_odds_scan_time
+    global _last_football_results_update_time
     global BIST_TICKERS, US_TICKERS, US_INTRADAY_TICKERS
 
     print("Ticker dogrulamasi basliyor (bir kez, acilista)...")
@@ -1759,13 +1760,13 @@ def run_forever():
     US_TICKERS = validate_tickers(US_TICKERS, "ABD swing")
     US_INTRADAY_TICKERS = validate_tickers(US_INTRADAY_TICKERS, "ABD gün içi")
 
-    football_ok = fm.self_check_football()
+    football_ok = fb.self_check_football()
     if football_ok:
-        ftn.send_football_message(
+        fb.send_football_message(
             f"⚽ Maç analiz botu (SPO-QUANT) başladı. Model taraması her "
-            f"{fcfg.FOOTBALL_MODEL_SCAN_INTERVAL_MINUTES} dakikada, oran taraması her "
-            f"{fcfg.FOOTBALL_ODDS_SCAN_INTERVAL_MINUTES} dakikada bir çalışır. "
-            f"EV≥%{fcfg.EV_THRESHOLD*100:.0f} sinyalleri bildirir."
+            f"{fb.FOOTBALL_MODEL_SCAN_INTERVAL_MINUTES} dakikada, oran taraması her "
+            f"{fb.FOOTBALL_ODDS_SCAN_INTERVAL_MINUTES} dakikada bir çalışır. "
+            f"EV≥%{fb.EV_THRESHOLD*100:.0f} sinyalleri bildirir."
         )
 
     storage_warning = ""
@@ -1903,9 +1904,9 @@ def run_forever():
         # model taramasi sik, oran taramasi seyrek (kota koruma).
         if (_last_football_model_scan_time is None or
                 (datetime.now(timezone.utc) - _last_football_model_scan_time).total_seconds()
-                >= fcfg.FOOTBALL_MODEL_SCAN_INTERVAL_MINUTES * 60):
+                >= fb.FOOTBALL_MODEL_SCAN_INTERVAL_MINUTES * 60):
             try:
-                model_result = fm.run_model_scan()
+                model_result = fb.run_model_scan()
                 if model_result["errors"]:
                     dedektif_report(
                         "Futbol model taraması (döngü)",
@@ -1917,9 +1918,9 @@ def run_forever():
 
         if (_last_football_odds_scan_time is None or
                 (datetime.now(timezone.utc) - _last_football_odds_scan_time).total_seconds()
-                >= fcfg.FOOTBALL_ODDS_SCAN_INTERVAL_MINUTES * 60):
+                >= fb.FOOTBALL_ODDS_SCAN_INTERVAL_MINUTES * 60):
             try:
-                odds_result = fm.run_odds_scan()
+                odds_result = fb.run_odds_scan()
                 if odds_result["errors"]:
                     dedektif_report(
                         "Futbol oran taraması (döngü)",
@@ -1928,6 +1929,22 @@ def run_forever():
             except Exception as e:
                 dedektif_report("Futbol oran taraması (döngü)", e)
             _last_football_odds_scan_time = datetime.now(timezone.utc)
+
+        if (_last_football_results_update_time is None or
+                (datetime.now(timezone.utc) - _last_football_results_update_time).total_seconds()
+                >= FOOTBALL_RESULTS_UPDATE_INTERVAL_MINUTES * 60):
+            try:
+                fb.run_results_update()
+            except Exception as e:
+                dedektif_report("Futbol sonuç güncelleme (döngü)", e)
+            _last_football_results_update_time = datetime.now(timezone.utc)
+
+        # Telegram komutlarını (/stats, /rapor, /status) her turda kontrol
+        # eder — ucuz bir istek, LOOP_INTERVAL_SECONDS hızında yeterli.
+        try:
+            fb.poll_and_respond()
+        except Exception as e:
+            dedektif_report("Futbol komut dinleyici (döngü)", e)
 
         time.sleep(LOOP_INTERVAL_SECONDS)
 
