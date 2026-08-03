@@ -2,13 +2,17 @@ import os
 import csv
 import json
 import time
-from datetime import datetime, date
+from datetime import datetime, date, timezone
 from zoneinfo import ZoneInfo
 
 import numpy as np
 import pandas as pd
 import requests
 import yfinance as yf
+
+import football_main as fm
+import football_config as fcfg
+import football_telegram_notifier as ftn
 
 TELEGRAM_TOKEN = os.environ.get("TELEGRAM_TOKEN", "")
 TELEGRAM_CHAT_ID = os.environ.get("TELEGRAM_CHAT_ID", "")
@@ -117,6 +121,11 @@ _last_us_gunici_scan_time = None
 _last_gunici_halt_regime = None
 US_GUNICI_SCAN_INTERVAL_MINUTES = 15  # yfinance'i asiri yormamak icin 15dk'da bir tara
 _us_candidates = {}  # ABD gun ici tukenme adaylari - onay mumu bekleniyor
+
+# Mac analiz botu (SPO-QUANT) - ayri, izole bir tarama kolu. Kendi verisi,
+# kendi Telegram botu, kendi try/except'i var; hisse tarafini etkilemez.
+_last_football_scan_time = None
+FOOTBALL_SCAN_INTERVAL_MINUTES = int(os.environ.get("FOOTBALL_SCAN_INTERVAL_MINUTES", "180"))
 
 
 # ---------------------------------------------------------------------------
@@ -1738,6 +1747,7 @@ def _self_check():
 def run_forever():
     global _last_us_gunici_scan_time
     global _last_exit_check_time
+    global _last_football_scan_time
     global BIST_TICKERS, US_TICKERS, US_INTRADAY_TICKERS
 
     print("Ticker dogrulamasi basliyor (bir kez, acilista)...")
@@ -1745,6 +1755,13 @@ def run_forever():
     BIST_TICKERS = validate_tickers(BIST_TICKERS, "BIST")
     US_TICKERS = validate_tickers(US_TICKERS, "ABD swing")
     US_INTRADAY_TICKERS = validate_tickers(US_INTRADAY_TICKERS, "ABD gün içi")
+
+    football_ok = fm.self_check_football()
+    if football_ok:
+        ftn.send_football_message(
+            f"⚽ Maç analiz botu (SPO-QUANT) başladı. Her {FOOTBALL_SCAN_INTERVAL_MINUTES} "
+            f"dakikada bir önümüzdeki maçları tarayıp EV≥%{fcfg.EV_THRESHOLD*100:.0f} sinyalleri bildirir."
+        )
 
     storage_warning = ""
     if DATA_DIR == ".":
@@ -1874,6 +1891,23 @@ def run_forever():
                 except Exception as e:
                     dedektif_report("çıkış uyarı döngüsü", e)
                 _last_exit_check_time = datetime.now()
+
+        # Mac analiz botu (SPO-QUANT) - hisse taramalarindan tamamen
+        # bagimsiz, kendi zaman araligi ve kendi try/except'i. Burada bir
+        # hata olursa hisse tarama dongusu ETKILENMEZ.
+        if (_last_football_scan_time is None or
+                (datetime.now(timezone.utc) - _last_football_scan_time).total_seconds()
+                >= FOOTBALL_SCAN_INTERVAL_MINUTES * 60):
+            try:
+                football_result = fm.scan_football()
+                if football_result["errors"]:
+                    dedektif_report(
+                        "Futbol taraması (döngü)",
+                        Exception("; ".join(football_result["errors"])),
+                    )
+            except Exception as e:
+                dedektif_report("Futbol taraması (döngü)", e)
+            _last_football_scan_time = datetime.now(timezone.utc)
 
         time.sleep(LOOP_INTERVAL_SECONDS)
 
