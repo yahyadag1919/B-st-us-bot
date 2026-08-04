@@ -411,6 +411,10 @@ YF_TIMEOUT_SECONDS = int(os.environ.get("YF_TIMEOUT_SECONDS", "20"))
 # 429 / gecici bos yanit durumunda kac kez denenecegi ve bekleme taban suresi
 YF_MAX_RETRIES = int(os.environ.get("YF_MAX_RETRIES", "3"))
 YF_RETRY_BACKOFF_SECONDS = float(os.environ.get("YF_RETRY_BACKOFF_SECONDS", "2.0"))
+# Acilistaki toplu dogrulama ayarlari (hizli olmali - bot bunu bitirmeden
+# acilis mesajini gonderemiyor)
+VALIDATION_SLEEP_SECONDS = float(os.environ.get("VALIDATION_SLEEP_SECONDS", "0.2"))
+VALIDATION_PROBE_SIZE = int(os.environ.get("VALIDATION_PROBE_SIZE", "10"))
 _EXPECTED_COLS = ["timestamp", "open", "high", "low", "close", "volume"]
 
 
@@ -432,13 +436,17 @@ def _normalize_df(df: pd.DataFrame) -> pd.DataFrame:
     return df[_EXPECTED_COLS]
 
 
-def fetch_daily_df(ticker: str, period: str = "6mo") -> pd.DataFrame:
+def fetch_daily_df(ticker: str, period: str = "6mo", retries: int = None) -> pd.DataFrame:
     # DERS (2026-08-04): Render gibi veri merkezi IP'lerinden yfinance sik sik
     # 429 (hiz limiti) donuyor ve tek denemede vazgecmek, saglam kodlari bile
     # "veri yok" gibi gostererek butun taramayi bosa cikariyordu. Artik
     # kademeli bekleyerek birkac kez deniyoruz.
+    # DIKKAT: acilistaki toplu dogrulama bu yeniden denemeleri KULLANMAZ
+    # (retries=1 gecer). Aksi halde 226 hisse x 3 deneme x kademeli bekleme
+    # ~50 dakika suruyor ve bot acilis mesajini bile gonderemiyordu.
+    attempts = YF_MAX_RETRIES if retries is None else max(1, retries)
     last_df = pd.DataFrame()
-    for attempt in range(YF_MAX_RETRIES):
+    for attempt in range(attempts):
         try:
             try:
                 df = yf.Ticker(ticker).history(period=period, interval="1d",
@@ -450,9 +458,9 @@ def fetch_daily_df(ticker: str, period: str = "6mo") -> pd.DataFrame:
             if df is not None and not df.empty:
                 break
         except Exception:
-            if attempt == YF_MAX_RETRIES - 1:
+            if attempt == attempts - 1:
                 raise
-        if attempt < YF_MAX_RETRIES - 1:
+        if attempt < attempts - 1:
             time.sleep(YF_RETRY_BACKOFF_SECONDS * (attempt + 1))
     return _normalize_df(last_df)
 
@@ -1632,20 +1640,33 @@ def validate_tickers(tickers: list, label: str) -> list:
          calisip her taramada onlari atlamak cok daha iyidir.
     """
     valid, dead = [], []
-    for t in tickers:
+    for i, t in enumerate(tickers):
         ok = False
-        for attempt in (1, 2):
-            try:
-                df = fetch_daily_df(t, period="1mo")
-                if not df.empty and len(df) >= 5:
-                    ok = True
-                    break
-            except Exception:
-                pass
-            if attempt == 1:
-                time.sleep(1.0)  # gecici hiz limiti icin ikinci sansa ara ver
+        try:
+            # retries=1: dogrulama HIZLI olmali. Yeniden denemeler burada
+            # devreye girerse acilis 226 hisse icin ~50 dakikaya cikiyor.
+            df = fetch_daily_df(t, period="1mo", retries=1)
+            ok = (not df.empty) and len(df) >= 5
+        except Exception:
+            ok = False
         (valid if ok else dead).append(t)
-        time.sleep(0.4)  # yfinance'i yormamak icin nazik bir ara
+
+        # ERKEN CIKIS: ilk VALIDATION_PROBE_SIZE kodun HEPSI basarisizsa,
+        # tek tek 226 kodu denemenin anlami yok - kaynak calismiyor demektir.
+        # Bu kontrol olmadan bot acilis mesajini bile gonderemeden dakikalarca
+        # bekliyordu (2026-08-04'te tam olarak bu yasandi).
+        if len(dead) >= VALIDATION_PROBE_SIZE and not valid:
+            send_telegram_message(
+                f"🚨 [TICKER DOĞRULAMA ATLANDI] {label}: ilk {len(dead)} kodun "
+                f"hiçbirinden veri gelmedi.\n"
+                f"Veri kaynağı çalışmıyor (yfinance hız limiti / sunucu IP engeli) — "
+                f"doğrulama iptal edildi, liste olduğu gibi korunuyor.\n"
+                f"Tarama başlayacak; veri gelmeyen kodlar tek tek atlanacak."
+            )
+            print(f"{label}: kaynak calismiyor - dogrulama atlandi, liste korunuyor")
+            return tickers
+
+        time.sleep(VALIDATION_SLEEP_SECONDS)
 
     # ALTYAPI KORUMASI: cogunluk basarisizsa eleme yapma.
     if tickers and len(dead) > len(tickers) / 2:
@@ -1800,6 +1821,14 @@ def run_forever():
 
     print("Ticker dogrulamasi basliyor (bir kez, acilista)...")
     _self_check()
+    # DERS (2026-08-04): baslangic mesaji dogrulamadan SONRA gonderiliyordu.
+    # Render'da yfinance calismayinca dogrulama cok uzadi ve kullanici
+    # dakikalarca hicbir mesaj alamadi - bot olmus mu calisiyor mu
+    # anlasilmiyordu. Artik once "basladim" diyoruz, sonra dogruluyoruz.
+    send_telegram_message(
+        "⏳ Bot başlatılıyor — hisse listesi doğrulanıyor.\n"
+        "Bu birkaç dakika sürebilir; bitince tam başlangıç raporu gelecek."
+    )
     BIST_TICKERS = validate_tickers(BIST_TICKERS, "BIST")
     US_TICKERS = validate_tickers(US_TICKERS, "ABD swing")
     US_INTRADAY_TICKERS = validate_tickers(US_INTRADAY_TICKERS, "ABD gün içi")
