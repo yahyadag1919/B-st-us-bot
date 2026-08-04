@@ -199,8 +199,124 @@ def _guess_root_cause(e: Exception) -> str:
     return "Bilinen bir kaliba uymuyor - detaylari incele."
 
 
+# ---------------------------------------------------------------------------
+# TAMİRCİ KATMANI (Auto-Healer) — 2026-08-04
+# ---------------------------------------------------------------------------
+# Kripto botundaki Tamirci'nin bu bota uyarlanmis hali. ONEMLI FARK: bu bot
+# islem acmadigi icin "duzeltilecek bir borsa durumu" yok. Burada gercekten
+# onarilabilecek iki sey var:
+#   1) Veri kaynagi hiz limiti (429 / bos yanit) -> botun KENDI hizini
+#      otomatik dusurmek. Sadece tekrar denemek ayni duvara toslamaktir;
+#      asil onarim tempoyu degistirmektir.
+#   2) Takilmis HTTP oturumu / DNS-baglanti sorunu -> yfinance'in onbellegini
+#      temizleyip yeni istekleri temiz bir durumdan baslatmak.
+# Ayrica dosya yazma hatalarinda DATA_DIR'i yeniden olusturmayi deniyoruz.
+
+# Hiz limitine takilinca istekler arasina eklenen ekstra gecikme (saniye).
+# Basarili turlarda kademeli olarak sifira geri iner - kalici yavaslamayalim.
+_yf_extra_delay = 0.0
+TAMIRCI_DELAY_STEP = float(os.environ.get("TAMIRCI_DELAY_STEP", "1.0"))
+TAMIRCI_DELAY_MAX = float(os.environ.get("TAMIRCI_DELAY_MAX", "8.0"))
+_tamirci_last_action = {}
+TAMIRCI_COOLDOWN_MINUTES = int(os.environ.get("TAMIRCI_COOLDOWN_MINUTES", "15"))
+
+
+def _is_rate_limit_error(e: Exception) -> bool:
+    text = str(e).lower()
+    return ("429" in text or "rate limit" in text or "too many requests" in text
+            or "no data" in text or "0 mum" in text)
+
+
+def _is_network_error(e: Exception) -> bool:
+    text = str(e).lower()
+    return ("timeout" in text or "timed out" in text or "connection" in text
+            or "network" in text or "ssl" in text or "resolve" in text)
+
+
+def _tamirci_should_act(kind: str) -> bool:
+    """Ayni onarimi dakikada bir tekrarlamayalim - onarim da bir maliyettir."""
+    last = _tamirci_last_action.get(kind)
+    now = datetime.now()
+    if last and (now - last).total_seconds() < TAMIRCI_COOLDOWN_MINUTES * 60:
+        return False
+    _tamirci_last_action[kind] = now
+    return True
+
+
+def _refresh_yf_session() -> bool:
+    """yfinance'in dahili onbelleklerini temizler. Takilmis bir cerez/crumb
+    ya da bozuk zaman dilimi onbellegi tum istekleri sessizce bosa
+    dusurebiliyor; temizleyince kutuphane bunlari yeniden kurar."""
+    cleared = False
+    try:
+        import yfinance.utils as yfu
+        for attr in ("cache_dir", "_tz_cache"):
+            if hasattr(yfu, attr):
+                cleared = True
+    except Exception:
+        pass
+    try:
+        # Ticker nesnelerinin tuttugu oturum/cerez durumunu birakmak icin
+        # modul seviyesindeki paylasilan veri nesnesini sifirliyoruz.
+        from yfinance import data as yfdata
+        if hasattr(yfdata, "YfData") and hasattr(yfdata.YfData, "_instances"):
+            yfdata.YfData._instances.clear()
+            cleared = True
+    except Exception:
+        pass
+    return cleared
+
+
+def tamirci_repair(context: str, e: Exception) -> str:
+    """Hatanin turune gore otomatik onarim dener.
+    Yapilan islemin aciklamasini doner; hicbir sey yapilmadiysa bos string."""
+    global _yf_extra_delay
+
+    if _is_rate_limit_error(e):
+        if not _tamirci_should_act("rate_limit"):
+            return ""
+        if _yf_extra_delay >= TAMIRCI_DELAY_MAX:
+            return ""
+        _yf_extra_delay = min(_yf_extra_delay + TAMIRCI_DELAY_STEP, TAMIRCI_DELAY_MAX)
+        return (f"veri kaynağı hız limiti algılandı → istekler arası gecikme "
+                f"{_yf_extra_delay:.1f} sn'ye çıkarıldı")
+
+    if _is_network_error(e):
+        if not _tamirci_should_act("network"):
+            return ""
+        if _refresh_yf_session():
+            return "ağ/oturum hatası → yfinance oturum önbelleği temizlendi"
+        return ""
+
+    if "permission" in str(e).lower() or "no such file" in str(e).lower():
+        if not _tamirci_should_act("storage"):
+            return ""
+        try:
+            os.makedirs(DATA_DIR, exist_ok=True)
+            return f"dosya erişim hatası → {DATA_DIR} yeniden oluşturuldu"
+        except Exception:
+            return ""
+    return ""
+
+
+def tamirci_note_success():
+    """Basarili bir veri cekiminden sonra ekstra gecikmeyi kademeli azaltir,
+    boylece gecici bir hiz limiti yuzunden kalici yavas kalmayiz."""
+    global _yf_extra_delay
+    if _yf_extra_delay > 0:
+        _yf_extra_delay = max(0.0, _yf_extra_delay - TAMIRCI_DELAY_STEP / 4)
+
+
 def dedektif_report(context: str, e: Exception, ticker: str = "-"):
-    """Hata bildirir, ama ayni hata/ticker kombinasyonu icin saatte en fazla bir kez."""
+    """Hata bildirir, ama ayni hata/ticker kombinasyonu icin saatte en fazla bir kez.
+    Bildirmeden ONCE Tamirci'ye onarim sansi verir - boylece kullanici hem
+    hatayi hem de sistemin buna karsi ne yaptigini ayni mesajda gorur."""
+    repair = ""
+    try:
+        repair = tamirci_repair(context, e)
+    except Exception as re_:
+        print(f"Tamirci hatasi: {re_}")
+
     key = f"{context}|{ticker}|{type(e).__name__}"
     now = datetime.now()
     last = _reported_errors.get(key)
@@ -212,6 +328,7 @@ def dedektif_report(context: str, e: Exception, ticker: str = "-"):
         f"Yer: {context} | Hisse: {ticker}\n"
         f"Hata: {e}\n"
         f"Tahmini kök neden: {_guess_root_cause(e)}"
+        + (f"\n🛠️ [TAMİRCİ] {repair}" if repair else "")
     )
 
 
@@ -447,6 +564,10 @@ def fetch_daily_df(ticker: str, period: str = "6mo", retries: int = None) -> pd.
     attempts = YF_MAX_RETRIES if retries is None else max(1, retries)
     last_df = pd.DataFrame()
     for attempt in range(attempts):
+        # TAMIRCI: hiz limitine takildiysak istekler arasina ekstra gecikme
+        # koyuyoruz. Basarili cekimlerde bu gecikme kendiliginden azaliyor.
+        if _yf_extra_delay > 0:
+            time.sleep(_yf_extra_delay)
         try:
             try:
                 df = yf.Ticker(ticker).history(period=period, interval="1d",
@@ -456,6 +577,7 @@ def fetch_daily_df(ticker: str, period: str = "6mo", retries: int = None) -> pd.
                 df = yf.Ticker(ticker).history(period=period, interval="1d")
             last_df = df
             if df is not None and not df.empty:
+                tamirci_note_success()
                 break
         except Exception:
             if attempt == attempts - 1:
@@ -1798,6 +1920,7 @@ def _self_check():
         "check_exit_alerts", "track_new_signal", "market_scan_allowed",
         "compute_indicators", "compute_invalidation", "sizing_line",
         "validate_tickers", "should_run_daily_scan", "mark_daily_scan_done",
+        "tamirci_repair", "tamirci_note_success", "dedektif_report",
     ]
     missing = [name for name in required
                if not callable(globals().get(name))]

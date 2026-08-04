@@ -30,6 +30,7 @@ import json
 import math
 import time
 import difflib
+import threading
 import requests
 from datetime import datetime, timedelta, timezone
 
@@ -82,25 +83,96 @@ class DataFetchError(Exception):
     pass
 
 
+# ---------------------------------------------------------------------------
+# HIZ SINIRLAYICI (2026-08-04)
+# ---------------------------------------------------------------------------
+# SORUN: football-data.org ucretsiz plani dakikada ~10 istek veriyor. Eskiden
+# sadece get_fixtures_main() lig basina 1.5 sn bekliyordu; takim gecmisi
+# cagrilari (mac basina 2 takim) arka arkaya sinirsiz atiliyordu ve canlida
+# "Rate limit asildi (429), tekrar denemeler tukendi" hatasi aliniyordu.
+# COZUM: TUM football-data istekleri tek bir kapidan gecsin ve aralarinda
+# en az FD_MIN_REQUEST_INTERVAL kadar sure olsun. Kilit kullaniyoruz cunku
+# bu bot hisse botuyla ayni surecte, ayri bir thread'de calisiyor.
+FD_REQUESTS_PER_MINUTE = int(os.environ.get("FD_REQUESTS_PER_MINUTE", "9"))
+FD_MIN_REQUEST_INTERVAL = 60.0 / max(1, FD_REQUESTS_PER_MINUTE)
+
+_fd_rate_lock = threading.Lock()
+_fd_last_request_time = [0.0]  # liste: kilit icinde mutasyon icin
+
+# ---------------------------------------------------------------------------
+# TAMİRCİ (Auto-Healer) — 2026-08-04
+# ---------------------------------------------------------------------------
+# Sadece "429 alinca bekle, tekrar dene" yetmiyor: ayni tempoyla devam
+# edersek ayni duvara tekrar toslariz. Tamirci, 429 gordugunde botun KENDI
+# hizini kalici olarak dusuruyor; islerin yolunda gittigi her basarili
+# istekte de kademeli olarak normal hiza geri donuyor.
+_fd_extra_interval = [0.0]
+FD_TAMIRCI_STEP = float(os.environ.get("FD_TAMIRCI_STEP", "1.5"))
+FD_TAMIRCI_MAX = float(os.environ.get("FD_TAMIRCI_MAX", "20.0"))
+
+
+def _fd_tamirci_slow_down() -> float:
+    """429 sonrasi istekler arasi araligi artirir; yeni toplam araligi doner."""
+    with _fd_rate_lock:
+        _fd_extra_interval[0] = min(_fd_extra_interval[0] + FD_TAMIRCI_STEP,
+                                    FD_TAMIRCI_MAX)
+        return FD_MIN_REQUEST_INTERVAL + _fd_extra_interval[0]
+
+
+def _fd_tamirci_recover():
+    """Basarili istekte ekstra gecikmeyi yavasca geri alir."""
+    with _fd_rate_lock:
+        if _fd_extra_interval[0] > 0:
+            _fd_extra_interval[0] = max(0.0, _fd_extra_interval[0] - FD_TAMIRCI_STEP / 5)
+
+
+def _fd_wait_turn():
+    """Bir onceki istekten bu yana yeterli sure gecmediyse bekler."""
+    with _fd_rate_lock:
+        interval = FD_MIN_REQUEST_INTERVAL + _fd_extra_interval[0]
+        elapsed = time.time() - _fd_last_request_time[0]
+        wait = interval - elapsed
+        if wait > 0:
+            time.sleep(wait)
+        _fd_last_request_time[0] = time.time()
+
+
 def _fd_headers():
     if not FOOTBALL_DATA_KEY:
         raise DataFetchError("FOOTBALL_DATA_KEY tanimli degil (env variable eksik).")
     return {"X-Auth-Token": FOOTBALL_DATA_KEY}
 
 
-def _fd_get(endpoint, params=None, max_retries=2):
+def _fd_get(endpoint, params=None, max_retries=4):
     url = f"{FD_BASE_URL}{endpoint}"
     for attempt in range(max_retries + 1):
+        _fd_wait_turn()
         try:
             resp = requests.get(url, headers=_fd_headers(), params=params, timeout=15)
         except requests.RequestException as e:
+            if attempt < max_retries:
+                time.sleep(5 * (attempt + 1))
+                continue
             raise DataFetchError(f"Baglanti hatasi ({endpoint}): {e}")
 
         if resp.status_code == 200:
+            _fd_tamirci_recover()
             return resp.json()
         if resp.status_code == 429:
             if attempt < max_retries:
-                time.sleep(20)
+                # TAMIRCI: sadece beklemekle kalmiyoruz, tempoyu da dusuruyoruz -
+                # aksi halde bir sonraki tur ayni limite yeniden takilir.
+                yeni_aralik = _fd_tamirci_slow_down()
+                print(f"🛠️ [TAMİRCİ] 429 alindi → istek araligi "
+                      f"{yeni_aralik:.1f} sn'ye cikarildi ({endpoint})")
+                # Sunucu ne kadar bekleyecegimizi soyluyorsa ONA uyuyoruz;
+                # sabit 20 sn tahmin etmek yerine bu hem daha hizli hem
+                # daha guvenilir.
+                try:
+                    wait = int(resp.headers.get("Retry-After", "0"))
+                except (TypeError, ValueError):
+                    wait = 0
+                time.sleep(max(wait, 15 * (attempt + 1)))
                 continue
             raise DataFetchError("Rate limit asildi (429), tekrar denemeler tukendi.")
         raise DataFetchError(f"{endpoint} istegi basarisiz: HTTP {resp.status_code} - {resp.text[:200]}")
@@ -139,12 +211,34 @@ def get_fixtures_main(date_from, date_to, competitions=None):
                 "home_team_id": match.get("homeTeam", {}).get("id"),
                 "away_team_id": match.get("awayTeam", {}).get("id"),
             })
-        time.sleep(1.5)
+        # Eskiden burada 1.5 sn'lik bir bekleme vardi; artik pacing merkezi
+        # olarak _fd_wait_turn() tarafindan yapiliyor, ikisi birden gereksiz.
 
     return all_matches
 
 
+# ---------------------------------------------------------------------------
+# TAKIM GECMISI ONBELLEGI (2026-08-04)
+# ---------------------------------------------------------------------------
+# Asil kota tuketen sey buydu: model taramasi 10 dakikada bir calisiyor ve her
+# seferinde ayni takimlarin son maclarini bastan cekiyordu. Ama bir takimin
+# son 10 maci 10 dakikada degismez - en fazla gunde birkac kez degisir.
+# Onbellek sayesinde ayni takim TEAM_CACHE_TTL_HOURS boyunca tek istek eder.
+# Bu, istek sayisini onlarca kat dusuruyor ve 429'un kok nedenini ortadan
+# kaldiriyor (hiz sinirlayici ise ikinci savunma hatti olarak kaliyor).
+TEAM_CACHE_TTL_HOURS = float(os.environ.get("TEAM_CACHE_TTL_HOURS", "6"))
+_team_cache = {}          # team_id -> (zaman_damgasi, mac_listesi)
+_team_cache_lock = threading.Lock()
+
+
 def get_team_recent_matches_main(team_id, limit=10):
+    cache_key = (team_id, limit)
+    now = time.time()
+    with _team_cache_lock:
+        cached = _team_cache.get(cache_key)
+        if cached and (now - cached[0]) < TEAM_CACHE_TTL_HOURS * 3600:
+            return cached[1]
+
     data = _fd_get(f"/teams/{team_id}/matches", params={"status": "FINISHED", "limit": limit})
     matches = []
     for match in data.get("matches", []):
@@ -157,6 +251,8 @@ def get_team_recent_matches_main(team_id, limit=10):
             "home_score": score.get("home"),
             "away_score": score.get("away"),
         })
+    with _team_cache_lock:
+        _team_cache[cache_key] = (time.time(), matches)
     return matches
 
 
