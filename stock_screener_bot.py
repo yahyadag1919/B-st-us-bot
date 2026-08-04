@@ -114,6 +114,8 @@ LOOP_INTERVAL_SECONDS = 120                        # her 2 dakikada bir kontrol
 # run_state.json'da tutuluyor (bkz. should_run_daily_scan) - yeniden
 # baslatmalarda kaybolmasin diye.
 _last_us_gunici_scan_time = None
+# Gun ici 3 motorlu taramanin son calisma zamani (mevcut RSI21 kolundan ayri)
+_last_m15_scan_time = None
 # Piyasa Beyni gun ici tarama durdurma bildirimi icin - ayni rejimde tekrar
 # tekrar "durduruldu" mesaji atmamak icin son bildirilen rejimi hatirlar.
 _last_gunici_halt_regime = None
@@ -1343,6 +1345,246 @@ def check_us_gunici_outcomes():
     _write_us_gunici_pending(still_pending)
 
 
+# ============================================================
+# 3 MOTORLU GÜN İÇİ MİMARİ (2026-08-04) — kripto botundakinin aynısı
+# ============================================================
+# Kripto botunda kullandigimiz mimarinin hisse senedine uyarlanmis hali.
+# ONEMLI: mevcut BIST gunluk sistemi (turnuvada %78.2 isabet) SILINMEDI -
+# bu AYRI bir gun ici koludur, ikisi paralel calisir ve karsilastirilabilir.
+#
+# Kriptodan farklar (zorunlu uyarlamalar):
+#   * Kripto 7/24 acik, hisse degil -> gun ici pozisyon geceye tasinmaz,
+#     sinyal mesajinda "seans sonunda kapat" notu var.
+#   * Kriptodaki H4 Swing motorunun hisse karsiligi GUNLUK trend + M15 giris
+#     (BIST seansi 8 saat oldugu icin H4 gunde sadece 2 mum eder, anlamsiz).
+#   * Bot islem ACMIYOR -> cikislar emir talimati olarak bildirilir.
+#
+# Her motor ayni sozlesmeyi doner: (yon, giris, stop, motor_adi) ya da None.
+# TP motorlar tarafindan belirlenmez, her zaman sabit 1:2 R:R'dir.
+
+M15_RR_RATIO = float(os.environ.get("M15_RR_RATIO", "2.0"))
+M15_SCAN_INTERVAL_MINUTES = int(os.environ.get("M15_SCAN_INTERVAL_MINUTES", "15"))
+M15_BB_PERIOD = int(os.environ.get("M15_BB_PERIOD", "20"))
+M15_SQUEEZE_LOOKBACK = int(os.environ.get("M15_SQUEEZE_LOOKBACK", "50"))
+M15_SQUEEZE_PCT = float(os.environ.get("M15_SQUEEZE_PCT", "25"))
+M15_VOLUME_MULT = float(os.environ.get("M15_VOLUME_MULT", "1.5"))
+M15_RANGE_LOOKBACK = int(os.environ.get("M15_RANGE_LOOKBACK", "20"))
+M15_WICK_MIN_ATR = float(os.environ.get("M15_WICK_MIN_ATR", "0.3"))
+M15_WICK_MIN_RATIO = float(os.environ.get("M15_WICK_MIN_RATIO", "0.5"))
+# Ayni hisse+yon icin gunde bir kez sinyal (spam onlemi)
+_m15_alerted = {}
+
+
+def _m15_bollinger(df, period=M15_BB_PERIOD, mult=2.0):
+    mid = df["close"].rolling(period).mean()
+    std = df["close"].rolling(period).std()
+    upper, lower = mid + std * mult, mid - std * mult
+    width = (upper - lower) / mid.replace(0, np.nan) * 100
+    return mid, upper, lower, width
+
+
+def _m15_result(direction, entry, stop, name):
+    """Bozuk stop'u baştan eler — yanlis tarafta ya da asiri dar bir stop
+    1:2 hesabini ve stop mesafesi yuzdesini sacmalastirirdi."""
+    if entry is None or stop is None or entry <= 0 or stop <= 0:
+        return None
+    if direction == "LONG" and stop >= entry:
+        return None
+    if direction == "SHORT" and stop <= entry:
+        return None
+    if abs(entry - stop) / entry < 0.0015:   # %0.15'ten dar = gurultu
+        return None
+    return direction, float(entry), float(stop), name
+
+
+def m15_engine_breakout(df):
+    """A) BREAKOUT — Bollinger sikismasi + hacimli kirilim."""
+    if len(df) < M15_SQUEEZE_LOOKBACK + M15_BB_PERIOD + 5:
+        return None
+    mid, up, low, width = _m15_bollinger(df)
+    d = df.assign(bb_up=up, bb_low=low, bb_width=width,
+                  vol_ma=df["volume"].rolling(20).mean())
+    row = d.iloc[-2]   # son KAPANMIS mum (canli mum -1'de, ona guvenmiyoruz)
+    if any(pd.isna(row[c]) for c in ("bb_width", "vol_ma", "atr14")):
+        return None
+    prior = d["bb_width"].iloc[-(M15_SQUEEZE_LOOKBACK + 2):-2].dropna()
+    if prior.empty:
+        return None
+    # Sikisma kirilim mumundan ONCEKI mumda olculur (kirilim bantlari acar)
+    if d["bb_width"].iloc[-3] > np.nanpercentile(prior, M15_SQUEEZE_PCT):
+        return None
+    if row["volume"] < row["vol_ma"] * M15_VOLUME_MULT:
+        return None
+    # Kirilim, kendi bandiyla degil ONCEKI mumun bandiyla karsilastirilir
+    pu, pl = d["bb_up"].iloc[-3], d["bb_low"].iloc[-3]
+    if pd.isna(pu) or pd.isna(pl):
+        return None
+    atr = float(row["atr14"])
+    if row["close"] > pu:
+        return _m15_result("LONG", row["close"], row["low"] - atr * 0.5, "BREAKOUT")
+    if row["close"] < pl:
+        return _m15_result("SHORT", row["close"], row["high"] + atr * 0.5, "BREAKOUT")
+    return None
+
+
+def m15_engine_liquidity(df):
+    """B) LİKİDİTE AVCISI — kanal disina atilan igne, iceri kapanis, tuzak yonu."""
+    if len(df) < M15_RANGE_LOOKBACK + 20:
+        return None
+    row = df.iloc[-2]
+    if pd.isna(row.get("atr14")):
+        return None
+    atr = float(row["atr14"])
+    win = df.iloc[-(M15_RANGE_LOOKBACK + 2):-2]   # igne mumu HARIC
+    if win.empty:
+        return None
+    rh, rl = float(win["high"].max()), float(win["low"].min())
+    if rh <= rl:
+        return None
+    crange = float(row["high"] - row["low"])
+    if crange <= 0:
+        return None
+    uw = float(row["high"] - max(row["close"], row["open"]))
+    if (row["high"] > rh + atr * M15_WICK_MIN_ATR and row["close"] < rh
+            and uw / crange >= M15_WICK_MIN_RATIO):
+        return _m15_result("SHORT", row["close"], row["high"] + atr * 0.2, "LIKIDITE")
+    lw = float(min(row["close"], row["open"]) - row["low"])
+    if (row["low"] < rl - atr * M15_WICK_MIN_ATR and row["close"] > rl
+            and lw / crange >= M15_WICK_MIN_RATIO):
+        return _m15_result("LONG", row["close"], row["low"] - atr * 0.2, "LIKIDITE")
+    return None
+
+
+def m15_engine_trend(df, daily_df):
+    """C) TREND MOTORU — kriptodaki H4 Swing'in hisse karsiligi.
+    Yon GUNLUK grafikten (EMA50 + fiyat), zamanlama M15'ten gelir.
+    Amac: M15 gurultusunde yon secmemek."""
+    if daily_df is None or daily_df.empty or len(daily_df) < 55:
+        return None
+    d = daily_df.copy()
+    d["ema50"] = d["close"].ewm(span=50, adjust=False).mean()
+    drow = d.iloc[-1]
+    if pd.isna(drow["ema50"]):
+        return None
+    if drow["close"] > drow["ema50"]:
+        bias = "LONG"
+    elif drow["close"] < drow["ema50"]:
+        bias = "SHORT"
+    else:
+        return None
+
+    if len(df) < 60:
+        return None
+    row = df.iloc[-2]
+    if pd.isna(row.get("ema20")) or pd.isna(row.get("atr14")):
+        return None
+    atr = float(row["atr14"])
+    tol = float(row["close"]) * 0.004   # EMA20'ye "yakin" toleransi
+    near = (abs(float(row["low"]) - float(row["ema20"])) <= tol or
+            abs(float(row["high"]) - float(row["ema20"])) <= tol)
+    if not near:
+        return None
+    win = df.iloc[-22:-2]
+    if win.empty:
+        return None
+    if bias == "LONG" and row["close"] > row["open"]:
+        swing = min(float(win["low"].min()), float(row["low"]))
+        return _m15_result("LONG", row["close"], swing - atr * 0.3, "TREND")
+    if bias == "SHORT" and row["close"] < row["open"]:
+        swing = max(float(win["high"].max()), float(row["high"]))
+        return _m15_result("SHORT", row["close"], swing + atr * 0.3, "TREND")
+    return None
+
+
+def active_m15_engines(regime: str):
+    """Kripto botundaki active_engines() ile ayni mantik: rejim hangi
+    motorlarin calisacagini secer. BREAKOUT her rejimde aday cunku sikisma
+    HISSE BAZINDA tespit edilir, endeks rejiminden bagimsizdir."""
+    if regime == "YUKSELIS" or regime == "DUSUS":
+        return ["TREND", "BREAKOUT"]
+    if regime == "YATAY":
+        return ["LIKIDITE", "BREAKOUT"]
+    return ["BREAKOUT"]
+
+
+def scan_m15_engines(market: str, tickers: list):
+    """Gun ici 3 motorlu tarama. Sinyal uretirse Telegram'a emir talimati
+    gonderir. Bot islem ACMAZ."""
+    allowed, allowed_direction, regime, regime_note = market_scan_allowed(market)
+    if not allowed:
+        print(f"{market} M15: rejim {regime} - tarama atlandi")
+        return
+
+    engines = active_m15_engines(regime)
+    today = datetime.now().date().isoformat()
+    results = []
+
+    for ticker in tickers:
+        try:
+            df = fetch_intraday_df(ticker, interval="15m", period="5d")
+            if df.empty or len(df) < 80:
+                continue
+            df = compute_indicators(df)
+
+            daily = None
+            if "TREND" in engines:
+                daily = fetch_daily_df(ticker, period="6mo")
+
+            result = None
+            for eng in engines:   # ilk sinyal veren kazanir
+                if eng == "BREAKOUT":
+                    result = m15_engine_breakout(df)
+                elif eng == "LIKIDITE":
+                    result = m15_engine_liquidity(df)
+                elif eng == "TREND":
+                    result = m15_engine_trend(df, daily)
+                if result:
+                    break
+            if not result:
+                continue
+
+            direction, entry, stop, engine_name = result
+            if allowed_direction and direction != allowed_direction:
+                continue
+            key = f"{market}|{ticker}|{direction}|{today}"
+            if _m15_alerted.get(key):
+                continue
+            _m15_alerted[key] = True
+
+            dist = abs(entry - stop)
+            tp = entry + dist * M15_RR_RATIO if direction == "LONG" else entry - dist * M15_RR_RATIO
+            results.append({
+                "ticker": ticker, "engine": engine_name, "direction": direction,
+                "entry": entry, "stop": stop, "tp": tp,
+                "sizing": sizing_line(market, entry, stop),
+            })
+        except Exception as e:
+            print(f"{ticker} M15 hata: {e}")
+            dedektif_report(f"{market} M15 motor taraması", e, ticker)
+
+    if not results:
+        print(f"{market} M15: sinyal yok (rejim {regime}, motorlar {engines})")
+        return
+
+    lines = [f"⚙️ [GÜN İÇİ MOTOR SİNYALİ] {market}",
+             f"🧠 Rejim: {regime} | Aktif motorlar: {', '.join(engines)}\n"]
+    for r in results:
+        yon = "🟢 LONG" if r["direction"] == "LONG" else "🔴 SHORT"
+        if market == "BIST" and r["direction"] == "SHORT":
+            yon = "🔴 [BİLGİ AMAÇLI SHORT]"
+        lines.append(
+            f"{yon} {r['ticker']} — motor: {r['engine']}\n"
+            f"Giriş: {r['entry']:.2f} | 🛑 Stop: {r['stop']:.2f} | "
+            f"🎯 TP (1:{M15_RR_RATIO:g}): {r['tp']:.2f}\n"
+            f"{r['sizing']}\n"
+        )
+    lines.append("⏰ Gün içi sinyaldir — pozisyonu seans sonunda kapat, geceye taşıma.")
+    lines.append("⚠️ Bu motorlar backtest edilmedi; canlı gözlem aşamasındadır.")
+    msg = "\n".join(lines)
+    print(msg)
+    send_telegram_message(msg)
+
+
 def scan_us_gunici(tickers: list):
     global _last_gunici_halt_regime
     print(f"\n[{datetime.now().strftime('%H:%M:%S')}] ABD gun ici (RSI21) taramasi basliyor...")
@@ -1921,6 +2163,8 @@ def _self_check():
         "compute_indicators", "compute_invalidation", "sizing_line",
         "validate_tickers", "should_run_daily_scan", "mark_daily_scan_done",
         "tamirci_repair", "tamirci_note_success", "dedektif_report",
+        "scan_m15_engines", "m15_engine_breakout", "m15_engine_liquidity",
+        "m15_engine_trend", "active_m15_engines",
     ]
     missing = [name for name in required
                if not callable(globals().get(name))]
@@ -2003,7 +2247,10 @@ def run_forever():
         f"ABD gün içi: {len(US_INTRADAY_TICKERS)} hisse (dar liste, 15 dk'da bir), piyasa açıkken. Strateji: RSI21 aşırı uç "
         f"(SİNYAL AMAÇLI — kendi opsiyon maliyetine göre değerlendir).\n"
         f"ABD swing: {len(US_TICKERS)} hisse, ABD kapanışından sonra (~{US_SWING_CHECK_HOUR:02d}:{US_SWING_CHECK_MINUTE:02d} New York). "
-        f"İki strateji: Hacim Z-Skor + ATR Kırılımı.\n\n"
+        f"İki strateji: Hacim Z-Skor + ATR Kırılımı.\n"
+        f"\n⚙️ GÜN İÇİ 3 MOTOR (kripto mimarisi, YENİ): Breakout / Likidite Avcısı / Trend — "
+        f"her {M15_SCAN_INTERVAL_MINUTES} dk, iki piyasa da seans içinde. Sabit 1:{M15_RR_RATIO:g} R:R. "
+        f"Rejim motoru seçer. Backtest edilmedi, canlı gözlem aşamasında.\n\n"
         f"⚠️ Bot işlem AÇMIYOR — sadece emir talimatı ve takip uyarısı gönderir."
         + storage_warning
     )
@@ -2059,6 +2306,25 @@ def run_forever():
                 except Exception as e:
                     dedektif_report("ABD gün içi taraması (döngü)", e)
                 _last_us_gunici_scan_time = ny_now
+
+        # GÜN İÇİ 3 MOTOR (kripto mimarisi): her iki piyasa da kendi seansi
+        # icinde taranir. Ayri bir zamanlayici kullaniyoruz ki mevcut RSI21
+        # kolundan bagimsiz calissin.
+        global _last_m15_scan_time
+        if (_last_m15_scan_time is None or
+                (datetime.now() - _last_m15_scan_time).total_seconds() >= M15_SCAN_INTERVAL_MINUTES * 60):
+            if bist_is_open(istanbul_now):
+                try:
+                    scan_m15_engines("BIST", BIST_TICKERS)
+                except Exception as e:
+                    dedektif_report("BIST M15 motor taraması (döngü)", e)
+            if us_is_open(ny_now):
+                try:
+                    scan_m15_engines("ABD", US_INTRADAY_TICKERS)
+                except Exception as e:
+                    dedektif_report("ABD M15 motor taraması (döngü)", e)
+            if bist_is_open(istanbul_now) or us_is_open(ny_now):
+                _last_m15_scan_time = datetime.now()
 
         # Gunluk yasam sinyali: bot ayakta ama sinyal uretmiyorsa bunu
         # sessizlikten ayirt edebilmek icin gunde bir kez ozet gonderiyoruz.
