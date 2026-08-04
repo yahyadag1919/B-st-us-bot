@@ -1,8 +1,17 @@
-# Render ücretsiz Web Service — sadeleştirilmiş bağımlılıklar (2026-08-04)
+# Render ücretsiz Web Service — bağımlılıklar (2026-08-04)
 # ccxt KALDIRILDI: yalnızca kripto botu kullanıyordu, o da sistemden çıkarıldı.
 
-flask==3.0.3          # /health endpoint'i (Render'ın PORT'u dinlemesi için)
-requests==2.32.3      # Telegram API + genel HTTP
-yfinance==0.2.44      # BIST/ABD hisse verisi
-pandas==2.2.3         # her iki botun veri işleme katmanı
-numpy==2.1.3          # pandas ve gösterge hesaplarının bağımlılığı
+flask>=3.0                # /health endpoint'i (Render'ın PORT'u dinlemesi için)
+requests>=2.32            # Telegram API + futbol botunun HTTP çağrıları
+
+# DERS (2026-08-04): eskiden yfinance==0.2.44 sabitliydi ve Render'dan HİÇ veri
+# gelmiyordu (BIST/ABD listeleri komple boş dönüyordu). Sebep: Yahoo korumasını
+# sıkılaştırdı; 0.2.5x'ten itibaren yfinance curl_cffi ile tarayıcı TLS
+# parmak izini taklit ederek bunu aşıyor. Eski sürüm düz requests kullandığı
+# için veri merkezi IP'lerinden engelleniyordu. Sürümü sabitlemek yerine
+# alt sınır veriyoruz ki Yahoo bir daha değiştirdiğinde yeniden deploy
+# etmek düzeltmeyi getirsin.
+yfinance>=0.2.65          # BIST/ABD hisse verisi (curl_cffi ile gelir)
+
+pandas>=2.2               # veri işleme
+numpy>=1.26               # gösterge hesapları
