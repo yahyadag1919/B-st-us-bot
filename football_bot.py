@@ -1274,6 +1274,7 @@ def run_odds_scan():
 
     model_entries = cache.get("entries", [])
     all_signals = []
+    all_candidates = []
 
     odds_cache = {}
     competitions_in_scope = {e["fixture"]["competition"] for e in model_entries}
@@ -1297,18 +1298,113 @@ def run_odds_scan():
         matched_event = match_fixture_to_odds_event(fixture, odds_events)
         if matched_event is None:
             continue
-        all_signals.extend(find_value_bets(fixture, quant_result, matched_event))
+        # Esigi ASMAYAN adaylari da topluyoruz (ekstra API cagrisi YOK, ayni
+        # veriden hesaplaniyor). Amac: gunluk ozette "hic maç yoktu" ile
+        # "maç vardı ama avantaj yetmedi" ayrimini yapabilmek. Sinyal olarak
+        # sadece esigi gecenler kullanilir - davranis degismiyor.
+        candidates = find_value_bets(fixture, quant_result, matched_event, ev_threshold=-99)
+        all_candidates.extend(candidates)
+        all_signals.extend([c for c in candidates if c.get("ev", -99) >= EV_THRESHOLD])
 
     sent_signals = notify_value_bets(all_signals)
     for signal in sent_signals:
         log_signal(signal)
 
+    best_ev = max((c.get("ev", -99) for c in all_candidates), default=None)
+    _save_daily_state({
+        "odds_scan_at": datetime.now(timezone.utc).isoformat(),
+        "candidates": len(all_candidates),
+        "best_ev": best_ev,
+        "signals_found": len(all_signals),
+        "odds_errors": len(errors),
+    })
+
     return {
         "model_entries_used": len(model_entries),
         "signals_found": len(all_signals),
         "signals_sent": len(sent_signals),
+        "best_ev": best_ev,
         "errors": errors,
     }
+
+
+# ------------------------------------------------------------
+# GÜNLÜK ÖZET (2026-08-04)
+# ------------------------------------------------------------
+# NEDEN VAR: hisse botuna gunluk "yasam sinyali" eklemistik cunku "bot
+# calisiyor ama sinyal yok" ile "bot olmus" ayirt edilemiyordu. Futbol
+# tarafinda bu eksikti ve kullanici tam olarak o belirsizligi yasadi
+# (gunlerce hic mesaj gelmedi, sebebi anlasilmadi).
+# Ozet sadece "calisiyorum" demiyor; KAC MAC tarandigini ve en yuksek EV'nin
+# esige ne kadar yaklastigini da soyluyor - boylece "hic maç yoktu" ile
+# "maç vardı ama avantaj yetmedi" ayrimi yapilabiliyor.
+FOOTBALL_SUMMARY_HOUR = int(os.environ.get("FOOTBALL_SUMMARY_HOUR", "20"))
+DAILY_STATE_FILENAME = "football_daily_state.json"
+
+
+def _daily_state_path():
+    return os.path.join(DATA_DIR, DAILY_STATE_FILENAME)
+
+
+def _load_daily_state():
+    try:
+        with open(_daily_state_path()) as f:
+            return json.load(f)
+    except Exception:
+        return {}
+
+
+def _save_daily_state(update: dict):
+    state = _load_daily_state()
+    state.update(update)
+    try:
+        with open(_daily_state_path(), "w") as f:
+            json.dump(state, f)
+    except Exception as e:
+        print(f"football_daily_state yazilamadi: {e}")
+
+
+def maybe_send_daily_summary():
+    """Gunde bir kez, FOOTBALL_SUMMARY_HOUR'dan sonra ozet gonderir."""
+    now = datetime.now()
+    today = now.date().isoformat()
+    state = _load_daily_state()
+    if state.get("summary_sent_date") == today:
+        return False
+    if now.hour < FOOTBALL_SUMMARY_HOUR:
+        return False
+
+    cache = _load_model_cache()
+    entries = cache.get("entries", []) if cache else []
+    fixtures_n = len(entries)
+    best_ev = state.get("best_ev")
+    candidates = state.get("candidates", 0)
+    s = compute_stats()
+
+    lines = ["⚽ [GÜNLÜK ÖZET] Maç analiz botu çalışıyor."]
+    if cache:
+        lines.append(f"Son model taraması: {cache.get('generated_at', '?')}")
+    lines.append(f"Analiz edilen maç: {fixtures_n}")
+
+    if fixtures_n == 0:
+        lines.append("Takip edilen 9 ligde önümüzdeki 3 gün içinde programlanmış maç yok.")
+        lines.append("Avrupa ligleri genelde Ağustos ortasında başlar — sezon açılınca "
+                     "maçlar otomatik gelmeye başlayacak.")
+    elif candidates == 0:
+        lines.append("Maçlar analiz edildi ama oran eşleşmesi yapılamadı "
+                     "(bahis şirketleri henüz oran yayınlamamış olabilir).")
+    else:
+        lines.append(f"Oran karşılaştırılan seçenek: {candidates}")
+        if best_ev is not None:
+            lines.append(f"En yüksek EV: %{best_ev * 100:.1f} (eşik: %{EV_THRESHOLD * 100:.0f})")
+            if best_ev < EV_THRESHOLD:
+                lines.append("Yani maçlar tarandı, ama hiçbirinde eşiği aşan "
+                             "matematiksel avantaj yoktu — sinyal üretmemek DOĞRU davranış.")
+
+    lines.append(f"\nBekleyen sinyal: {s['pending']} | Toplam sinyal: {s['total']}")
+    send_football_message("\n".join(lines))
+    _save_daily_state({"summary_sent_date": today})
+    return True
 
 
 def run_results_update():

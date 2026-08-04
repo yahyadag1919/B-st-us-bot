@@ -2593,6 +2593,13 @@ def run_forever():
         except Exception as e:
             dedektif_report("Futbol komut dinleyici (döngü)", e)
 
+        # Futbol günlük özeti — kendi içinde günde bir kez gönderecek şekilde
+        # kilitli, bu yüzden her turda güvenle çağrılabilir.
+        try:
+            fb.maybe_send_daily_summary()
+        except Exception as e:
+            dedektif_report("Futbol günlük özet (döngü)", e)
+
         time.sleep(LOOP_INTERVAL_SECONDS)
 
 
