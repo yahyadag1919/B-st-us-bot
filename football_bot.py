@@ -55,7 +55,16 @@ TRACKED_COMPETITIONS = [
     "PL", "PD", "SA", "BL1", "FL1", "CL", "DED", "PPL", "ELC",
 ]
 
+# DERS (2026-08-04): FOOTBALL_NOTIFY_THROTTLE_MINUTES artik KULLANILMIYOR.
+# 60 dk'lik bogucu, 240 dk'lik oran taramasinin yaninda hicbir ise yaramiyordu
+# (bkz. should_notify). Yerine kalici tekrar-engeli + EV iyilesme kurali geldi.
+# Sabit, eski kayitlarla uyum ve olasi geri donus icin duruyor.
 FOOTBALL_NOTIFY_THROTTLE_MINUTES = int(os.environ.get("FOOTBALL_NOTIFY_THROTTLE_MINUTES", "60"))
+
+# Bildirilmis bir bahsin TEKRAR bildirilmesi icin EV'nin en az bu kadar
+# artmasi gerekir (0.04 = 4 puan, ornek: %5 -> %9). Dusuk tutmak spam'e,
+# yuksek tutmak gercek iyilesmeleri kacirmaya yol acar.
+FOOTBALL_EV_IMPROVE_DELTA = float(os.environ.get("FOOTBALL_EV_IMPROVE_DELTA", "0.04"))
 
 FOOTBALL_MODEL_SCAN_INTERVAL_MINUTES = int(os.environ.get("FOOTBALL_MODEL_SCAN_INTERVAL_MINUTES", "10"))
 FOOTBALL_ODDS_SCAN_INTERVAL_MINUTES = int(os.environ.get("FOOTBALL_ODDS_SCAN_INTERVAL_MINUTES", "240"))
@@ -820,19 +829,54 @@ def _signal_key(signal):
 
 
 def should_notify(signal):
+    """Bir sinyalin bildirilip bildirilmeyecegine karar verir.
+
+    DERS (2026-08-04): eskiden bu 60 DAKIKALIK bir bogucuydu, ama oran
+    taramasi 4 SAATTE bir calisiyor - yani bogucu hicbir zaman devreye
+    girmiyordu. Sonuc: ayni bahis, mac oynanana kadar her taramada yeniden
+    bildiriliyordu. 3 gunluk pencere x gunde 6 tarama = TEK bir bahis icin
+    18 mesaj; 5-10 aktif sinyalle ayda 1000+ mesaj. Kripto botundaki
+    bildirim seli sorununun aynisi.
+    Yeni kural: her (mac + secenek) icin BIR KEZ bildir. Sadece EV belirgin
+    sekilde iyilesirse tekrar haber ver - cunku o zaman gercekten yeni bir
+    bilgi vardir (oran daha da lehine dondu)."""
     state = _notif_load_state()
-    last = state.get(_signal_key(signal))
-    if last is None:
+    rec = state.get(_signal_key(signal))
+    if rec is None:
         return True
-    last_dt = datetime.fromisoformat(last)
-    minutes_passed = (datetime.now(timezone.utc) - last_dt).total_seconds() / 60
-    return minutes_passed >= FOOTBALL_NOTIFY_THROTTLE_MINUTES
+    # Eski format (duz ISO string) ile geriye donuk uyumluluk: o kayitlar
+    # zaten bildirilmis demektir, tekrar bildirme.
+    if not isinstance(rec, dict):
+        return False
+    try:
+        last_ev = float(rec.get("last_ev", -99))
+    except (TypeError, ValueError):
+        return False
+    current_ev = signal.get("ev")
+    if current_ev is None:
+        return False
+    return (current_ev - last_ev) >= FOOTBALL_EV_IMPROVE_DELTA
 
 
 def mark_notified(signal):
     state = _notif_load_state()
-    state[_signal_key(signal)] = datetime.now(timezone.utc).isoformat()
+    state[_signal_key(signal)] = {
+        "last_notified": datetime.now(timezone.utc).isoformat(),
+        "last_ev": signal.get("ev"),
+    }
     _notif_save_state(state)
+
+
+def _previous_ev(signal):
+    """Daha once bildirilmisse onceki EV'yi doner (mesajda 'iyilesti' notu
+    gosterebilmek icin)."""
+    rec = _notif_load_state().get(_signal_key(signal))
+    if isinstance(rec, dict):
+        try:
+            return float(rec.get("last_ev"))
+        except (TypeError, ValueError):
+            return None
+    return None
 
 
 def format_value_bet_message(signal):
@@ -868,7 +912,16 @@ def notify_value_bets(signals):
     sent_signals = []
     for signal in signals:
         if should_notify(signal):
-            send_football_message(format_value_bet_message(signal))
+            prev = _previous_ev(signal)
+            msg = format_value_bet_message(signal)
+            if prev is not None:
+                # Tekrar bildirimi ancak EV belirgin iyilestiginde olur -
+                # kullanici bunun yeni bir sinyal degil, ayni bahsin
+                # iyilesmis hali oldugunu gormeli.
+                msg += (f"\n\n🔁 Bu bahis daha önce bildirilmişti "
+                        f"(EV %{prev * 100:.1f} → %{signal['ev'] * 100:.1f}). "
+                        f"Oran lehine döndüğü için tekrar hatırlatılıyor.")
+            send_football_message(msg)
             mark_notified(signal)
             sent_signals.append(signal)
     return sent_signals
