@@ -1,4 +1,8 @@
-yfinance
-pandas
-numpy
-requests
+# Render ücretsiz Web Service — sadeleştirilmiş bağımlılıklar (2026-08-04)
+# ccxt KALDIRILDI: yalnızca kripto botu kullanıyordu, o da sistemden çıkarıldı.
+
+flask==3.0.3          # /health endpoint'i (Render'ın PORT'u dinlemesi için)
+requests==2.32.3      # Telegram API + genel HTTP
+yfinance==0.2.44      # BIST/ABD hisse verisi
+pandas==2.2.3         # her iki botun veri işleme katmanı
+numpy==2.1.3          # pandas ve gösterge hesaplarının bağımlılığı
