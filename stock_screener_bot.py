@@ -408,6 +408,9 @@ def compute_position_size(market: str, entry_price: float, stop_price: float):
 # ---------------------------------------------------------------------------
 
 YF_TIMEOUT_SECONDS = int(os.environ.get("YF_TIMEOUT_SECONDS", "20"))
+# 429 / gecici bos yanit durumunda kac kez denenecegi ve bekleme taban suresi
+YF_MAX_RETRIES = int(os.environ.get("YF_MAX_RETRIES", "3"))
+YF_RETRY_BACKOFF_SECONDS = float(os.environ.get("YF_RETRY_BACKOFF_SECONDS", "2.0"))
 _EXPECTED_COLS = ["timestamp", "open", "high", "low", "close", "volume"]
 
 
@@ -430,13 +433,28 @@ def _normalize_df(df: pd.DataFrame) -> pd.DataFrame:
 
 
 def fetch_daily_df(ticker: str, period: str = "6mo") -> pd.DataFrame:
-    try:
-        df = yf.Ticker(ticker).history(period=period, interval="1d",
-                                       timeout=YF_TIMEOUT_SECONDS)
-    except TypeError:
-        # Eski yfinance surumlerinde timeout parametresi yok
-        df = yf.Ticker(ticker).history(period=period, interval="1d")
-    return _normalize_df(df)
+    # DERS (2026-08-04): Render gibi veri merkezi IP'lerinden yfinance sik sik
+    # 429 (hiz limiti) donuyor ve tek denemede vazgecmek, saglam kodlari bile
+    # "veri yok" gibi gostererek butun taramayi bosa cikariyordu. Artik
+    # kademeli bekleyerek birkac kez deniyoruz.
+    last_df = pd.DataFrame()
+    for attempt in range(YF_MAX_RETRIES):
+        try:
+            try:
+                df = yf.Ticker(ticker).history(period=period, interval="1d",
+                                               timeout=YF_TIMEOUT_SECONDS)
+            except TypeError:
+                # Eski yfinance surumlerinde timeout parametresi yok
+                df = yf.Ticker(ticker).history(period=period, interval="1d")
+            last_df = df
+            if df is not None and not df.empty:
+                break
+        except Exception:
+            if attempt == YF_MAX_RETRIES - 1:
+                raise
+        if attempt < YF_MAX_RETRIES - 1:
+            time.sleep(YF_RETRY_BACKOFF_SECONDS * (attempt + 1))
+    return _normalize_df(last_df)
 
 
 def fetch_intraday_df(ticker: str, interval: str = "15m", period: str = "5d") -> pd.DataFrame:
@@ -1600,21 +1618,47 @@ def scan_us_intraday():
 
 def validate_tickers(tickers: list, label: str) -> list:
     """Acilista her kodu bir kez test eder, veri gelmeyenleri listeden eler.
-    Kripto botundaki load_markets() filtresinin bu bota uyarlanmis hali.
-    Gerekce: BIST100 icerigi uc ayda bir degisiyor ve elle tutulan bir liste
-    kacinilmaz olarak eskiyor - dogrulama olmadan her taramada ayni olu kod
-    icin hata uretilir. Boylece tek seferlik bir ozet uyari aliyoruz."""
+
+    DERS (2026-08-04, Render'a tasindiktan sonra): ilk deploy'da BU FONKSIYON
+    TUM LISTEYI SILDI (BIST 0, ABD 0). Sebep yfinance'in bu ortamdan veri
+    dondurmemesiydi (veri merkezi IP'si hiz limitine takiliyor) - yani kodlar
+    olu degildi, ALTYAPI sorunu vardi. Eski hali bunu ayirt edemedigi icin
+    bot sessizce hicbir sey taramayan bir kabuga donusuyordu.
+    Yeni davranis:
+      1) Basarisiz olan her kod, bir kez daha (daha uzun bekleyerek) denenir.
+      2) Kodlarin yarisindan fazlasi hala basarisizsa, bu 'liste eskimis'
+         degil 'kaynak calismiyor' demektir - liste OLDUGU GIBI korunur ve
+         uyari gonderilir. Bos listeyle calismaktansa, birkac olu kodla
+         calisip her taramada onlari atlamak cok daha iyidir.
+    """
     valid, dead = [], []
     for t in tickers:
-        try:
-            df = fetch_daily_df(t, period="1mo")
-            if df.empty or len(df) < 5:
-                dead.append(t)
-            else:
-                valid.append(t)
-        except Exception:
-            dead.append(t)
-        time.sleep(0.15)  # yfinance'i yormamak icin nazik bir ara
+        ok = False
+        for attempt in (1, 2):
+            try:
+                df = fetch_daily_df(t, period="1mo")
+                if not df.empty and len(df) >= 5:
+                    ok = True
+                    break
+            except Exception:
+                pass
+            if attempt == 1:
+                time.sleep(1.0)  # gecici hiz limiti icin ikinci sansa ara ver
+        (valid if ok else dead).append(t)
+        time.sleep(0.4)  # yfinance'i yormamak icin nazik bir ara
+
+    # ALTYAPI KORUMASI: cogunluk basarisizsa eleme yapma.
+    if tickers and len(dead) > len(tickers) / 2:
+        send_telegram_message(
+            f"🚨 [TICKER DOĞRULAMA BAŞARISIZ] {label}: {len(dead)}/{len(tickers)} kod "
+            f"için veri alınamadı.\n"
+            f"Bu kadar yüksek oran, kodların ölü olduğunu değil VERİ KAYNAĞININ "
+            f"çalışmadığını gösterir (yfinance hız limiti / sunucu IP engeli).\n"
+            f"Liste silinmedi, olduğu gibi korunuyor — tarama devam edecek, "
+            f"veri gelmeyen kodlar tek tek atlanacak."
+        )
+        print(f"{label}: dogrulama basarisiz ({len(dead)}/{len(tickers)}) - liste korunuyor")
+        return tickers
 
     if dead:
         send_telegram_message(
