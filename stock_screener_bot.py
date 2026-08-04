@@ -38,9 +38,9 @@ BIST_TICKERS = [
     "CIMSA.IS", "CWENE.IS", "DOAS.IS", "DOHOL.IS", "ECILC.IS", "ECZYT.IS",
     "EGEEN.IS", "EKGYO.IS", "ENERY.IS", "ENJSA.IS", "ENKAI.IS", "EREGL.IS",
     "EUPWR.IS", "FROTO.IS", "GARAN.IS", "GESAN.IS", "GLYHO.IS", "GUBRF.IS",
-    "GWIND.IS", "HALKB.IS", "HEKTS.IS", "IPEKE.IS", "ISCTR.IS", "ISGYO.IS",
+    "GWIND.IS", "HALKB.IS", "HEKTS.IS", "MPARK.IS", "ISCTR.IS", "ISGYO.IS",
     "ISMEN.IS", "IZMDC.IS", "KARSN.IS", "KCAER.IS", "KCHOL.IS", "KLSER.IS",
-    "KONTR.IS", "KONYA.IS", "KORDS.IS", "KOZAA.IS", "KOZAL.IS", "KRDMD.IS",
+    "KONTR.IS", "KONYA.IS", "KORDS.IS", "AHGAZ.IS", "ALTNY.IS", "KRDMD.IS",
     "MAVI.IS", "MGROS.IS", "MIATK.IS", "ODAS.IS", "OTKAR.IS", "OYAKC.IS",
     "PENTA.IS", "PETKM.IS", "PGSUS.IS", "QUAGR.IS", "SAHOL.IS", "SASA.IS",
     "SDTTR.IS", "SISE.IS", "SKBNK.IS", "SMRTG.IS", "SOKM.IS", "TAVHL.IS",
@@ -65,7 +65,7 @@ US_TICKERS = [
     "MS", "SCHW", "BLK", "SPGI", "AXP", "C",
     "T", "VZ", "CMCSA", "AMAT", "MU", "LRCX",
     "ADI", "KLAC", "SNPS", "CDNS", "PANW", "CRWD",
-    "NOW", "UBER", "ABNB", "PYPL", "SQ", "SHOP",
+    "NOW", "UBER", "ABNB", "PYPL", "XYZ", "SHOP",
     "COIN", "MRNA", "GILD", "BMY", "CVS", "CI",
     "ELV", "HCA", "DE", "MMM", "LMT", "NOC",
     "GD", "EOG", "SLB", "COP", "PSX", "MPC",
@@ -1507,6 +1507,178 @@ def active_m15_engines(regime: str):
     return ["BREAKOUT"]
 
 
+# ------------------------------------------------------------
+# M15 MOTOR SONUÇ TAKİBİ (2026-08-04)
+# ------------------------------------------------------------
+# NEDEN VAR: motorlar canlida test edilecek, ama sinyaller sadece Telegram'a
+# dusup unutulsaydi iki hafta sonra "bu motorlar ise yaradi mi?" sorusunun
+# cevabi olmazdi - elde sadece elle sayilacak bir sohbet gecmisi kalirdi.
+# Burada her sinyal kaydediliyor, sonucu (TP / STOP / seans sonu) otomatik
+# olculuyor ve motor bazinda beklenti raporlanabiliyor.
+M15_SIGNALS_FILE = _data_path("m15_signals.csv")
+M15_SIGNAL_FIELDS = [
+    "signal_time", "market", "ticker", "engine", "direction",
+    "entry", "stop", "tp", "status", "exit_time", "exit_price", "result_r",
+]
+
+
+def _read_m15_signals():
+    if not os.path.isfile(M15_SIGNALS_FILE):
+        return []
+    try:
+        with open(M15_SIGNALS_FILE, newline="") as f:
+            return list(csv.DictReader(f))
+    except Exception as e:
+        print(f"m15_signals okunamadi: {e}")
+        return []
+
+
+def _write_m15_signals(rows):
+    try:
+        with open(M15_SIGNALS_FILE, "w", newline="") as f:
+            w = csv.DictWriter(f, fieldnames=M15_SIGNAL_FIELDS)
+            w.writeheader()
+            for r in rows:
+                w.writerow({k: r.get(k, "") for k in M15_SIGNAL_FIELDS})
+    except Exception as e:
+        print(f"m15_signals yazilamadi: {e}")
+
+
+def log_m15_signal(market, ticker, engine, direction, entry, stop, tp, signal_time):
+    rows = _read_m15_signals()
+    rows.append({
+        "signal_time": signal_time, "market": market, "ticker": ticker,
+        "engine": engine, "direction": direction,
+        "entry": f"{entry:.4f}", "stop": f"{stop:.4f}", "tp": f"{tp:.4f}",
+        "status": "OPEN", "exit_time": "", "exit_price": "", "result_r": "",
+    })
+    _write_m15_signals(rows)
+
+
+def check_m15_outcomes():
+    """Acik M15 sinyallerinin sonucunu belirler.
+    Kurallar canli botla ve turnuvayla TUTARLI olmali:
+      * Ayni mumda hem stop hem TP gorulurse ZARAR sayilir (mum ici sirayi
+        bilemeyiz; iyimser varsayim istatistikleri sisirir).
+      * Gun ici sinyaldir - seans degistiginde pozisyon o gunun son
+        fiyatindan kapatilmis sayilir, geceye tasinmaz."""
+    rows = _read_m15_signals()
+    open_rows = [r for r in rows if r.get("status") == "OPEN"]
+    if not open_rows:
+        return
+
+    changed = False
+    for r in open_rows:
+        try:
+            entry = float(r["entry"]); stop = float(r["stop"]); tp = float(r["tp"])
+            direction = r["direction"]
+            sig_ts = pd.to_datetime(r["signal_time"])
+        except Exception:
+            r["status"] = "HATALI"
+            changed = True
+            continue
+
+        try:
+            df = fetch_intraday_df(r["ticker"], interval="15m", period="5d")
+            if df.empty:
+                continue
+            ts = pd.to_datetime(df["timestamp"])
+            try:
+                after = df[ts > sig_ts]
+            except TypeError:
+                # Zaman dilimi uyusmazligi (biri tz-aware, digeri degil)
+                after = df[ts.dt.tz_localize(None) > pd.Timestamp(sig_ts).tz_localize(None)]
+            if after.empty:
+                continue
+
+            sig_date = pd.Timestamp(sig_ts).date()
+            risk = abs(entry - stop)
+            outcome = None
+            exit_price = None
+            exit_time = ""
+            last_same_day = None
+
+            for _, bar in after.iterrows():
+                bar_date = pd.Timestamp(bar["timestamp"]).date()
+                if bar_date != sig_date:
+                    break                      # seans bitti
+                last_same_day = bar
+                if direction == "LONG":
+                    hit_stop, hit_tp = bar["low"] <= stop, bar["high"] >= tp
+                else:
+                    hit_stop, hit_tp = bar["high"] >= stop, bar["low"] <= tp
+                if hit_stop:                   # ayni mumda ikisi de -> ZARAR
+                    outcome, exit_price = "STOP", stop
+                    exit_time = str(bar["timestamp"])
+                    break
+                if hit_tp:
+                    outcome, exit_price = "TP", tp
+                    exit_time = str(bar["timestamp"])
+                    break
+
+            if outcome is None:
+                # Seans bitmisse kapat; bitmemisse acik birak, sonra bakariz
+                son_bar = pd.Timestamp(after.iloc[-1]["timestamp"]).date()
+                if son_bar != sig_date and last_same_day is not None:
+                    outcome = "SEANS_SONU"
+                    exit_price = float(last_same_day["close"])
+                    exit_time = str(last_same_day["timestamp"])
+                else:
+                    continue
+
+            pnl = (exit_price - entry) if direction == "LONG" else (entry - exit_price)
+            r["status"] = outcome
+            r["exit_time"] = exit_time
+            r["exit_price"] = f"{exit_price:.4f}"
+            r["result_r"] = f"{(pnl / risk):.3f}" if risk > 0 else "0"
+            changed = True
+        except Exception as e:
+            print(f"{r.get('ticker')} M15 sonuc kontrolu: {e}")
+
+    if changed:
+        _write_m15_signals(rows)
+
+
+def build_m15_report() -> str:
+    """Motor ve yon bazinda isabet/beklenti ozeti."""
+    rows = [r for r in _read_m15_signals() if r.get("status") not in ("OPEN", "HATALI", "")]
+    if not rows:
+        acik = len([r for r in _read_m15_signals() if r.get("status") == "OPEN"])
+        return f"⚙️ Motor sonucu henüz yok (takipte {acik} açık sinyal)."
+
+    def stats(sub):
+        vals = []
+        for r in sub:
+            try:
+                vals.append(float(r["result_r"]))
+            except (TypeError, ValueError):
+                pass
+        if not vals:
+            return None
+        arr = np.array(vals)
+        return {"n": len(arr), "wr": (arr > 0).mean() * 100,
+                "exp": arr.mean(), "tot": arr.sum()}
+
+    lines = ["⚙️ [MOTOR PERFORMANSI]"]
+    overall = stats(rows)
+    if overall:
+        lines.append(f"Toplam: {overall['n']} sinyal | isabet %{overall['wr']:.0f} | "
+                     f"beklenti {overall['exp']:+.2f}R | toplam {overall['tot']:+.1f}R")
+    for eng in sorted({r["engine"] for r in rows}):
+        sub = [r for r in rows if r["engine"] == eng]
+        s = stats(sub)
+        if not s:
+            continue
+        lines.append(f"  {eng}: {s['n']} | isabet %{s['wr']:.0f} | beklenti {s['exp']:+.2f}R")
+        for yon in ("LONG", "SHORT"):
+            sy = stats([r for r in sub if r["direction"] == yon])
+            if sy:
+                lines.append(f"     {yon}: {sy['n']} | beklenti {sy['exp']:+.2f}R")
+    if overall and overall["n"] < 30:
+        lines.append("ℹ️ 30'dan az sinyal — bu sonuçlar şans eseri olabilir.")
+    return "\n".join(lines)
+
+
 def scan_m15_engines(market: str, tickers: list):
     """Gun ici 3 motorlu tarama. Sinyal uretirse Telegram'a emir talimati
     gonderir. Bot islem ACMAZ."""
@@ -1553,6 +1725,11 @@ def scan_m15_engines(market: str, tickers: list):
 
             dist = abs(entry - stop)
             tp = entry + dist * M15_RR_RATIO if direction == "LONG" else entry - dist * M15_RR_RATIO
+            try:
+                sig_time = str(df.iloc[-2]["timestamp"])
+            except Exception:
+                sig_time = datetime.now().isoformat()
+            log_m15_signal(market, ticker, engine_name, direction, entry, stop, tp, sig_time)
             results.append({
                 "ticker": ticker, "engine": engine_name, "direction": direction,
                 "entry": entry, "stop": stop, "tp": tp,
@@ -2165,6 +2342,7 @@ def _self_check():
         "tamirci_repair", "tamirci_note_success", "dedektif_report",
         "scan_m15_engines", "m15_engine_breakout", "m15_engine_liquidity",
         "m15_engine_trend", "active_m15_engines",
+        "log_m15_signal", "check_m15_outcomes", "build_m15_report",
     ]
     missing = [name for name in required
                if not callable(globals().get(name))]
@@ -2325,6 +2503,12 @@ def run_forever():
                     dedektif_report("ABD M15 motor taraması (döngü)", e)
             if bist_is_open(istanbul_now) or us_is_open(ny_now):
                 _last_m15_scan_time = datetime.now()
+                # Acik sinyallerin sonucunu her turda guncelle - boylece canli
+                # test gercekten olculebilir bir sonuc uretir.
+                try:
+                    check_m15_outcomes()
+                except Exception as e:
+                    dedektif_report("M15 sonuç takibi (döngü)", e)
 
         # Gunluk yasam sinyali: bot ayakta ama sinyal uretmiyorsa bunu
         # sessizlikten ayirt edebilmek icin gunde bir kez ozet gonderiyoruz.
@@ -2338,7 +2522,8 @@ def run_forever():
                     f"BIST rejimi: {bist_reg} ({bist_note})\n"
                     f"ABD rejimi: {us_reg} ({us_note})\n"
                     f"Takipteki açık sinyal: {open_count}\n"
-                    f"Bugün sinyal gelmediyse sebebi ya rejim filtresi ya da kriterlere uyan hisse olmamasıdır."
+                    f"Bugün sinyal gelmediyse sebebi ya rejim filtresi ya da kriterlere uyan hisse olmamasıdır.\n\n"
+                    + build_m15_report()
                 )
                 mark_daily_scan_done(heartbeat_key, istanbul_now)
             except Exception as e:
