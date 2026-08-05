@@ -1507,6 +1507,45 @@ def active_m15_engines(regime: str):
     return ["BREAKOUT"]
 
 
+_index_change_cache = {}
+INDEX_CHANGE_CACHE_MINUTES = 30
+
+
+def get_index_change_pct(market: str):
+    """Endeksin O GUNKU yuzde degisimi (onceki kapanisa gore).
+
+    NEDEN VAR (2026-08-04): Piyasa Beyni rejimi GUNLUK EMA200 + ADX ile
+    olculuyor - yani ~10 aylik bir trend olcusu. Ama girisler ayni gun
+    (BIST gunluk) ya da 15 dakikalik mumlarla yapiliyor. Endeks sert dustugu
+    bir gunde bile 200 gunluk ortalamanin ustunde kalabilir, rejim
+    "YUKSELIS" der ve ortalamaya donus stratejileri o gun dusen HER hisseyi
+    LONG olarak isaretler. Kullanici tam olarak bunu gordu (30+ LONG, hepsi
+    dusen hisselerde).
+    Bu fonksiyon o iddiayi OLCULEBILIR hale getiriyor: her sinyale, giris
+    anindaki endeks gunluk degisimi kaydediliyor. Bir hafta sonra
+    "LONG'lar endeks duserken mi geliyordu ve isabet orani neydi?"
+    sorusuna tahminle degil veriyle cevap verebilecegiz.
+    Su asamada hicbir sinyali ENGELLEMIYOR - sadece kayit tutuyor."""
+    cached = _index_change_cache.get(market)
+    if cached and (datetime.now() - cached["time"]).total_seconds() < INDEX_CHANGE_CACHE_MINUTES * 60:
+        return cached["value"]
+
+    ticker = INDEX_TICKERS.get(market)
+    value = None
+    try:
+        df = fetch_daily_df(ticker, period="1mo")
+        if not df.empty and len(df) >= 2:
+            prev_close = float(df.iloc[-2]["close"])
+            last_close = float(df.iloc[-1]["close"])
+            if prev_close > 0:
+                value = (last_close - prev_close) / prev_close * 100
+    except Exception as e:
+        print(f"{market} endeks degisimi hesaplanamadi: {e}")
+
+    _index_change_cache[market] = {"value": value, "time": datetime.now()}
+    return value
+
+
 # ------------------------------------------------------------
 # M15 MOTOR SONUÇ TAKİBİ (2026-08-04)
 # ------------------------------------------------------------
@@ -1519,6 +1558,9 @@ M15_SIGNALS_FILE = _data_path("m15_signals.csv")
 M15_SIGNAL_FIELDS = [
     "signal_time", "market", "ticker", "engine", "direction",
     "entry", "stop", "tp", "status", "exit_time", "exit_price", "result_r",
+    # Giris anindaki piyasa baglami - sinyalin dogru kosulda uretilip
+    # uretilmedigini SONRADAN olcebilmek icin (bkz. get_index_change_pct).
+    "regime", "index_chg_pct",
 ]
 
 
@@ -1544,13 +1586,16 @@ def _write_m15_signals(rows):
         print(f"m15_signals yazilamadi: {e}")
 
 
-def log_m15_signal(market, ticker, engine, direction, entry, stop, tp, signal_time):
+def log_m15_signal(market, ticker, engine, direction, entry, stop, tp, signal_time,
+                  regime="", index_chg_pct=None):
     rows = _read_m15_signals()
     rows.append({
         "signal_time": signal_time, "market": market, "ticker": ticker,
         "engine": engine, "direction": direction,
         "entry": f"{entry:.4f}", "stop": f"{stop:.4f}", "tp": f"{tp:.4f}",
         "status": "OPEN", "exit_time": "", "exit_price": "", "result_r": "",
+        "regime": regime,
+        "index_chg_pct": "" if index_chg_pct is None else f"{index_chg_pct:.2f}",
     })
     _write_m15_signals(rows)
 
@@ -1676,6 +1721,40 @@ def build_m15_report() -> str:
                 lines.append(f"     {yon}: {sy['n']} | beklenti {sy['exp']:+.2f}R")
     if overall and overall["n"] < 30:
         lines.append("ℹ️ 30'dan az sinyal — bu sonuçlar şans eseri olabilir.")
+
+    # PIYASA BAGLAMI KIRILIMI: "sinyaller endeks duserken mi uretiliyordu?"
+    # sorusunun veriye dayali cevabi. Rejim yavas (gunluk EMA200) oldugu icin
+    # dusus gunlerinde bile LONG'a izin verebiliyor - bu kirilim tam olarak
+    # onu gorunur kiliyor.
+    with_ctx = [r for r in rows if (r.get("index_chg_pct") or "").strip()]
+    if with_ctx:
+        up, down = [], []
+        for r in with_ctx:
+            try:
+                (up if float(r["index_chg_pct"]) >= 0 else down).append(r)
+            except ValueError:
+                pass
+        lines.append("")
+        lines.append("📉 PİYASA BAĞLAMI (sinyal anındaki endeks günü)")
+        for etiket, sub in (("Endeks YÜKSELİRKEN", up), ("Endeks DÜŞERKEN", down)):
+            s = stats(sub)
+            if s:
+                lines.append(f"  {etiket}: {s['n']} sinyal | isabet %{s['wr']:.0f} | "
+                             f"beklenti {s['exp']:+.2f}R")
+                for yon in ("LONG", "SHORT"):
+                    sy = stats([r for r in sub if r["direction"] == yon])
+                    if sy:
+                        lines.append(f"     {yon}: {sy['n']} | beklenti {sy['exp']:+.2f}R")
+        s_down = stats(down)
+        if s_down and s_down["n"] >= 10 and s_down["exp"] < 0:
+            lines.append("  ⚠️ Endeks düşen günlerde beklenti negatif — rejim filtresi "
+                         "yavaş olduğu için (günlük EMA200) düşüş günlerinde de LONG'a "
+                         "izin veriyor olabilir. Yeterli veri birikince gözden geçirelim.")
+    else:
+        lines.append("")
+        lines.append("ℹ️ Piyasa bağlamı kaydı bu sürümle başladı — birkaç gün sonra "
+                     "'endeks düşerken üretilen sinyaller' kırılımı da burada görünecek.")
+
     return "\n".join(lines)
 
 
@@ -1689,6 +1768,9 @@ def scan_m15_engines(market: str, tickers: list):
 
     engines = active_m15_engines(regime)
     today = datetime.now().date().isoformat()
+    # Endeks gunluk degisimi tarama basina BIR KEZ cekilir (hisse basina
+    # degil) - hem gereksiz istek olmaz hem tum sinyaller ayni baglami tasir.
+    index_chg = get_index_change_pct(market)
     results = []
 
     for ticker in tickers:
@@ -1729,7 +1811,8 @@ def scan_m15_engines(market: str, tickers: list):
                 sig_time = str(df.iloc[-2]["timestamp"])
             except Exception:
                 sig_time = datetime.now().isoformat()
-            log_m15_signal(market, ticker, engine_name, direction, entry, stop, tp, sig_time)
+            log_m15_signal(market, ticker, engine_name, direction, entry, stop, tp, sig_time,
+                           regime=regime, index_chg_pct=index_chg)
             results.append({
                 "ticker": ticker, "engine": engine_name, "direction": direction,
                 "entry": entry, "stop": stop, "tp": tp,
@@ -2343,6 +2426,7 @@ def _self_check():
         "scan_m15_engines", "m15_engine_breakout", "m15_engine_liquidity",
         "m15_engine_trend", "active_m15_engines",
         "log_m15_signal", "check_m15_outcomes", "build_m15_report",
+        "get_index_change_pct",
     ]
     missing = [name for name in required
                if not callable(globals().get(name))]
