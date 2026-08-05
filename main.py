@@ -29,6 +29,9 @@ TELEGRAM_CHAT_ID = os.environ.get("TELEGRAM_CHAT_ID")
 
 RESTART_DELAY_SECONDS = int(os.environ.get("RESTART_DELAY_SECONDS", "60"))
 MAX_CONSECUTIVE_CRASHES = int(os.environ.get("MAX_CONSECUTIVE_CRASHES", "5"))
+# Ardisik cokme siniri asilinca kalici pes etmek yerine bu kadar bekleyip
+# yeniden denenir (bkz. run_bot icindeki DERS notu).
+LONG_BACKOFF_MINUTES = int(os.environ.get("LONG_BACKOFF_MINUTES", "30"))
 # Render ücretsiz plan 15 dk hareketsizlikte uyuduğu için bunun altında olmalı
 SELF_PING_MINUTES = int(os.environ.get("SELF_PING_MINUTES", "10"))
 
@@ -85,9 +88,22 @@ def run_bot():
                    f"{RESTART_DELAY_SECONDS} sn sonra yeniden denenecek.")
             traceback.print_exc()
             if crashes >= MAX_CONSECUTIVE_CRASHES:
-                set_state("bırakıldı", "çok fazla ardışık çökme")
-                notify(f"🛑 Bot arka arkaya {crashes} kez çöktü — bırakılıyor.")
-                return
+                # DERS (2026-08-05): eskiden burada `return` vardi - bot 5
+                # cokmeden sonra KALICI olarak birakiliyordu. Canlida tam bu
+                # oldu: bot ~8.5 saat olu kaldi, Flask ayakta oldugu icin
+                # servis "calisiyor" gorunuyordu ve gunun taramalari sessizce
+                # kacirildi. Gozetimsiz calisan bir bot icin kalici pes etmek
+                # yanlis: gecici bir sorun (veri kaynagi, ag) kalici olume
+                # donusuyor. Artik uzun bir mola verip sayaci sifirliyor ve
+                # yeniden deniyor - hizli cokme dongusunu de onluyor cunku
+                # denemeler arasi LONG_BACKOFF_MINUTES kadar bekliyoruz.
+                set_state("uzun molada", f"{crashes} ardışık çökme")
+                notify(f"🛑 Bot arka arkaya {crashes} kez çöktü.\n"
+                       f"{LONG_BACKOFF_MINUTES} dakika bekleyip yeniden denenecek "
+                       f"(kalıcı olarak bırakılmıyor).")
+                time.sleep(LONG_BACKOFF_MINUTES * 60)
+                crashes = 0
+                continue
         time.sleep(RESTART_DELAY_SECONDS)
 
 

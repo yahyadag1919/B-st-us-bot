@@ -1684,6 +1684,119 @@ def check_m15_outcomes():
         _write_m15_signals(rows)
 
 
+# ------------------------------------------------------------
+# TELEGRAM KOMUTLARI (2026-08-05)
+# ------------------------------------------------------------
+# NEDEN VAR: hisse botunun kendi komut dinleyicisi yoktu - kullanici bilgi
+# almak icin aksam 19:00'daki gunluk mesaji beklemek zorundaydi. Futbol
+# modulunun kendi dinleyicisi var ama o AYRI bir Telegram botu; hisse
+# sohbetine yazilan komutlar hicbir ise yaramiyordu.
+# Kripto botundaki /stats-/positions-/regime desenini buraya tasiyoruz.
+CMD_OFFSET_FILE = _data_path("stock_cmd_offset.json")
+
+
+def _cmd_load_offset():
+    try:
+        with open(CMD_OFFSET_FILE) as f:
+            return int(json.load(f).get("offset", 0))
+    except Exception:
+        return 0
+
+
+def _cmd_save_offset(offset: int):
+    try:
+        with open(CMD_OFFSET_FILE, "w") as f:
+            json.dump({"offset": offset}, f)
+    except Exception as e:
+        print(f"komut offset yazilamadi: {e}")
+
+
+def build_durum_message() -> str:
+    bist_reg, bist_note = get_market_regime("BIST")
+    us_reg, us_note = get_market_regime("ABD")
+    acik = len(_read_tracking())
+    ist = datetime.now(ZoneInfo("Europe/Istanbul"))
+    ny = datetime.now(ZoneInfo("America/New_York"))
+    return (
+        "💗 [DURUM] Bot çalışıyor.\n"
+        f"BIST rejimi: {bist_reg} ({bist_note})\n"
+        f"ABD rejimi: {us_reg} ({us_note})\n"
+        f"BIST seansı: {'AÇIK' if bist_is_open(ist) else 'kapalı'} | "
+        f"ABD seansı: {'AÇIK' if us_is_open(ny) else 'kapalı'}\n"
+        f"Taranan hisse: BIST {len(BIST_TICKERS)} | ABD swing {len(US_TICKERS)} | "
+        f"ABD gün içi {len(US_INTRADAY_TICKERS)}\n"
+        f"Takipteki açık sinyal: {acik}"
+    )
+
+
+def build_sinyaller_message() -> str:
+    """Bugun uretilen M15 motor sinyalleri."""
+    today = datetime.now().date().isoformat()
+    rows = [r for r in _read_m15_signals()
+            if (r.get("signal_time") or "").startswith(today)]
+    if not rows:
+        return "📋 Bugün motor sinyali üretilmedi."
+    lines = [f"📋 Bugünkü motor sinyalleri ({len(rows)} adet)"]
+    for r in rows[-15:]:   # cok uzun mesaj olmasin
+        durum = r.get("status", "OPEN")
+        lines.append(f"  {r['ticker']} {r['direction']} [{r['engine']}] "
+                     f"giriş {r['entry']} → {durum}"
+                     + (f" ({r['result_r']}R)" if r.get("result_r") else ""))
+    if len(rows) > 15:
+        lines.append(f"  ... ve {len(rows) - 15} tane daha")
+    return "\n".join(lines)
+
+
+def poll_stock_commands():
+    """Telegram komutlarini dinler. Hatalar sessizce yutulur - komut
+    dinleyici yuzunden ana dongunun durmasi kabul edilemez."""
+    if not TELEGRAM_TOKEN or not TELEGRAM_CHAT_ID:
+        return 0
+    offset = _cmd_load_offset()
+    try:
+        resp = requests.get(
+            f"https://api.telegram.org/bot{TELEGRAM_TOKEN}/getUpdates",
+            params={"offset": offset, "timeout": 0}, timeout=15)
+        updates = resp.json().get("result", [])
+    except Exception as e:
+        print(f"komut dinleyici: {e}")
+        return 0
+    if not updates:
+        return 0
+
+    answered = 0
+    max_id = offset - 1
+    for u in updates:
+        max_id = max(max_id, u.get("update_id", 0))
+        msg = u.get("message") or u.get("channel_post") or {}
+        text = (msg.get("text") or "").strip().lower()
+        chat_id = str((msg.get("chat") or {}).get("id", ""))
+        if chat_id != str(TELEGRAM_CHAT_ID) or not text.startswith("/"):
+            continue
+        try:
+            if text.startswith("/durum"):
+                send_telegram_message(build_durum_message())
+            elif text.startswith("/motor"):
+                send_telegram_message(build_m15_report())
+            elif text.startswith("/sinyaller"):
+                send_telegram_message(build_sinyaller_message())
+            elif text.startswith("/yardim") or text.startswith("/help"):
+                send_telegram_message(
+                    "📖 Komutlar:\n"
+                    "/durum — rejimler, seans durumu, taranan hisse sayısı\n"
+                    "/motor — motor performansı (isabet, R beklentisi, piyasa bağlamı)\n"
+                    "/sinyaller — bugün üretilen motor sinyalleri\n"
+                    "/yardim — bu liste")
+            else:
+                continue
+            answered += 1
+        except Exception as e:
+            print(f"komut islenemedi ({text}): {e}")
+
+    _cmd_save_offset(max_id + 1)
+    return answered
+
+
 def build_m15_report() -> str:
     """Motor ve yon bazinda isabet/beklenti ozeti."""
     rows = [r for r in _read_m15_signals() if r.get("status") not in ("OPEN", "HATALI", "")]
@@ -2426,7 +2539,8 @@ def _self_check():
         "scan_m15_engines", "m15_engine_breakout", "m15_engine_liquidity",
         "m15_engine_trend", "active_m15_engines",
         "log_m15_signal", "check_m15_outcomes", "build_m15_report",
-        "get_index_change_pct",
+        "get_index_change_pct", "poll_stock_commands", "build_durum_message",
+        "build_sinyaller_message",
     ]
     missing = [name for name in required
                if not callable(globals().get(name))]
@@ -2676,6 +2790,12 @@ def run_forever():
             fb.poll_and_respond()
         except Exception as e:
             dedektif_report("Futbol komut dinleyici (döngü)", e)
+
+        # Hisse botunun kendi komutlari (/durum, /motor, /sinyaller, /yardim)
+        try:
+            poll_stock_commands()
+        except Exception as e:
+            dedektif_report("Hisse komut dinleyici (döngü)", e)
 
         # Futbol günlük özeti — kendi içinde günde bir kez gönderecek şekilde
         # kilitli, bu yüzden her turda güvenle çağrılabilir.
