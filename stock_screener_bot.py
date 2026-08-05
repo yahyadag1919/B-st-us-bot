@@ -1873,12 +1873,28 @@ def build_m15_report() -> str:
 
 def scan_m15_engines(market: str, tickers: list):
     """Gun ici 3 motorlu tarama. Sinyal uretirse Telegram'a emir talimati
-    gonderir. Bot islem ACMAZ."""
-    allowed, allowed_direction, regime, regime_note = market_scan_allowed(market)
-    if not allowed:
-        print(f"{market} M15: rejim {regime} - tarama atlandi")
-        return
+    gonderir. Bot islem ACMAZ.
 
+    DERS (2026-08-05, kullanicinin talebi): Bu kol KRIPTO BOTUNUN AYNISI
+    olmali. Kriptoda rejim yalnizca HANGI MOTORUN calisacagini seciyordu -
+    yonu hic kisitlamiyordu, yonu her motor kendi mantigiyla belirliyordu
+    (kirilim yukari->LONG asagi->SHORT, igne tuzagi ignenin tersine,
+    trend motoru ust zaman diliminin yonunde).
+    Hisse botuna sonradan eklenen "YUKSELIS->sadece LONG" kurali kriptoda
+    YOKTU ve iki soruna yol aciyordu:
+      1) Endeks yukselis rejimindeyken SHORT sinyalleri daha uretilmeden
+         eleniyordu; kullanici VIOP/varant tarafinda short yonunde islem
+         yapabildigi icin bu gercek firsat kaybi.
+      2) Olcum de ayni korlugu miras aliyordu - SHORT satiri hep bos
+         kalacagi icin "hangi yon daha dogru" sorusu hicbir zaman
+         cevaplanamayacakti.
+    Artik rejim SADECE motor seciyor; YATAY'da da duruyor degil, likidite
+    avcisi ile calisiyor (yine kriptodaki gibi).
+    NOT: gunluk BIST kollari ve ABD swing/gun ici kollari bu degisiklikten
+    ETKILENMEDI - onlar turnuvada dogrulanmis sistemler ve Gemini'nin yon
+    filtresi kararina tabi; sadece bu M15 motor kolu kripto davranisina
+    dondu."""
+    regime, regime_note = get_market_regime(market)
     engines = active_m15_engines(regime)
     today = datetime.now().date().isoformat()
     # Endeks gunluk degisimi tarama basina BIR KEZ cekilir (hisse basina
@@ -1911,8 +1927,8 @@ def scan_m15_engines(market: str, tickers: list):
                 continue
 
             direction, entry, stop, engine_name = result
-            if allowed_direction and direction != allowed_direction:
-                continue
+            # Yon kisiti YOK - motor hangi yonu bulduysa o gecerli (kripto
+            # davranisi). Rejim yalnizca yukarida motor secimini yapti.
             key = f"{market}|{ticker}|{direction}|{today}"
             if _m15_alerted.get(key):
                 continue
@@ -1944,7 +1960,7 @@ def scan_m15_engines(market: str, tickers: list):
     for r in results:
         yon = "🟢 LONG" if r["direction"] == "LONG" else "🔴 SHORT"
         if market == "BIST" and r["direction"] == "SHORT":
-            yon = "🔴 [BİLGİ AMAÇLI SHORT]"
+            yon = "🔴 SHORT [BIST — VİOP/varant]"
         lines.append(
             f"{yon} {r['ticker']} — motor: {r['engine']}\n"
             f"Giriş: {r['entry']:.2f} | 🛑 Stop: {r['stop']:.2f} | "
@@ -2626,7 +2642,8 @@ def run_forever():
         f"İki strateji: Hacim Z-Skor + ATR Kırılımı.\n"
         f"\n⚙️ GÜN İÇİ 3 MOTOR (kripto mimarisi, YENİ): Breakout / Likidite Avcısı / Trend — "
         f"her {M15_SCAN_INTERVAL_MINUTES} dk, iki piyasa da seans içinde. Sabit 1:{M15_RR_RATIO:g} R:R. "
-        f"Rejim motoru seçer. Backtest edilmedi, canlı gözlem aşamasında.\n\n"
+        f"Rejim SADECE motor seçer, yönü kısıtlamaz — LONG da SHORT da gelir (kriptodaki gibi). "
+        f"Backtest edilmedi, canlı gözlem aşamasında.\n\n"
         f"⚠️ Bot işlem AÇMIYOR — sadece emir talimatı ve takip uyarısı gönderir."
         + storage_warning
     )
