@@ -469,6 +469,7 @@ def fmt(label, s):
 
 def main():
     tickers = BIST_TICKERS[:TOURNAMENT_TICKER_LIMIT]
+    print(f"TURNUVA BASLIYOR: {len(tickers)} hisse", flush=True)
     send_telegram_message(
         "🏁 [BIST M15 TURNUVA] Başladı.\n"
         f"{len(tickers)} hisse | 60 günlük 15dk verisi | {len(STRATEGIES)} strateji\n"
@@ -504,10 +505,10 @@ def main():
                 except Exception as e:
                     print(f"{tk} / {name}: {e}")
             ok += 1
-            print(f"[{n}/{len(tickers)}] {tk} tamam")
+            print(f"[{n}/{len(tickers)}] {tk} tamam", flush=True)
         except Exception as e:
             failed.append(tk)
-            print(f"[{n}/{len(tickers)}] {tk} HATA: {e}")
+            print(f"[{n}/{len(tickers)}] {tk} HATA: {e}", flush=True)
         time.sleep(0.4)
 
     lines = ["🏆 [BIST M15 TURNUVA SONUÇLARI]",
@@ -587,6 +588,26 @@ if __name__ == "__main__":
             print(f"Port dinleyici acilamadi: {e}")
 
     threading.Thread(target=_serve, daemon=True).start()
+
+    # KENDI KENDINE PING (2026-08-06): Render ucretsiz plani 15 dakika
+    # DISARIDAN istek almazsa servisi uyutuyor. Ana bot bunu keep_awake ile
+    # cozuyordu; turnuva script'inde yoktu ve turnuva ortasinda servis
+    # uyutuldugu icin islem sessizce durdu (son log 23:11, sonrasi bos).
+    # Turnuva 40+ dakika surdugu icin bu sart.
+    def _keep_awake():
+        url = os.environ.get("RENDER_EXTERNAL_URL")
+        if not url:
+            return
+        target = url.rstrip("/")
+        time.sleep(60)
+        while True:
+            try:
+                requests.get(target, timeout=20)
+            except Exception:
+                pass
+            time.sleep(600)
+
+    threading.Thread(target=_keep_awake, daemon=True).start()
 
     main()
     # Turnuva bitti ama sureci hemen kapatmiyoruz: Render bunu cokme sayip
