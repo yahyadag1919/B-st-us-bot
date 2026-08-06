@@ -1687,6 +1687,32 @@ def check_m15_outcomes():
         _write_m15_signals(rows)
 
 
+# Gunluk veri onbellegi (M15 taramasi icin)
+# DERS (2026-08-06): TREND motoru gunluk yon icin fetch_daily_df cagiriyordu
+# ve bu HER HISSE icin HER 15 DAKIKADA bir yapiliyordu - 99 hisse x saatte 4
+# tarama = saatte ~400 ekstra istek. yfinance bunu hiz limitine takiyor, bos
+# donuyor, motor da sessizce None veriyordu. Canlida tam bu oldu: veri
+# alinan 99/100 ama sinyal 0.
+# Gunluk mum gunde BIR KEZ degisir; 15 dakikada bir cekmenin hicbir faydasi
+# yok. Onbellek istek sayisini ~40 kat dusuruyor.
+DAILY_CACHE_HOURS = float(os.environ.get("DAILY_CACHE_HOURS", "4"))
+_daily_cache = {}
+
+
+def get_daily_cached(ticker: str):
+    """M15 taramasi icin gunluk veri - onbellekli."""
+    now = time.time()
+    hit = _daily_cache.get(ticker)
+    if hit and (now - hit[0]) < DAILY_CACHE_HOURS * 3600:
+        return hit[1]
+    try:
+        df = fetch_daily_df(ticker, period="6mo")
+    except Exception:
+        df = pd.DataFrame()
+    _daily_cache[ticker] = (now, df)
+    return df
+
+
 # ------------------------------------------------------------
 # TELEGRAM KOMUTLARI (2026-08-05)
 # ------------------------------------------------------------
@@ -1731,7 +1757,9 @@ def build_durum_message() -> str:
         motor_satirlari.append(
             f"  {mkt}: {dk} dk önce | veri alınan {st['veri_ok']}/"
             f"{st['veri_ok'] + st['veri_yok']} | sinyal {st['sinyal']} | "
-            f"motorlar {', '.join(st['engines'])}")
+            f"motorlar {', '.join(st['engines'])}"
+            + (f"\n     ⚠️ günlük verisi gelmeyen: {st['gunluk_yok']} "
+               f"(TREND motoru bunlarda çalışamadı)" if st.get("gunluk_yok") else ""))
 
     return (
         "💗 [DURUM] Bot çalışıyor.\n"
@@ -1921,6 +1949,8 @@ def scan_m15_engines(market: str, tickers: list):
 
     veri_ok = 0
     veri_yok = 0
+    gunluk_ok = 0
+    gunluk_yok = 0
     for ticker in tickers:
         try:
             df = fetch_intraday_df(ticker, interval="15m", period="5d")
@@ -1936,7 +1966,11 @@ def scan_m15_engines(market: str, tickers: list):
 
             daily = None
             if "TREND" in engines:
-                daily = fetch_daily_df(ticker, period="6mo")
+                daily = get_daily_cached(ticker)
+                if daily is None or daily.empty or len(daily) < 55:
+                    # Gunluk veri yoksa TREND motoru calisamaz - sayiyoruz ki
+                    # bu da sessizce kaybolmasin.
+                    gunluk_yok += 1
 
             result = None
             for eng in engines:   # ilk sinyal veren kazanir
@@ -1979,6 +2013,7 @@ def scan_m15_engines(market: str, tickers: list):
     _m15_scan_stats[market] = {
         "time": datetime.now(), "regime": regime, "engines": list(engines),
         "veri_ok": veri_ok, "veri_yok": veri_yok, "sinyal": len(results),
+        "gunluk_ok": gunluk_ok, "gunluk_yok": gunluk_yok,
     }
 
     # Hicbir hisseden veri gelmediyse bu "sinyal yok" degil, KOL OLU demektir.
@@ -2600,6 +2635,7 @@ def _self_check():
         "m15_engine_trend", "active_m15_engines",
         "log_m15_signal", "check_m15_outcomes", "build_m15_report",
         "get_index_change_pct", "poll_stock_commands", "build_durum_message",
+        "get_daily_cached",
         "build_sinyaller_message",
     ]
     missing = [name for name in required
