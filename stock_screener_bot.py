@@ -1466,7 +1466,15 @@ def m15_engine_trend(df, daily_df):
         return None
     d = daily_df.copy()
     d["ema50"] = d["close"].ewm(span=50, adjust=False).mean()
-    drow = d.iloc[-1]
+    # DERS (2026-08-06): burada d.iloc[-1] kullaniliyordu - yani BUGUNUN
+    # HENUZ KAPANMAMIS mumu. Gun ici fiyat EMA50'nin altina/ustune gectikce
+    # yon LONG<->SHORT arasinda gidip geliyordu; canlida ayni hissede ayni
+    # gun hem LONG hem SHORT sinyali uretti (MU 901 LONG / 888 SHORT,
+    # AMD 494 LONG / 489 SHORT) ve tek gunde 73 sinyal cikti.
+    # Kripto botundaki karsiligi (H4 Swing) zaten SON KAPANMIS mumu
+    # kullaniyordu; buraya tasinirken tutarsizlik olusmus. Duzeltildi:
+    # yon gun boyunca SABIT kalir, sadece zamanlama M15'ten gelir.
+    drow = d.iloc[-2]
     if pd.isna(drow["ema50"]):
         return None
     if drow["close"] > drow["ema50"]:
