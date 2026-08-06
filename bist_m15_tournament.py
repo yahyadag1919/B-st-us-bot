@@ -562,4 +562,36 @@ def main():
 
 
 if __name__ == "__main__":
+    # Render Web Service, sureci canli saymak icin bir PORT dinlemesini
+    # bekliyor. Turnuva script'i normalde sadece hesap yapip bitiyor ve hic
+    # port acmiyordu; bu yuzden Render "no open ports detected" deyip
+    # SURECI SONLANDIRIYORDU - turnuva bitmeden kesiliyordu.
+    # Cozum: arka planda kucuk bir HTTP sunucusu acip Render'i memnun etmek.
+    # Turnuva ana thread'de calismaya devam eder.
+    import threading
+    from http.server import BaseHTTPRequestHandler, HTTPServer
+
+    class _Ping(BaseHTTPRequestHandler):
+        def do_GET(self):
+            self.send_response(200)
+            self.end_headers()
+            self.wfile.write(b"turnuva calisiyor")
+
+        def log_message(self, *a):
+            pass  # Render loglarini doldurmasin
+
+    def _serve():
+        try:
+            HTTPServer(("0.0.0.0", int(os.environ.get("PORT", "10000"))), _Ping).serve_forever()
+        except Exception as e:
+            print(f"Port dinleyici acilamadi: {e}")
+
+    threading.Thread(target=_serve, daemon=True).start()
+
     main()
+    # Turnuva bitti ama sureci hemen kapatmiyoruz: Render bunu cokme sayip
+    # yeniden baslatir ve turnuva bastan koser. Kullanici Start Command'i
+    # geri alana kadar bekliyoruz.
+    print("Turnuva tamamlandi. Start Command'i 'python main.py' olarak geri alabilirsin.")
+    while True:
+        time.sleep(3600)
