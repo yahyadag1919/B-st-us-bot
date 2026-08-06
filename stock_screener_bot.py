@@ -1373,6 +1373,9 @@ M15_WICK_MIN_ATR = float(os.environ.get("M15_WICK_MIN_ATR", "0.3"))
 M15_WICK_MIN_RATIO = float(os.environ.get("M15_WICK_MIN_RATIO", "0.5"))
 # Ayni hisse+yon icin gunde bir kez sinyal (spam onlemi)
 _m15_alerted = {}
+# Son taramanin teshis bilgileri (/durum icin) ve "hic veri yok" uyari kilidi
+_m15_scan_stats = {}
+_m15_no_data_alerted = {}
 
 
 def _m15_bollinger(df, period=M15_BB_PERIOD, mult=2.0):
@@ -1717,6 +1720,19 @@ def build_durum_message() -> str:
     acik = len(_read_tracking())
     ist = datetime.now(ZoneInfo("Europe/Istanbul"))
     ny = datetime.now(ZoneInfo("America/New_York"))
+
+    motor_satirlari = []
+    for mkt in ("BIST", "ABD"):
+        st = _m15_scan_stats.get(mkt)
+        if not st:
+            motor_satirlari.append(f"  {mkt}: motor taraması henüz çalışmadı")
+            continue
+        dk = int((datetime.now() - st["time"]).total_seconds() / 60)
+        motor_satirlari.append(
+            f"  {mkt}: {dk} dk önce | veri alınan {st['veri_ok']}/"
+            f"{st['veri_ok'] + st['veri_yok']} | sinyal {st['sinyal']} | "
+            f"motorlar {', '.join(st['engines'])}")
+
     return (
         "💗 [DURUM] Bot çalışıyor.\n"
         f"BIST rejimi: {bist_reg} ({bist_note})\n"
@@ -1725,7 +1741,8 @@ def build_durum_message() -> str:
         f"ABD seansı: {'AÇIK' if us_is_open(ny) else 'kapalı'}\n"
         f"Taranan hisse: BIST {len(BIST_TICKERS)} | ABD swing {len(US_TICKERS)} | "
         f"ABD gün içi {len(US_INTRADAY_TICKERS)}\n"
-        f"Takipteki açık sinyal: {acik}"
+        f"Takipteki açık sinyal: {acik}\n\n"
+        "⚙️ Son motor taraması:\n" + "\n".join(motor_satirlari)
     )
 
 
@@ -1902,11 +1919,19 @@ def scan_m15_engines(market: str, tickers: list):
     index_chg = get_index_change_pct(market)
     results = []
 
+    veri_ok = 0
+    veri_yok = 0
     for ticker in tickers:
         try:
             df = fetch_intraday_df(ticker, interval="15m", period="5d")
             if df.empty or len(df) < 80:
+                # DERS (2026-08-06): burasi eskiden SESSIZCE atliyordu. Eger
+                # yfinance BIST icin 15 dakikalik veri vermiyorsa motorlar hic
+                # calismadan tarama biter ve disaridan "sinyal yok" ile
+                # "veri yok" ayirt edilemez. Artik sayiyoruz.
+                veri_yok += 1
                 continue
+            veri_ok += 1
             df = compute_indicators(df)
 
             daily = None
@@ -1951,8 +1976,27 @@ def scan_m15_engines(market: str, tickers: list):
             print(f"{ticker} M15 hata: {e}")
             dedektif_report(f"{market} M15 motor taraması", e, ticker)
 
+    _m15_scan_stats[market] = {
+        "time": datetime.now(), "regime": regime, "engines": list(engines),
+        "veri_ok": veri_ok, "veri_yok": veri_yok, "sinyal": len(results),
+    }
+
+    # Hicbir hisseden veri gelmediyse bu "sinyal yok" degil, KOL OLU demektir.
+    # Gunde bir kez uyariyoruz - sessizce olmesindense bilelim.
+    if veri_ok == 0 and tickers:
+        bugun = datetime.now().date().isoformat()
+        if _m15_no_data_alerted.get(market) != bugun:
+            _m15_no_data_alerted[market] = bugun
+            send_telegram_message(
+                f"🚨 [MOTOR KOLU VERİ ALAMIYOR] {market}\n"
+                f"{len(tickers)} hissenin hiçbirinden 15 dakikalık veri gelmedi.\n"
+                f"Bu 'sinyal yok' değil — motorlar hiç çalışamıyor demektir. "
+                f"Veri kaynağı bu piyasa için gün içi veri vermiyor olabilir."
+            )
+
     if not results:
-        print(f"{market} M15: sinyal yok (rejim {regime}, motorlar {engines})")
+        print(f"{market} M15: sinyal yok (rejim {regime}, motorlar {engines}, "
+              f"veri alinan {veri_ok}/{len(tickers)})")
         return
 
     lines = [f"⚙️ [GÜN İÇİ MOTOR SİNYALİ] {market}",
