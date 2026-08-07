@@ -1363,6 +1363,24 @@ def check_us_gunici_outcomes():
 # TP motorlar tarafindan belirlenmez, her zaman sabit 1:2 R:R'dir.
 
 M15_RR_RATIO = float(os.environ.get("M15_RR_RATIO", "2.0"))
+# ------------------------------------------------------------
+# M15 MOTOR KOLU KAPATILDI (2026-08-07, turnuva sonucu + Gemini karari)
+# ------------------------------------------------------------
+# bist_m15_tournament.py 95 hisse / 60 gun / 15 varyant uzerinde kosuldu:
+# TUM varyantlar maliyet sonrasi NEGATIF cikti (-0.03R ile -0.39R arasi).
+# Onemli iki bulgu:
+#   * BREAKOUT bir kalibrasyon sorunu DEGILDI - sikisma esigi %25'ten %60'a,
+#     hacim 1.5'ten 1.0'a gevsetildiginde islem sayisi 2.7 katina cikti ama
+#     beklenti hep ~-0.14R'de kaldi. Gevsetmek daha cok islem alip ayni
+#     oranda kaybetmek demekti.
+#   * TREND motoru (canlida tek calisan) 44.924 islemde -0.037R.
+# Kol KAPALI. Kod silinmedi, cunku:
+#   1) 2900 satirlik dosyada buyuk silme, dogrulanmis BIST/ABD kollarini
+#      kirma riski tasiyor (bu projede def satiri dusme hatasi 5 kez yasandi),
+#   2) calismayan kod zararsiz; kirilan bir kesin sinyal taramasi degil,
+#   3) ileride farkli bir donemde yeniden olculmek istenirse hazir duruyor.
+# Yeniden acmak icin: M15_ENGINES_ENABLED=true
+M15_ENGINES_ENABLED = os.environ.get("M15_ENGINES_ENABLED", "false").lower() == "true"
 M15_SCAN_INTERVAL_MINUTES = int(os.environ.get("M15_SCAN_INTERVAL_MINUTES", "15"))
 M15_BB_PERIOD = int(os.environ.get("M15_BB_PERIOD", "20"))
 M15_SQUEEZE_LOOKBACK = int(os.environ.get("M15_SQUEEZE_LOOKBACK", "50"))
@@ -1784,6 +1802,10 @@ def build_durum_message() -> str:
 
 def build_sinyaller_message() -> str:
     """Bugun uretilen M15 motor sinyalleri."""
+    if not M15_ENGINES_ENABLED:
+        return ("🚫 Gün içi motor kolu kapalı — bu komut motor sinyallerini gösterir.\n"
+                "Aktif kollar: BIST kesin sinyal (17:35), BIST radar (13:00/15:30), "
+                "ABD swing (23:05), ABD gün içi RSI21.")
     today = datetime.now().date().isoformat()
     rows = [r for r in _read_m15_signals()
             if (r.get("signal_time") or "").startswith(today)]
@@ -1851,6 +1873,13 @@ def poll_stock_commands():
 
 
 def build_m15_report() -> str:
+    if not M15_ENGINES_ENABLED:
+        return ("🚫 Gün içi motor kolu KAPALI (2026-08-07).\n"
+                "Turnuva sonucu: 15 varyantın tamamı maliyet sonrası negatif "
+                "(−0.03R … −0.39R). Breakout'un eşiğini gevşetmek işe yaramadı — "
+                "işlem sayısı 2,7 katına çıktı, beklenti sabit kaldı.\n"
+                "Sistem yalnızca turnuvada doğrulanmış BIST günlük ve ABD swing "
+                "kollarıyla çalışıyor.")
     """Motor ve yon bazinda isabet/beklenti ozeti."""
     rows = [r for r in _read_m15_signals() if r.get("status") not in ("OPEN", "HATALI", "")]
     if not rows:
@@ -2728,10 +2757,11 @@ def run_forever():
         f"(SİNYAL AMAÇLI — kendi opsiyon maliyetine göre değerlendir).\n"
         f"ABD swing: {len(US_TICKERS)} hisse, ABD kapanışından sonra (~{US_SWING_CHECK_HOUR:02d}:{US_SWING_CHECK_MINUTE:02d} New York). "
         f"İki strateji: Hacim Z-Skor + ATR Kırılımı.\n"
-        f"\n⚙️ GÜN İÇİ 3 MOTOR (kripto mimarisi, YENİ): Breakout / Likidite Avcısı / Trend — "
-        f"her {M15_SCAN_INTERVAL_MINUTES} dk, iki piyasa da seans içinde. Sabit 1:{M15_RR_RATIO:g} R:R. "
-        f"Rejim SADECE motor seçer, yönü kısıtlamaz — LONG da SHORT da gelir (kriptodaki gibi). "
-        f"Backtest edilmedi, canlı gözlem aşamasında.\n\n"
+        + (f"\n⚙️ GÜN İÇİ 3 MOTOR: AÇIK (her {M15_SCAN_INTERVAL_MINUTES} dk, 1:{M15_RR_RATIO:g} R:R)\n\n"
+           if M15_ENGINES_ENABLED else
+           "\n🚫 Gün içi 3 motorlu kol KAPATILDI (2026-08-07). Turnuvada 15 varyantın "
+           "tamamı maliyet sonrası negatif çıktı; Breakout'un eşiğini gevşetmek de "
+           "işe yaramadı. Sistem yalnızca turnuvada doğrulanmış kollarla çalışıyor.\n\n") +
         f"⚠️ Bot işlem AÇMIYOR — sadece emir talimatı ve takip uyarısı gönderir."
         + storage_warning
     )
@@ -2792,7 +2822,7 @@ def run_forever():
         # icinde taranir. Ayri bir zamanlayici kullaniyoruz ki mevcut RSI21
         # kolundan bagimsiz calissin.
         global _last_m15_scan_time
-        if (_last_m15_scan_time is None or
+        if M15_ENGINES_ENABLED and (_last_m15_scan_time is None or
                 (datetime.now() - _last_m15_scan_time).total_seconds() >= M15_SCAN_INTERVAL_MINUTES * 60):
             if bist_is_open(istanbul_now):
                 try:
