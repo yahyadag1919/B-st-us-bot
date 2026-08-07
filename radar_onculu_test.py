@@ -109,7 +109,7 @@ def fetch_15m(ticker):
     return df
 
 
-def collect_observations(df, index_daily):
+def collect_observations(df, index_bar):
     """Her mum icin: filtre gecti mi, ve o andan seans sonuna kadar ne oldu?
 
     HEM tetiklenenleri HEM kontrol grubunu ayni dongude topluyoruz ki
@@ -129,10 +129,6 @@ def collect_observations(df, index_daily):
         acilis = float(day.iloc[0]["open"])
         if acilis <= 0:
             continue
-        endeks_gun = index_daily.get(sess)
-        if endeks_gun is None:
-            continue
-
         seans_sonu = float(day.iloc[-1]["close"])
         for k in range(1, len(day) - 1):
             r = day.iloc[k]
@@ -151,7 +147,11 @@ def collect_observations(df, index_daily):
             onceki = day.iloc[max(0, k - BREAKOUT_LOOKBACK):k]
             kirilim_ok = bool(not onceki.empty and fiyat > float(onceki["high"].max()))
 
-            ayrisma_ok = bool(gun_ici_pct > endeks_gun)
+            # Endeksin AYNI ANDAKI degisimi (bar bazinda, ileriye bakma yok)
+            endeks_o_an = index_bar.get(pd.Timestamp(r["ts"]))
+            if endeks_o_an is None:
+                continue
+            ayrisma_ok = bool(gun_ici_pct > endeks_o_an)
 
             gecti = hacim_ok and kirilim_ok and ayrisma_ok
 
@@ -200,23 +200,39 @@ def main():
         "Soru: Gemini'nin filtreleri büyük hareket olasılığını artırıyor mu?\n"
         "Bu ~30-45 dakika sürebilir...")
 
-    # Endeksin gunluk degisimi (goreli guc icin)
-    index_daily = {}
-    try:
-        idx = yf.Ticker(INDEX_TICKER).history(period="60d", interval="15m")
-        idx = idx.reset_index().rename(columns={"Datetime": "ts", "Date": "ts",
-                                                "Open": "open", "Close": "close"})
-        idx["session"] = pd.to_datetime(idx["ts"]).dt.date
-        for sess, day in idx.groupby("session"):
-            a = float(day.iloc[0]["open"])
-            k = float(day.iloc[-1]["close"])
-            if a > 0:
-                index_daily[sess] = (k - a) / a * 100
-    except Exception as e:
-        print(f"Endeks verisi alinamadi: {e}", flush=True)
+    # Endeksin BAR BAZINDA degisimi (goreli guc icin).
+    # DERS (2026-08-08): ilk surumde endeksin O GUNUN TAMAMINDAKI degisimi
+    # kullaniliyordu ve hissenin saat 11:00'deki durumu onunla
+    # karsilastiriliyordu - yani saat 11'de gun sonunu bilmek. ILERIYE BAKMA.
+    # Turnuvalarda titizlikle kacindigimiz hata buraya sizmis.
+    # Artik her bar, endeksin AYNI BARDAKI degisimiyle karsilastiriliyor.
+    # Ayrica endeks cagrisi ilk istek oldugu icin hiz limitine takilip tum
+    # testi iptal ettirmisti - tekrar deneme eklendi.
+    index_bar = {}
+    for deneme in range(4):
+        try:
+            idx = yf.Ticker(INDEX_TICKER).history(period="60d", interval="15m")
+            if idx is None or idx.empty:
+                raise ValueError("bos endeks verisi")
+            idx = idx.reset_index().rename(columns={"Datetime": "ts", "Date": "ts",
+                                                    "Open": "open", "Close": "close"})
+            idx["session"] = pd.to_datetime(idx["ts"]).dt.date
+            for sess, day in idx.groupby("session"):
+                a = float(day.iloc[0]["open"])
+                if a <= 0:
+                    continue
+                for _, br in day.iterrows():
+                    index_bar[pd.Timestamp(br["ts"])] = (float(br["close"]) - a) / a * 100
+            break
+        except Exception as e:
+            print(f"Endeks denemesi {deneme + 1} basarisiz: {e}", flush=True)
+            if deneme < 3:
+                time.sleep(15 * (deneme + 1))
 
-    if not index_daily:
-        send_telegram_message("🚨 Endeks verisi alınamadı — göreli güç ölçülemez, test iptal.")
+    if not index_bar:
+        send_telegram_message(
+            "🚨 Endeks verisi 4 denemede alınamadı — göreli güç ölçülemez, test iptal.\n"
+            "Muhtemelen Yahoo hız limiti. Başka bir işlem çalışmıyorken tekrar dene.")
         return
 
     gecen, kontrol = [], []
@@ -228,7 +244,7 @@ def main():
                 hata += 1
                 print(f"[{n}/{len(tickers)}] {tk} veri yok", flush=True)
                 continue
-            for g in collect_observations(df, index_daily):
+            for g in collect_observations(df, index_bar):
                 (gecen if g["gecti"] else kontrol).append(g)
             ok += 1
             print(f"[{n}/{len(tickers)}] {tk} tamam", flush=True)
