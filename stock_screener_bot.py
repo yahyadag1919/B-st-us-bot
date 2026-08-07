@@ -390,21 +390,29 @@ def get_market_regime(market: str):
 
         df["adx"] = _compute_adx(df)
         df["ema200"] = df["close"].ewm(span=REGIME_EMA_PERIOD, adjust=False).mean()
-        row = df.iloc[-1]
+        # DERS (2026-08-07): burada df.iloc[-1] kullaniliyordu - BUGUNUN
+        # HENUZ KAPANMAMIS endeks mumu. Gun ici fiyat oynadikca rejim
+        # gun icinde degisebiliyordu. TREND motorunda ayni hatayi
+        # duzeltmistik; rejim katmani atlanmis. Son KAPANMIS mum.
+        row = df.iloc[-2]
         adx, close, ema200 = row["adx"], row["close"], row["ema200"]
 
         if pd.isna(adx) or pd.isna(ema200):
             raise ValueError("ADX/EMA200 hesaplanamadi")
 
+        # Endeksin EMA200'e uzakligi - rejimin ne kadar "sinirda" oldugunu
+        # gostermek icin. Bu deger aylarca %20+ kalirsa rejim fiilen sabittir
+        # ve filtre hicbir sey filtrelemiyor demektir (2026-08-07 tespiti).
+        mesafe = (close - ema200) / ema200 * 100 if ema200 else 0.0
         if adx < REGIME_ADX_TREND_MIN:
             regime = "YATAY"
-            note = f"ADX {adx:.1f} (<{REGIME_ADX_TREND_MIN}) - trend yok"
+            note = f"ADX {adx:.1f} (<{REGIME_ADX_TREND_MIN}) - trend yok | EMA200'e %{mesafe:+.1f}"
         elif close > ema200:
             regime = "YUKSELIS"
-            note = f"ADX {adx:.1f}, endeks EMA200 üstünde"
+            note = f"ADX {adx:.1f} (eşik {REGIME_ADX_TREND_MIN}) | EMA200'ün %{mesafe:+.1f} üstünde"
         else:
             regime = "DUSUS"
-            note = f"ADX {adx:.1f}, endeks EMA200 altında"
+            note = f"ADX {adx:.1f} (eşik {REGIME_ADX_TREND_MIN}) | EMA200'ün %{mesafe:+.1f} altında"
 
     except Exception as e:
         dedektif_report(f"{market} piyasa rejimi", e, ticker)
@@ -417,22 +425,23 @@ def get_market_regime(market: str):
 def market_scan_allowed(market: str):
     """(izin_var_mi, izinli_yon, rejim, aciklama)
 
-    Gemini'nin nihai karari (2026-07-28): rejim filtresi taramayi tamamen
-    durdurmak yerine YONLENDIRIR -
-      YUKSELIS -> sadece LONG sinyalleri
-      DUSUS    -> sadece SHORT sinyalleri (dusus trendi SHORT icin en verimli
-                  ortam; eski hali bu firsatlari tamamen bloke ediyordu)
-      YATAY    -> tarama durdurulur (gurultu / hatali sinyal onlemi)
-    izinli_yon None ise her iki yon de serbest (sadece BILINMIYOR durumunda)."""
+    DERS (2026-08-07, Gemini'nin karari — Rapor 14): REJIM KISITI KALDIRILDI.
+    Gerekce: BIST gunluk sistemini %78.2 isabetle dogrulayan 87 stratejilik
+    turnuva, yon filtresi YOKKEN kosulmustu. Filtre sonradan mimari bir
+    kararla eklendi, yani canlidaki sistem olculen sistem degildi -
+    dogrulanmis bir sisteme dogrulanmamis bir kisit eklenmisti.
+    Ayrica filtre pratikte SABITTI: ADX 21-23 (esigin hemen ustunde) ve
+    endeks EMA200'un ustunde oldugu icin rejim aylarca YUKSELIS kaliyor,
+    dolayisiyla BIST'te hicbir SHORT sinyali uretilemiyor ve YATAY korumasi
+    hic devreye girmiyordu. Degismeyen bir filtre, filtre degildir.
+    Bu degisiklik bir YENILIK DEGIL, turnuvadaki hale GERI DONUSTUR.
+
+    Rejim hesabi KALDIRILMADI - /durum ve sinyal mesajlarinda bilgi olarak
+    gosterilmeye devam ediyor (Gemini: izleme icin faydali). Sadece artik
+    hicbir sinyali engellemiyor ya da yon dayatmiyor.
+    """
     regime, note = get_market_regime(market)
-    if regime == "YUKSELIS":
-        return True, "LONG", regime, note
-    if regime == "DUSUS":
-        return True, "SHORT", regime, note
-    if regime == "BILINMIYOR":
-        # Endeks verisi alinamadi - taramaya devam, yon kisiti yok.
-        return True, None, regime, note
-    return False, None, regime, note  # YATAY
+    return True, None, regime, note
 
 
 # ---------------------------------------------------------------------------
@@ -2743,8 +2752,10 @@ def run_forever():
     send_telegram_message(
         "🚀 BIST + ABD hisse tarama botu (4 KATMANLI MİMARİ) başlatıldı.\n"
         "1️⃣ Piyasa Beyni | 2️⃣ Portföy/Risk Beyni | 3️⃣ Hibrit Çıkış Uyarıları | 4️⃣ Sistem Dedektifi\n\n"
-        f"🧠 Piyasa Beyni: BIST için XU100, ABD için SPY (ADX+EMA200). "
-        f"YÜKSELİŞ → sadece LONG, DÜŞÜŞ → sadece SHORT, YATAY → tarama durur.\n"
+        f"🧠 Piyasa Beyni: BIST için XU100, ABD için SPY (ADX+EMA200) — "
+        f"artık YALNIZCA BİLGİ AMAÇLI. Yön kısıtı 2026-08-07'de kaldırıldı: "
+        f"turnuvada %78.2 isabet bu filtre YOKKEN ölçülmüştü, sistem o haline döndü. "
+        f"LONG da SHORT da üretilir, YATAY'da tarama durmaz.\n"
         + portfoy_satiri +
         f"🎯 Çıkış: {PARTIAL_TP_R_MULT}R'de %50 satış + breakeven uyarısı, sonra {TRAIL_ATR_MULT}×ATR trailing stop "
         f"(her {EXIT_CHECK_INTERVAL_MINUTES} dk, sadece piyasa açıkken).\n\n"
