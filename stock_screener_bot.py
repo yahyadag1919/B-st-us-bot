@@ -1907,7 +1907,7 @@ def poll_stock_commands():
                     "/motor — motor performansı (isabet, R beklentisi, piyasa bağlamı)\n"
                     "/sinyaller — bugün üretilen motor sinyalleri\n"
                     "/kap — KAP haber kaynağı tazelik ölçümü (pasif, arka planda toplanıyor)\n"
-                    "/radar — öncül radar sonuçları (KAP'lı/KAP'sız karşılaştırma, sinyal amaçlı)\n"
+                    "/radar — öncül radar sonuçları (BIST KAP'lı/KAP'sız + ABD teknik, sinyal amaçlı)\n"
                     "/yardim — bu liste")
             else:
                 continue
@@ -2994,7 +2994,8 @@ def run_forever():
         # kendi try/except'i. BIST kapalıyken zaten kendi içinde no-op.
         if _RADAR_CANLI_AVAILABLE:
             try:
-                rc.maybe_scan(BIST_TICKERS)
+                rc.maybe_scan(BIST_TICKERS, "BIST")
+                rc.maybe_scan(US_INTRADAY_TICKERS, "US")
                 rc.check_outcomes()
             except Exception as e:
                 dedektif_report("Öncül radar (döngü)", e)

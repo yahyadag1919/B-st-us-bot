@@ -4,7 +4,7 @@ radar_canli.py — CANLI ÖNCÜL RADAR (SİNYAL-AMAÇLI, EMİR AÇMAZ)
 radar_onculu_test.py'nin (2026-08-07/08) test edilmiş 3 bileşenini
 (hacim artışı, kırılım, endeksten ayrışma) AYNEN kullanır — o testte
 ilk kez pozitif sonuç bulunmuştu: filtreyi geçenlerde +%2'ye ulaşma
-ihtimali kontrol grubuna göre ~2 katıydı (%24.1 vs %12.5, 39 hisse).
+ihtimali kontrol grubuna göre ~2 katıydı (%24.1 vs %12.5, 39 BIST hissesi).
 
 BU MODÜLÜN FARKI: o test KAP/haber bileşenini test EDEMEMİŞTİ (ücretsiz
 kaynak yoktu). Artık kap_monitor.py gerçek KAP verisi biriktiriyor —
@@ -19,6 +19,14 @@ en iyi ihtimalle ~%24 üretiyor). O yüzden bu modül SABİT TP/STOP
 KOYMAZ — tıpkı öncül testin ölçtüğü gibi, tetiklenmeden seans sonuna
 kadar max yukarı / max aşağı / seans sonu yüzdesini kaydeder. Çıkış
 kuralı kararı, bu ham veri biriktikten SONRA verilir.
+
+ABD DESTEĞİ (2026-08-09): aynı 3 teknik bileşen SPY kıyaslı olarak ABD
+hisselerine de uygulanıyor — DEĞİŞTİRİLMEDEN, kullanıcının açık isteğiyle
+ayrıca test edilmeden. Açık uyarı: filtre yalnızca BIST verisiyle
+doğrulanmıştı (radar_onculu_test.py, 39 BIST hissesi); ABD tarafında
+BAŞTAN TEST EDİLMEDEN canlıya alınıyor. KAP bileşeni ABD'de yok (KAP
+Türkiye'ye özgü) — ABD sinyalleri sadece 3 teknik bileşenle üretiliyor,
+KAP etiketi hep boş/yok.
 
 İZOLASYON: sinyal üretir ama HİÇBİR EMİR AÇMAZ (bu bot zaten hiç emir
 açmıyor), hiçbir mevcut taramayı etkilemez/durdurmaz, kendi dosyalarına
@@ -59,19 +67,21 @@ CATCH_MAX_PCT = float(os.environ.get("RADAR_CATCH_MAX", "1.0"))
 # KAP eşleşmesi: kod, bugün ve son X dakika içinde kap_monitor logunda
 # görülmüş mü? Öncül testte ölçülemeyen bileşen artık BURADA, gerçek
 # veriyle kontrol ediliyor - ama sinyali ENGELLEMİYOR, sadece etiketliyor.
+# Sadece BIST için - ABD'de KAP karşılığı yok.
 KAP_MATCH_WINDOW_MINUTES = int(os.environ.get("RADAR_KAP_MATCH_WINDOW_MINUTES", "240"))
 
-INDEX_TICKER = "XU100.IS"
+INDEX_TICKERS = {"BIST": "XU100.IS", "US": "SPY"}
 
 VOL_CACHE_HOURS = 20  # gunluk hacim ortalamasi - gun icinde degismez, gunde 1 yeniler
 _vol_ma_cache = {}    # ticker -> (deger, hesaplanma_zamani)
 
 SIGNAL_LOG_FILE = _data_path("radar_canli_signals.csv")
-SIGNAL_FIELDS = ["ticker", "gun", "entry_time", "entry_price", "day_open_pct",
+SIGNAL_FIELDS = ["market", "ticker", "gun", "entry_time", "entry_price", "day_open_pct",
                   "hacim_ok", "kirilim_ok", "ayrisma_ok", "kap_var", "kap_kaynak",
                   "status", "max_up_pct", "max_down_pct", "session_end_pct"]
 
-_triggered_today = {}  # (ticker, gun) -> True, ayni gun tekrar tetiklenmesin
+_triggered_today = {}  # (market, ticker, gun) -> True, ayni gun tekrar tetiklenmesin
+_last_scan_time = {}   # market -> zaman, her market kendi zamanlayicisinda
 
 
 def send_telegram_message(text: str):
@@ -91,6 +101,23 @@ def bist_is_open(now_ist=None) -> bool:
         return False
     minutes = now_ist.hour * 60 + now_ist.minute
     return 10 * 60 <= minutes < 18 * 60
+
+
+def us_is_open(now_et=None) -> bool:
+    now_et = now_et or datetime.now(ZoneInfo("America/New_York"))
+    if now_et.weekday() >= 5:
+        return False
+    minutes = now_et.hour * 60 + now_et.minute
+    return 9 * 60 + 30 <= minutes < 16 * 60
+
+
+def _market_is_open(market: str) -> bool:
+    return bist_is_open() if market == "BIST" else us_is_open()
+
+
+def _today_str(market: str) -> str:
+    tz = ZoneInfo("Europe/Istanbul") if market == "BIST" else ZoneInfo("America/New_York")
+    return datetime.now(tz).date().isoformat()
 
 
 # ---------------------------------------------------------------------------
@@ -132,13 +159,13 @@ def _get_vol_ma(ticker: str):
     return deger
 
 
-def _get_index_today_pct(now_ts) -> float:
-    """XU100'un bugunku gun ici yuzde degisimi, mevcut bara en yakin."""
-    df = _fetch_15m(INDEX_TICKER, period="2d")
+def _get_index_today_pct(market: str, today: str) -> float:
+    """Endeksin (BIST->XU100, US->SPY) bugunku gun ici yuzde degisimi,
+    mevcut bara en yakin."""
+    df = _fetch_15m(INDEX_TICKERS[market], period="2d")
     if df.empty:
         return None
-    today = date.today()
-    gun = df[df["session"] == today]
+    gun = df[df["session"].astype(str) == today]
     if gun.empty:
         return None
     acilis = float(gun.iloc[0]["open"])
@@ -149,7 +176,7 @@ def _get_index_today_pct(now_ts) -> float:
 
 
 # ---------------------------------------------------------------------------
-# KAP eslesmesi (kap_monitor.py'nin biriktirdigi gercek veriden)
+# KAP eslesmesi (kap_monitor.py'nin biriktirdigi gercek veriden) - sadece BIST
 # ---------------------------------------------------------------------------
 
 def _kap_match(ticker: str):
@@ -205,18 +232,20 @@ def _write_signals(rows):
 
 
 def check_outcomes():
-    """Acik (status=OPEN) sinyallerin fiyatini gunceller. Seans bittiyse
-    kapatir. Sabit TP/stop YOK - sadece max yukari/asagi/seans sonu izlenir."""
+    """Acik (status=OPEN) sinyallerin fiyatini gunceller (BIST+US birlikte).
+    Seans bittiyse kapatir. Sabit TP/stop YOK - sadece max yukari/asagi/
+    seans sonu izlenir."""
     rows = _read_signals()
     if not rows:
         return
-    today = date.today().isoformat()
-    ist_open = bist_is_open()
     changed = False
     for r in rows:
         if r["status"] != "OPEN":
             continue
+        market = r.get("market", "BIST")
         ticker = r["ticker"]
+        today = _today_str(market)
+        market_open = _market_is_open(market)
         try:
             df = _fetch_15m(ticker, period="2d")
             gun = df[df["session"].astype(str) == r["gun"]]
@@ -227,7 +256,7 @@ def check_outcomes():
             max_down = (float(gun["low"].min()) - entry_price) / entry_price * 100
             r["max_up_pct"] = f"{max_up:.2f}"
             r["max_down_pct"] = f"{max_down:.2f}"
-            if r["gun"] != today or not ist_open:
+            if r["gun"] != today or not market_open:
                 # seans kapandi (bugun degilse ya da bugun ama seans bitti)
                 r["session_end_pct"] = f"{(float(gun.iloc[-1]['close']) - entry_price) / entry_price * 100:.2f}"
                 r["status"] = "CLOSED"
@@ -242,21 +271,21 @@ def check_outcomes():
 # Tarama
 # ---------------------------------------------------------------------------
 
-def scan(tickers: list):
+def scan(tickers: list, market: str = "BIST"):
     """Her tetiklenmede radar_onculu_test.py ile AYNI 3 teknik bileseni
-    kontrol eder + KAP eslesmesini etiket olarak ekler. Sabit TP/stop yok,
-    sadece bildirim + sonuc takibi. Ayni hisse ayni gun sadece 1 kez."""
-    if not RADAR_ENABLED or not bist_is_open():
+    kontrol eder (BIST icin ayrica KAP eslesmesini etiket olarak ekler).
+    Sabit TP/stop yok, sadece bildirim + sonuc takibi. Ayni hisse ayni
+    gun sadece 1 kez, market bazinda ayri."""
+    if not RADAR_ENABLED or not _market_is_open(market):
         return
 
-    index_pct = _get_index_today_pct(datetime.now())
+    today = _today_str(market)
+    index_pct = _get_index_today_pct(market, today)
     if index_pct is None:
         return
 
-    today = date.today().isoformat()
-
     for ticker in tickers:
-        key = (ticker, today)
+        key = (market, ticker, today)
         if _triggered_today.get(key):
             continue
         try:
@@ -285,11 +314,14 @@ def scan(tickers: list):
             if not (hacim_ok and kirilim_ok and ayrisma_ok):
                 continue  # 3 teknik bilesen sarti - onculu testteki "gecti" tanimi
 
-            kap_var, kap_kaynak = _kap_match(ticker)
+            if market == "BIST":
+                kap_var, kap_kaynak = _kap_match(ticker)
+            else:
+                kap_var, kap_kaynak = False, None  # ABD'de KAP karsiligi yok
 
             _triggered_today[key] = True
             _append_signal({
-                "ticker": ticker, "gun": today,
+                "market": market, "ticker": ticker, "gun": today,
                 "entry_time": datetime.now().isoformat(),
                 "entry_price": f"{fiyat:.4f}", "day_open_pct": f"{gun_ici_pct:.2f}",
                 "hacim_ok": hacim_ok, "kirilim_ok": kirilim_ok, "ayrisma_ok": ayrisma_ok,
@@ -297,41 +329,47 @@ def scan(tickers: list):
                 "status": "OPEN", "max_up_pct": "", "max_down_pct": "", "session_end_pct": "",
             })
 
-            etiket = f"🔴 KAP DOĞRULANMIŞ ({kap_kaynak})" if kap_var else "⚪ Teknik (KAP eşleşmedi)"
+            index_adi = "XU100" if market == "BIST" else "SPY"
+            if market == "BIST":
+                etiket = f"🔴 KAP DOĞRULANMIŞ ({kap_kaynak})" if kap_var else "⚪ Teknik (KAP eşleşmedi)"
+            else:
+                etiket = "🇺🇸 ABD — KAP karşılığı yok, sadece teknik"
+            uyari_ekstra = (
+                "" if market == "BIST" else
+                "\n⚠️ Bu filtre YALNIZCA BIST verisiyle test edilmişti — ABD "
+                "tarafında ayrıca test edilmeden canlıya alındı."
+            )
             send_telegram_message(
-                f"🔬 [ÖNCÜL RADAR] {ticker}\n"
+                f"🔬 [ÖNCÜL RADAR — {market}] {ticker}\n"
                 f"Gün içi: {gun_ici_pct:+.2f}% | Fiyat: {fiyat:.2f}\n"
-                f"Hacim ≥{VOLUME_MULT:g}× ✅ | Kırılım ✅ | Endeksten ayrışma ✅\n"
-                f"{etiket}\n\n"
+                f"Hacim ≥{VOLUME_MULT:g}× ✅ | Kırılım ✅ | {index_adi}'ten ayrışma ✅\n"
+                f"{etiket}\n"
                 "ℹ️ SİNYAL AMAÇLIDIR — emir talimatı DEĞİLDİR, sabit hedef/stop "
-                "YOKTUR. Öncül testte bu filtre +%2'ye ulaşma ihtimalini "
-                "kontrol grubuna göre ~2 katına çıkarmıştı (%24.1 vs %12.5). "
-                "Bu sinyal sonuç takibine alındı, /radar ile sorgulanabilir."
+                "YOKTUR. Öncül testte (BIST, 39 hisse) bu filtre +%2'ye ulaşma "
+                "ihtimalini kontrol grubuna göre ~2 katına çıkarmıştı (%24.1 vs "
+                "%12.5). Bu sinyal sonuç takibine alındı, /radar ile sorgulanabilir."
+                f"{uyari_ekstra}"
             )
         except Exception:
             continue  # bu radar izole - tek hisse hatasi taramayi durdurmaz
 
 
-def maybe_scan(tickers: list):
-    global _last_scan_time
+def maybe_scan(tickers: list, market: str = "BIST"):
     if not RADAR_ENABLED:
         return
     now = datetime.now()
-    if (_last_scan_time is not None and
-            (now - _last_scan_time).total_seconds() < RADAR_SCAN_INTERVAL_MINUTES * 60):
+    son = _last_scan_time.get(market)
+    if son is not None and (now - son).total_seconds() < RADAR_SCAN_INTERVAL_MINUTES * 60:
         return
-    _last_scan_time = now
-    scan(tickers)
-
-
-_last_scan_time = None
+    _last_scan_time[market] = now
+    scan(tickers, market)
 
 
 def build_radar_report() -> str:
     rows = _read_signals()
     if not rows:
         return ("🔬 [ÖNCÜL RADAR] Henüz sinyal yok.\n"
-                f"Her {RADAR_SCAN_INTERVAL_MINUTES} dk BIST açıkken taranıyor, "
+                f"Her {RADAR_SCAN_INTERVAL_MINUTES} dk BIST+ABD açıkken taranıyor, "
                 "koşullar oluşunca bildirim gelir.")
 
     def _grup_ozet(grup, baslik):
@@ -352,18 +390,26 @@ def build_radar_report() -> str:
                              f"artıda: %{sum(1 for x in se if x > 0)/len(se)*100:.1f}")
         return satir
 
-    kap_var = [r for r in rows if r.get("kap_var") in ("True", "true", True)]
-    kap_yok = [r for r in rows if r.get("kap_var") not in ("True", "true", True)]
+    bist_rows = [r for r in rows if r.get("market", "BIST") == "BIST"]
+    us_rows = [r for r in rows if r.get("market") == "US"]
 
-    lines = ["🔬 [ÖNCÜL RADAR RAPORU]", f"Toplam sinyal: {len(rows)}", ""]
+    kap_var = [r for r in bist_rows if r.get("kap_var") in ("True", "true", True)]
+    kap_yok = [r for r in bist_rows if r.get("kap_var") not in ("True", "true", True)]
+
+    lines = ["🔬 [ÖNCÜL RADAR RAPORU]", f"Toplam sinyal: {len(rows)} (BIST {len(bist_rows)}, ABD {len(us_rows)})", ""]
+    lines.append("── BIST ──")
     lines += _grup_ozet(kap_var, "🔴 KAP DOĞRULANMIŞ")
     lines.append("")
     lines += _grup_ozet(kap_yok, "⚪ Sadece teknik (KAP yok)")
     lines.append("")
-    lines.append("📌 Referans (öncül test, 39 hisse, KAP'sız): filtreli +%2'ye "
-                 "ulaşma %24.1 vs kontrol %12.5. Bu canlı veri o referansla "
-                 "karşılaştırılmalı, ayrıca KAP'lı/KAP'sız grup farkı asıl "
-                 "yeni soruya (KAP fark yaratıyor mu?) cevap verir.")
+    lines.append("── ABD (yalnızca teknik, KAP yok) ──")
+    lines += _grup_ozet(us_rows, "🇺🇸 ABD sinyalleri")
+    lines.append("")
+    lines.append("📌 Referans (öncül test, 39 BIST hissesi): filtreli +%2'ye "
+                 "ulaşma %24.1 vs kontrol %12.5. ABD grubu bu referansla "
+                 "karşılaştırılmalı ama ABD'de filtre AYRICA TEST EDİLMEDİ — "
+                 "bu canlı veri ABD için ilk gerçek ölçüm.")
     lines.append("ℹ️ Sabit TP/stop yok, hiçbir emir açılmadı — bu rapor ham "
                  "olasılık verisidir, çıkış kuralı kararı ayrı ve sonraki adımdır.")
     return "\n".join(lines)
+
