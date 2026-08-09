@@ -44,7 +44,7 @@ TELEGRAM_CHAT_ID = os.environ.get("TELEGRAM_CHAT_ID", "")
 if not TELEGRAM_TOKEN or not TELEGRAM_CHAT_ID:
     raise RuntimeError(
         "TELEGRAM_TOKEN ve TELEGRAM_CHAT_ID ortam degiskenleri tanimli degil. "
-        "Railway'de Variables kismindan ekle."
+        "Render'da Environment kismindan ekle."
     )
 
 # ---------------------------------------------------------------------------
@@ -159,15 +159,15 @@ FOOTBALL_RESULTS_UPDATE_INTERVAL_MINUTES = int(os.environ.get("FOOTBALL_RESULTS_
 
 
 # ---------------------------------------------------------------------------
-# Kalici depolama (Railway Volume)
+# Kalici depolama
 # ---------------------------------------------------------------------------
-# Railway'de her re-deploy/restart konteyner dosya sistemini sifirlar. Takip
-# CSV'leri burada tutulmazsa acik sinyallerin cikis takibi sessizce kaybolur -
-# kullanici parsiyel TP / stop uyarisi beklerken hicbir sey gelmez. Bu yuzden
-# DATA_DIR bir Railway Volume'a (ornek: /data) bagli olmalidir.
-# NOT: Railway'de Volume tanimlanip DATA_DIR=/data ayarlanmazsa dosyalar yine
-# calisma dizinine yazilir ve re-deploy'da kaybolur - bu durumda asagidaki
-# uyari acilista Telegram'a duser.
+# Render ucretsiz tier'da kalici disk yok - her re-deploy/restart konteyner
+# dosya sistemini sifirlar. Takip CSV'leri burada tutulmazsa acik sinyallerin
+# cikis takibi sessizce kaybolur - kullanici parsiyel TP / stop uyarisi
+# beklerken hicbir sey gelmez. Kabul edilen durum: DATA_DIR ayarlanmadan
+# calisma dizinine yazilir ve her re-deploy'da kaybolur - bu yuzden asagidaki
+# uyari acilista Telegram'a duser, ayrica her sinyal ayrica Telegram'a
+# loglanir (kayit tamamen kaybolmaz).
 DATA_DIR = os.environ.get("DATA_DIR", ".")
 try:
     os.makedirs(DATA_DIR, exist_ok=True)
@@ -210,7 +210,7 @@ _ERROR_HINTS = {
     "rate limit": "yfinance hiz limiti - tarama araligi artirilmali",
     "429": "yfinance hiz limiti - tarama araligi artirilmali",
     "index out of": "yetersiz mum verisi - hisse yeni islem gormeye baslamis olabilir",
-    "permission denied": "dosya yazma izni yok - Railway ayarini kontrol et",
+    "permission denied": "dosya yazma izni yok - Render disk/izin ayarini kontrol et",
 }
 
 # Ayni hatayi her dongude tekrar tekrar bildirmemek icin basit bir bogucu -
@@ -2647,7 +2647,7 @@ def _within_window(now, target_hour, target_minute, window_minutes):
 # ---------------------------------------------------------------------------
 # SORUN (2026-07-29 tespit): planli taramalar SADECE 5 dakikalik bir pencerede
 # (ornek 17:35-17:40) tetikleniyordu ve son-calisma tarihi yalnizca RAM'de
-# tutuluyordu. Bot o pencerede yeniden baslarsa (Railway redeploy, cokme,
+# tutuluyordu. Bot o pencerede yeniden baslarsa (Render redeploy, cokme,
 # acilistaki 226 ticker dogrulamasi birkac dakika surdugu icin ozellikle
 # riskli) o gunun taramasi TAMAMEN ve SESSIZCE atlaniyordu - kullanici
 # sinyal beklerken hicbir mesaj gelmiyordu ve nedenini anlamanin yolu yoktu.
@@ -2768,10 +2768,10 @@ def run_forever():
     storage_warning = ""
     if DATA_DIR == ".":
         storage_warning = (
-            "\n\n⚠️ DİKKAT: Kalıcı depolama (Railway Volume) ayarlı değil — "
-            "her re-deploy'da takip kayıtları silinir. Railway'de Volume ekleyip "
-            "DATA_DIR=/data ayarlaman önerilir. (Takibe alınan her sinyal ayrıca "
-            "Telegram'a loglanıyor, yani kayıt tamamen kaybolmaz.)"
+            "\n\n⚠️ DİKKAT: Kalıcı depolama yok — Render ücretsiz tier'da disk "
+            "sıfırlanıyor, her re-deploy'da takip kayıtları silinir. (Takibe "
+            "alınan her sinyal ayrıca Telegram'a loglanıyor, yani kayıt tamamen "
+            "kaybolmaz.)"
         )
 
     if PORTFOLIO_BALANCE_TRY is not None or PORTFOLIO_BALANCE_USD is not None:
