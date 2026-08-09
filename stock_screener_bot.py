@@ -12,6 +12,32 @@ import yfinance as yf
 
 import football_bot as fb
 
+# KAP tazelik gözlemcisi (2026-08-09) — TAMAMEN İZOLE, PASİF.
+# try/except içinde import ediliyor: bu modülde bir hata olsa bile
+# ana sinyal sistemi (BIST/ABD taramaları, self-check) etkilenmez.
+# Sinyal üretmez, hiçbir taramayı engellemez/tetiklemez - sadece arka
+# planda KAP-kalıplı haber başlıklarını zaman damgasıyla biriktirir.
+# /kap komutuyla biriken veriden gerçek tazelik istatistiği sorulur.
+try:
+    import kap_monitor as km
+    _KAP_MONITOR_AVAILABLE = True
+except Exception as _kap_import_err:
+    km = None
+    _KAP_MONITOR_AVAILABLE = False
+    print(f"kap_monitor yüklenemedi (izole özellik, sistemi etkilemez): {_kap_import_err}")
+
+# Canlı öncül radar (2026-08-09) — TAMAMEN İZOLE, SİNYAL-AMAÇLI, EMİR AÇMAZ.
+# radar_onculu_test.py'nin test edilmiş filtresini + kap_monitor'un gerçek
+# KAP verisini kullanır. try/except içinde import: bu modülde hata olsa
+# bile ana sinyal sistemi etkilenmez.
+try:
+    import radar_canli as rc
+    _RADAR_CANLI_AVAILABLE = True
+except Exception as _radar_import_err:
+    rc = None
+    _RADAR_CANLI_AVAILABLE = False
+    print(f"radar_canli yüklenemedi (izole özellik, sistemi etkilemez): {_radar_import_err}")
+
 TELEGRAM_TOKEN = os.environ.get("TELEGRAM_TOKEN", "")
 TELEGRAM_CHAT_ID = os.environ.get("TELEGRAM_CHAT_ID", "")
 
@@ -1864,12 +1890,24 @@ def poll_stock_commands():
                 send_telegram_message(build_m15_report())
             elif text.startswith("/sinyaller"):
                 send_telegram_message(build_sinyaller_message())
+            elif text.startswith("/kap"):
+                if _KAP_MONITOR_AVAILABLE:
+                    send_telegram_message(km.build_kap_report())
+                else:
+                    send_telegram_message("📡 KAP gözlemcisi bu deploy'da yüklenemedi.")
+            elif text.startswith("/radar"):
+                if _RADAR_CANLI_AVAILABLE:
+                    send_telegram_message(rc.build_radar_report())
+                else:
+                    send_telegram_message("🔬 Öncül radar bu deploy'da yüklenemedi.")
             elif text.startswith("/yardim") or text.startswith("/help"):
                 send_telegram_message(
                     "📖 Komutlar:\n"
                     "/durum — rejimler, seans durumu, taranan hisse sayısı\n"
                     "/motor — motor performansı (isabet, R beklentisi, piyasa bağlamı)\n"
                     "/sinyaller — bugün üretilen motor sinyalleri\n"
+                    "/kap — KAP haber kaynağı tazelik ölçümü (pasif, arka planda toplanıyor)\n"
+                    "/radar — öncül radar sonuçları (KAP'lı/KAP'sız karşılaştırma, sinyal amaçlı)\n"
                     "/yardim — bu liste")
             else:
                 continue
@@ -2937,11 +2975,29 @@ def run_forever():
         except Exception as e:
             dedektif_report("Futbol komut dinleyici (döngü)", e)
 
-        # Hisse botunun kendi komutlari (/durum, /motor, /sinyaller, /yardim)
+        # Hisse botunun kendi komutlari (/durum, /motor, /sinyaller, /kap, /yardim)
         try:
             poll_stock_commands()
         except Exception as e:
             dedektif_report("Hisse komut dinleyici (döngü)", e)
+
+        # KAP gözlemcisi (pasif) — kendi zamanlayıcısı, kendi try/except'i,
+        # sinyal sisteminden tamamen bağımsız. Hata olursa sadece Dedektif'e
+        # düşer, ana döngüyü asla etkilemez.
+        if _KAP_MONITOR_AVAILABLE:
+            try:
+                km.maybe_collect()
+            except Exception as e:
+                dedektif_report("KAP gözlemci (döngü)", e)
+
+        # Canlı öncül radar — sinyal-amaçlı, emir açmaz. Kendi zamanlayıcısı,
+        # kendi try/except'i. BIST kapalıyken zaten kendi içinde no-op.
+        if _RADAR_CANLI_AVAILABLE:
+            try:
+                rc.maybe_scan(BIST_TICKERS)
+                rc.check_outcomes()
+            except Exception as e:
+                dedektif_report("Öncül radar (döngü)", e)
 
         # Futbol günlük özeti — kendi içinde günde bir kez gönderecek şekilde
         # kilitli, bu yüzden her turda güvenle çağrılabilir.
