@@ -276,18 +276,26 @@ def scan(tickers: list, market: str = "BIST"):
     kontrol eder (BIST icin ayrica KAP eslesmesini etiket olarak ekler).
     Sabit TP/stop yok, sadece bildirim + sonuc takibi. Ayni hisse ayni
     gun sadece 1 kez, market bazinda ayri."""
-    if not RADAR_ENABLED or not _market_is_open(market):
+    if not RADAR_ENABLED:
+        print(f"[RADAR] {market}: RADAR_ENABLED=false, atlandi", flush=True)
+        return
+    if not _market_is_open(market):
+        print(f"[RADAR] {market}: piyasa kapali, atlandi", flush=True)
         return
 
     today = _today_str(market)
     index_pct = _get_index_today_pct(market, today)
     if index_pct is None:
+        print(f"[RADAR] {market}: endeks verisi alinamadi, bu tur atlandi", flush=True)
         return
 
+    taranan = 0
+    sinyal = 0
     for ticker in tickers:
         key = (market, ticker, today)
         if _triggered_today.get(key):
             continue
+        taranan += 1
         try:
             df = _fetch_15m(ticker, period="2d")
             gun = df[df["session"].astype(str) == today]
@@ -320,6 +328,7 @@ def scan(tickers: list, market: str = "BIST"):
                 kap_var, kap_kaynak = False, None  # ABD'de KAP karsiligi yok
 
             _triggered_today[key] = True
+            sinyal += 1
             _append_signal({
                 "market": market, "ticker": ticker, "gun": today,
                 "entry_time": datetime.now().isoformat(),
@@ -328,6 +337,7 @@ def scan(tickers: list, market: str = "BIST"):
                 "kap_var": kap_var, "kap_kaynak": kap_kaynak or "",
                 "status": "OPEN", "max_up_pct": "", "max_down_pct": "", "session_end_pct": "",
             })
+            print(f"[RADAR] {market} SİNYAL: {ticker} @ {fiyat:.2f} ({gun_ici_pct:+.2f}%)", flush=True)
 
             index_adi = "XU100" if market == "BIST" else "SPY"
             if market == "BIST":
@@ -350,8 +360,11 @@ def scan(tickers: list, market: str = "BIST"):
                 "%12.5). Bu sinyal sonuç takibine alındı, /radar ile sorgulanabilir."
                 f"{uyari_ekstra}"
             )
-        except Exception:
+        except Exception as e:
+            print(f"[RADAR] {market} {ticker}: hata - {e}", flush=True)
             continue  # bu radar izole - tek hisse hatasi taramayi durdurmaz
+
+    print(f"[RADAR] {market}: tur bitti, {taranan} hisse tarandı, {sinyal} sinyal", flush=True)
 
 
 def maybe_scan(tickers: list, market: str = "BIST"):
