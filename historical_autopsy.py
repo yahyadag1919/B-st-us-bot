@@ -365,4 +365,36 @@ def print_and_save_summary(df: pd.DataFrame):
 
 
 if __name__ == "__main__":
+    import threading
+    from http.server import HTTPServer, BaseHTTPRequestHandler
+
+    class _SagliqSunucusu(BaseHTTPRequestHandler):
+        """Render web servis olarak calistirdigi icin bir port dinlemesi
+        gerekiyor - yoksa 5 dk icinde 'port bulunamadi' diye durduruluyor
+        (bist_h1_tournament.py'de ogrenilen ders)."""
+        def do_GET(self):
+            self.send_response(200)
+            self.end_headers()
+            self.wfile.write(b"OK")
+
+        def log_message(self, *args):
+            pass  # konsolu kirletmesin
+
+    def _saglik_sunucusunu_baslat():
+        port = int(__import__("os").environ.get("PORT", 10000))
+        server = HTTPServer(("0.0.0.0", port), _SagliqSunucusu)
+        server.serve_forever()
+
+    threading.Thread(target=_saglik_sunucusunu_baslat, daemon=True).start()
+
     run_autopsy()
+
+    print("\n[BİTTİ] Analiz tamamlandı. Sonuçları yukarıdaki loglarda ve "
+          "CSV dosyalarında görebilirsin. Şimdi Render'da Start Command'i "
+          "'python main.py'ye geri çevirip yeniden deploy edebilirsin.", flush=True)
+
+    # Script bitince process kapanirsa Render bunu "cokme" sanip yeniden
+    # baslatir (ayni turnuva scriptlerindeki gibi) - o yuzden sonsuz
+    # dongude bekletiyoruz, sen Start Command'i degistirene kadar.
+    while True:
+        time.sleep(3600)
