@@ -29,6 +29,7 @@ yoksa aşağıdaki örnek listelere düşer.
 
 import time
 import warnings
+import ast
 import numpy as np
 import pandas as pd
 import yfinance as yf
@@ -47,14 +48,44 @@ REQUEST_DELAY_SEC = 0.4       # Yahoo rate-limit'e takilmamak icin istekler aras
 OUTPUT_CSV = "historical_autopsy_results.csv"
 OUTPUT_SUMMARY_CSV = "historical_autopsy_summary.csv"
 
-# stock_screener_bot.py ayni repodaysa oradaki listeleri kullan (tutarlilik icin) -
-# yoksa asagidaki ornek listelere dus. Hicbir sekilde crash etmesin diye try/except.
-try:
-    from stock_screener_bot import BIST_TICKERS, US_TICKERS
-    print(f"[BILGI] stock_screener_bot.py'den {len(BIST_TICKERS)} BIST, "
-          f"{len(US_TICKERS)} ABD hissesi alindi.", flush=True)
-except Exception:
-    print("[BILGI] stock_screener_bot.py bulunamadi, ornek liste kullaniliyor. "
+
+def _load_tickers_from_bot_file(path="stock_screener_bot.py"):
+    """stock_screener_bot.py'yi IMPORT ETMEDEN - yani Telegram baslangic
+    mesajlari, validate_tickers'in agdan dogrulamasi gibi hicbir yan etkiyi
+    TETIKLEMEDEN - kaynak kodunu metin olarak okuyup BIST_TICKERS/US_TICKERS
+    listelerini STATIK cikarir (AST). Onceki surumde `from stock_screener_bot
+    import ...` kullaniliyordu; bu, o dosyanin TUM modul-seviyesi kodunu
+    (canli botun kendi baslangic bildirimleri dahil) yan etki olarak
+    calistirdigi icin degistirildi - proje genelinde zaten kullanilan
+    dropped-def AST kontroluyle ayni, calistirmadan-oku yontemi."""
+    try:
+        with open(path, encoding="utf-8") as f:
+            kaynak = f.read()
+        agac = ast.parse(kaynak)
+        bulunan = {}
+        for node in ast.walk(agac):
+            if isinstance(node, ast.Assign) and len(node.targets) == 1:
+                hedef = node.targets[0]
+                if isinstance(hedef, ast.Name) and hedef.id in ("BIST_TICKERS", "US_TICKERS"):
+                    if isinstance(node.value, ast.List):
+                        degerler = [el.value for el in node.value.elts
+                                    if isinstance(el, ast.Constant) and isinstance(el.value, str)]
+                        if degerler:
+                            bulunan[hedef.id] = degerler
+        if "BIST_TICKERS" in bulunan and "US_TICKERS" in bulunan:
+            return bulunan["BIST_TICKERS"], bulunan["US_TICKERS"]
+    except Exception as e:
+        print(f"[BILGI] stock_screener_bot.py statik okunamadi: {e}", flush=True)
+    return None, None
+
+
+_bist, _us = _load_tickers_from_bot_file()
+if _bist and _us:
+    BIST_TICKERS, US_TICKERS = _bist, _us
+    print(f"[BILGI] stock_screener_bot.py'den (import EDILMEDEN, statik okuma) "
+          f"{len(BIST_TICKERS)} BIST, {len(US_TICKERS)} ABD hissesi alindi.", flush=True)
+else:
+    print("[BILGI] stock_screener_bot.py bulunamadi/okunamadi, ornek liste kullaniliyor. "
           "Kendi tam listeni asagida TICKERS_BIST/TICKERS_US icine yapistirabilirsin.",
           flush=True)
     BIST_TICKERS = [
