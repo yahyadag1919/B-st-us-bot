@@ -21,20 +21,44 @@ ATR, OBV, CMF, MFI, Stochastic, StochRSI) pandas/numpy ile elle,
 bağımlılıksız yazıldı. requirements.txt'ye yeni paket eklemene gerek yok.
 
 ÇALIŞTIRMA: `python historical_autopsy.py` — bağımsız bir analiz
-scripti, canlı bota entegre değil, Start Command'i etkilemez, yeni bir
-environment variable gerekmez. BIST_TICKERS/US_TICKERS'ı aynı repo
+scripti, canlı bota entegre değil, Start Command'i etkilemez. Sonuçlar
+hem loglara hem de (TELEGRAM_TOKEN/TELEGRAM_CHAT_ID zaten Render'da
+tanımlı olduğu için) Telegram'a özet olarak gönderilir - CSV dosyaları
+kalıcı diskte olmadığı için (Render ücretsiz tier) asıl teslim edilecek
+sonuç Telegram mesajlarıdır. BIST_TICKERS/US_TICKERS'ı aynı repo
 içindeki stock_screener_bot.py'den otomatik almaya çalışır (varsa);
 yoksa aşağıdaki örnek listelere düşer.
 """
 
+import os
 import time
 import warnings
 import ast
 import numpy as np
 import pandas as pd
+import requests
 import yfinance as yf
 
 warnings.filterwarnings("ignore")
+
+TELEGRAM_TOKEN = os.environ.get("TELEGRAM_TOKEN", "")
+TELEGRAM_CHAT_ID = os.environ.get("TELEGRAM_CHAT_ID", "")
+
+
+def send_telegram_message(text: str):
+    """Bot zaten calisirken bu iki degisken Render'da tanimli oluyor -
+    yeni bir ayar gerekmiyor. Eksikse sessizce loga dusup devam eder,
+    scripti durdurmaz."""
+    if not TELEGRAM_TOKEN or not TELEGRAM_CHAT_ID:
+        print("[UYARI] TELEGRAM_TOKEN/TELEGRAM_CHAT_ID yok - Telegram'a "
+              "gonderilemiyor, sadece loglarda kalacak.", flush=True)
+        return
+    try:
+        requests.post(
+            f"https://api.telegram.org/bot{TELEGRAM_TOKEN}/sendMessage",
+            json={"chat_id": TELEGRAM_CHAT_ID, "text": text[:4000]}, timeout=20)
+    except Exception as e:
+        print(f"[HATA] Telegram gonderilemedi: {e}", flush=True)
 
 # =============================================================================
 # 1. AYARLAR
@@ -340,11 +364,21 @@ def run_autopsy():
 
     if not all_events:
         print("\n[SONUÇ] Hiç olay bulunamadı — eşiği veya periyodu genişletmeyi düşün.", flush=True)
+        send_telegram_message("🔬 [OTOPSİ] Analiz tamamlandı ama hiç ±%5 olay bulunamadı — "
+                               "eşik veya periyot genişletilmeli.")
         return
 
     result_df = pd.DataFrame(all_events)
     result_df.to_csv(OUTPUT_CSV, index=False, encoding="utf-8-sig")
     print(f"\n[KAYDEDİLDİ] {OUTPUT_CSV} — {len(result_df)} olay", flush=True)
+
+    long_n = (result_df["event_type"] == "LONG_EVENT").sum()
+    short_n = (result_df["event_type"] == "SHORT_EVENT").sum()
+    send_telegram_message(
+        f"🔬 [OTOPSİ TAMAMLANDI]\n"
+        f"Toplam {len(result_df)} olay bulundu (LONG {long_n}, SHORT {short_n}).\n"
+        f"Aşağıda market + yön kırılımlı özetler ayrı mesajlarda gelecek."
+    )
 
     print_and_save_summary(result_df)
 
@@ -363,32 +397,44 @@ def print_and_save_summary(df: pd.DataFrame):
     bool_cols = ["obv_trend_up_t1", "bb_bandwidth_20d_min", "rsi14_neutral_45_55", "macd_bullish_cross_t1"]
 
     summary_rows = []
-    for event_type in ["LONG_EVENT", "SHORT_EVENT"]:
-        grup = df[df["event_type"] == event_type]
-        n = len(grup)
-        print(f"\n### {event_type} — {n} olay ###")
-        if n == 0:
+    for market in ["BIST", "US"]:
+        market_df = df[df["market"] == market]
+        if market_df.empty:
             continue
-
-        print("-- Ortalama / Medyan tablosu --")
-        for col in numeric_cols:
-            vals = grup[col].dropna()
-            if vals.empty:
+        for event_type in ["LONG_EVENT", "SHORT_EVENT"]:
+            grup = market_df[market_df["event_type"] == event_type]
+            n = len(grup)
+            baslik = f"{market} — {event_type} — {n} olay"
+            print(f"\n### {baslik} ###")
+            if n == 0:
                 continue
-            satir = f"  {col:26s} ort: {vals.mean():>8.2f} | medyan: {vals.median():>8.2f}"
-            print(satir)
-            summary_rows.append({"event_type": event_type, "metrik": col,
-                                  "ortalama": round(vals.mean(), 3), "medyan": round(vals.median(), 3), "n": len(vals)})
 
-        print("-- Koşul yüzdeleri --")
-        for col in bool_cols:
-            vals = grup[col].dropna()
-            if vals.empty:
-                continue
-            oran = vals.mean() * 100
-            print(f"  {col:26s} : %{oran:.1f}  (n={len(vals)})")
-            summary_rows.append({"event_type": event_type, "metrik": col,
-                                  "ortalama": round(oran, 1), "medyan": np.nan, "n": len(vals)})
+            tg_lines = [f"📊 [OTOPSİ] {baslik}", "", "Ortalama / Medyan:"]
+            print("-- Ortalama / Medyan tablosu --")
+            for col in numeric_cols:
+                vals = grup[col].dropna()
+                if vals.empty:
+                    continue
+                print(f"  {col:26s} ort: {vals.mean():>8.2f} | medyan: {vals.median():>8.2f}")
+                tg_lines.append(f"  {col}: ort {vals.mean():.2f} | med {vals.median():.2f}")
+                summary_rows.append({"market": market, "event_type": event_type, "metrik": col,
+                                      "ortalama": round(vals.mean(), 3), "medyan": round(vals.median(), 3), "n": len(vals)})
+
+            tg_lines.append("")
+            tg_lines.append("Koşul yüzdeleri:")
+            print("-- Koşul yüzdeleri --")
+            for col in bool_cols:
+                vals = grup[col].dropna()
+                if vals.empty:
+                    continue
+                oran = vals.mean() * 100
+                print(f"  {col:26s} : %{oran:.1f}  (n={len(vals)})")
+                tg_lines.append(f"  {col}: %{oran:.1f} (n={len(vals)})")
+                summary_rows.append({"market": market, "event_type": event_type, "metrik": col,
+                                      "ortalama": round(oran, 1), "medyan": np.nan, "n": len(vals)})
+
+            send_telegram_message("\n".join(tg_lines))
+            time.sleep(1)  # Telegram rate-limitine takilmamak icin mesajlar arasi kisa bekleme
 
     if summary_rows:
         pd.DataFrame(summary_rows).to_csv(OUTPUT_SUMMARY_CSV, index=False, encoding="utf-8-sig")
@@ -423,6 +469,11 @@ if __name__ == "__main__":
     print("\n[BİTTİ] Analiz tamamlandı. Sonuçları yukarıdaki loglarda ve "
           "CSV dosyalarında görebilirsin. Şimdi Render'da Start Command'i "
           "'python main.py'ye geri çevirip yeniden deploy edebilirsin.", flush=True)
+    send_telegram_message(
+        "✅ [OTOPSİ BİTTİ] Tüm özet mesajları yukarıda gönderildi.\n"
+        "Şimdi Render → Settings → Start Command'i 'python main.py'ye "
+        "geri çevirip kaydet — bot normal taramalara döner."
+    )
 
     # Script bitince process kapanirsa Render bunu "cokme" sanip yeniden
     # baslatir (ayni turnuva scriptlerindeki gibi) - o yuzden sonsuz
