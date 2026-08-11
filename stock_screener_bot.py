@@ -38,6 +38,17 @@ except Exception as _radar_import_err:
     _RADAR_CANLI_AVAILABLE = False
     print(f"radar_canli yüklenemedi (izole özellik, sistemi etkilemez): {_radar_import_err}")
 
+# ML Radar (2026-08-10) — TAMAMEN İZOLE, model.pkl + Supabase tabanlı.
+# try/except icinde: model.pkl veya supabase paketi eksik/bozuksa bile
+# ana sinyal sistemi (BIST/ABD taramalari, self-check) etkilenmez.
+try:
+    import ml_radar as mlr
+    _ML_RADAR_AVAILABLE = True
+except Exception as _ml_import_err:
+    mlr = None
+    _ML_RADAR_AVAILABLE = False
+    print(f"ml_radar yüklenemedi (izole özellik, sistemi etkilemez): {_ml_import_err}")
+
 TELEGRAM_TOKEN = os.environ.get("TELEGRAM_TOKEN", "")
 TELEGRAM_CHAT_ID = os.environ.get("TELEGRAM_CHAT_ID", "")
 
@@ -1900,6 +1911,11 @@ def poll_stock_commands():
                     send_telegram_message(rc.build_radar_report())
                 else:
                     send_telegram_message("🔬 Öncül radar bu deploy'da yüklenemedi.")
+            elif text.startswith("/ml_rapor"):
+                if _ML_RADAR_AVAILABLE:
+                    send_telegram_message(mlr.build_ml_report())
+                else:
+                    send_telegram_message("🤖 AI radar bu deploy'da yüklenemedi (model.pkl eksik olabilir).")
             elif text.startswith("/yardim") or text.startswith("/help"):
                 send_telegram_message(
                     "📖 Komutlar:\n"
@@ -1908,6 +1924,7 @@ def poll_stock_commands():
                     "/sinyaller — bugün üretilen motor sinyalleri\n"
                     "/kap — KAP haber kaynağı tazelik ölçümü (pasif, arka planda toplanıyor)\n"
                     "/radar — öncül radar sonuçları (BIST KAP'lı/KAP'sız + ABD teknik, sinyal amaçlı)\n"
+                    "/ml_rapor — AI (model.pkl) radar sonuçları, başarı oranı\n"
                     "/yardim — bu liste")
             else:
                 continue
@@ -2999,6 +3016,16 @@ def run_forever():
                 rc.check_outcomes()
             except Exception as e:
                 dedektif_report("Öncül radar (döngü)", e)
+
+        # ML Radar (model.pkl + Supabase tabanli) — kendi zamanlayicisi,
+        # kendi try/except'i, sinyal sisteminden tamamen bagimsiz.
+        if _ML_RADAR_AVAILABLE:
+            try:
+                mlr.maybe_scan("BIST")
+                mlr.maybe_scan("US")
+                mlr.check_and_update_results()
+            except Exception as e:
+                dedektif_report("ML radar (döngü)", e)
 
         # Futbol günlük özeti — kendi içinde günde bir kez gönderecek şekilde
         # kilitli, bu yüzden her turda güvenle çağrılabilir.
