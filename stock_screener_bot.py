@@ -2062,6 +2062,17 @@ def poll_stock_commands():
                     send_telegram_message(og.build_overnight_report())
                 else:
                     send_telegram_message("🌙 Gece AI radar bu deploy'da yüklenemedi (overnight_model.pkl eksik olabilir).")
+            elif text.startswith("/og_test"):
+                if _OVERNIGHT_RADAR_AVAILABLE:
+                    send_telegram_message("🧪 Gece AI radar manuel test taraması başlatılıyor (saatten bağımsız)...")
+                    try:
+                        og.scan("BIST", force=True)
+                        send_telegram_message("🧪 Test taraması bitti. Sinyal bulunduysa yukarıda ayrı mesaj olarak geldi, "
+                                               "bulunmadıysa bugünün kapanış verisiyle hiçbir hisse eşiği geçmedi demektir.")
+                    except Exception as e:
+                        send_telegram_message(f"🧪 Test taraması hata verdi: {e}")
+                else:
+                    send_telegram_message("🌙 Gece AI radar bu deploy'da yüklenemedi (overnight_model.pkl eksik olabilir).")
             elif text.startswith("/liste") or text.startswith("/takip"):
                 send_telegram_message(build_takip_listesi())
             elif text.startswith("/performans"):
@@ -2076,6 +2087,7 @@ def poll_stock_commands():
                     "/radar — öncül radar sonuçları (KAP'lı/KAP'sız karşılaştırma, sinyal amaçlı)\n"
                     "/ml_rapor — Ana AI Radar (gün içi) sonuçları, başarı oranı\n"
                     "/og_rapor — Gece AI Radar (overnight) sonuçları, başarı oranı\n"
+                    "/og_test — Gece AI Radar'ı saatten bağımsız hemen çalıştırır (test amaçlı)\n"
                     "/liste veya /takip — aktif takipteki + tamamlanan tüm AI sinyalleri\n"
                     "/performans — eski (indikatör tabanlı) sistemin sessiz mod özeti\n"
                     "/yardim — bu liste")

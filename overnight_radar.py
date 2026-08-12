@@ -376,18 +376,23 @@ def _in_trigger_window(now_ist=None) -> bool:
     return start <= m < end
 
 
-def scan(market: str = "BIST"):
+def scan(market: str = "BIST", force: bool = False):
     """Sadece BIST icin, sadece TRIGGER_WINDOW icinde (17:45-17:55 Istanbul)
     calisir - gunluk kapanisa dogru bir kerelik tarama. AI_SCORE_THRESHOLD
     (varsayilan %60, 2026-08-12'de %80'den dusuruldu) disinda ek filtre yok -
     has_catalyst/close_to_high_ratio hicbir zaman sert filtre olmadi, sadece
-    modele giden feature'lar."""
+    modele giden feature'lar.
+    force=True: zaman penceresini atlar (/og_test komutu icin) - o an
+    piyasa kapaliysa yfinance zaten en son kapanan barin verisini dondurur,
+    yani gunun kapanis verisiyle ayni sonucu uretir, gercek 17:45-17:55
+    turundan farkli bir sey degil, sadece saatten bagimsiz calistirilmis
+    olur."""
     if not OVERNIGHT_RADAR_ENABLED or not _MODEL_AVAILABLE:
         return
     if market != "BIST":
         print(f"[OVERNIGHT] {market} desteklenmiyor - şimdilik sadece BIST.", flush=True)
         return
-    if not _in_trigger_window():
+    if not force and not _in_trigger_window():
         return
 
     index_pct = _get_index_today_pct(market)
