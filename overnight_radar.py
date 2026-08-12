@@ -56,12 +56,13 @@ TELEGRAM_CHAT_ID = os.environ.get("TELEGRAM_CHAT_ID", "")
 
 OVERNIGHT_RADAR_ENABLED = os.environ.get("OVERNIGHT_RADAR_ENABLED", "true").lower() == "true"
 OVERNIGHT_UNUSED_INTERVAL = int(os.environ.get("OVERNIGHT_UNUSED_INTERVAL", "15"))
-AI_SCORE_THRESHOLD = float(os.environ.get("OVERNIGHT_AI_SCORE_THRESHOLD", "0.80"))
-
-# Gemini'nin spesifikasyonundaki esnek filtreler
-BIST_CHG_MIN, BIST_CHG_MAX = 0.50, 2.50
-BIST_MIN_VOLUME_MULT = 1.5
-US_GAP_PROTECTION_PCT = 2.5  # bunun uzerindeki gap-up'lar ATLANIR (tuzak korumasi)
+# 2026-08-12: 0.80 -> 0.60 dusuruldu (Gemini talebi - haber katalizoru
+# olmayan ama fiyat/hacim/CMF'i guclu tahtalari da yakalasin diye). Not:
+# has_catalyst ve close_to_high_ratio bu kodda HICBIR ZAMAN sert filtre
+# degildi - hep sadece modele giden feature'lardi (asagida FEATURE_COLUMNS).
+# Onlari "esnetmek" aslinda bu tek esigi dusurmekle ayni sey - modelin
+# kendisi bu feature'lara ne kadar agirlik verdigine karar veriyor.
+AI_SCORE_THRESHOLD = float(os.environ.get("OVERNIGHT_AI_SCORE_THRESHOLD", "0.60"))
 
 MODEL_PATH = os.environ.get("OVERNIGHT_MODEL_PATH", "overnight_model.pkl")
 
@@ -378,8 +379,9 @@ def _in_trigger_window(now_ist=None) -> bool:
 def scan(market: str = "BIST"):
     """Sadece BIST icin, sadece TRIGGER_WINDOW icinde (17:45-17:55 Istanbul)
     calisir - gunluk kapanisa dogru bir kerelik tarama. AI_SCORE_THRESHOLD
-    (varsayilan %80) disinda ek filtre yok - Gemini'nin spesifikasyonunda
-    bu model icin BIST_CHG_MIN/MAX gibi esnek filtreler belirtilmemisti."""
+    (varsayilan %60, 2026-08-12'de %80'den dusuruldu) disinda ek filtre yok -
+    has_catalyst/close_to_high_ratio hicbir zaman sert filtre olmadi, sadece
+    modele giden feature'lar."""
     if not OVERNIGHT_RADAR_ENABLED or not _MODEL_AVAILABLE:
         return
     if market != "BIST":
