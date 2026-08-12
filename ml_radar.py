@@ -69,8 +69,10 @@ MODEL_PATH = os.environ.get("ML_MODEL_PATH", "model.pkl")
 # Kullanıcının Colab eğitiminde kullandığı BİREBİR isim + sıra (2026-08-11 teyit edildi)
 FEATURE_COLUMNS = ["volume_factor", "rsi", "price_change_pct", "gap_pct", "cmf", "has_catalyst"]
 
-SUCCESS_TARGET_PCT = float(os.environ.get("ML_SUCCESS_TARGET_PCT", "2.0"))  # keyfi baslangic - ileride ayarlanabilir
-CHECK_WINDOW_HOURS = int(os.environ.get("ML_CHECK_WINDOW_HOURS", "48"))
+# Gemini tarafindan Colab egitimiyle birebir eslesecek sekilde onaylandi (2026-08-12):
+# hedef +%2.0, 2 saat icinde. Onceki 48 saatlik keyfi baslangic degeri buydu.
+SUCCESS_TARGET_PCT = float(os.environ.get("ML_SUCCESS_TARGET_PCT", "2.0"))
+CHECK_WINDOW_HOURS = float(os.environ.get("ML_CHECK_WINDOW_HOURS", "2"))
 KAP_MATCH_WINDOW_MINUTES = int(os.environ.get("ML_KAP_MATCH_WINDOW_MINUTES", "240"))  # has_catalyst icin, radar_canli.py ile ayni varsayilan
 
 INDEX_TICKERS = {"BIST": "XU100.IS", "US": "SPY"}
