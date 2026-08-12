@@ -1515,12 +1515,10 @@ M15_ENGINES_ENABLED = os.environ.get("M15_ENGINES_ENABLED", "false").lower() == 
 # Legacy (indikator tabanli, AI-disi) tarama sistemi anahtari (2026-08-11).
 # false: BIST gunluk/radar, ABD swing, ABD gun ici RSI21 ve radar_canli.py
 # (hacim/kirilim/ayrisma filtresi) calismaz - bot sadece ml_radar.py +
-# overnight_radar.py (AI modelleri) ile calisir. KOD SILINMEDI, sadece
-# kapatildi - M15 kolunun kapatilmasindaki AYNI GEREKCEYLE: bu kollar
-# turnuvada dogrulanmis TEK pozitif-beklentili sistemlerdi, AI modelleri
-# henuz canli kanitlanmamisken geri donus yolu acik tutuluyor.
-# true yaparsan (ML_RADAR_ENABLED=false ile birlikte) eski sisteme donersin.
-LEGACY_SCANS_ENABLED = os.environ.get("LEGACY_SCANS_ENABLED", "false").lower() == "true"
+# overnight_radar.py (AI modelleri) ile calisir. Eski sistem SESSIZ_MOD
+# ile susturulabilir ama HER ZAMAN CALISIR - turnuvada dogrulanmis TEK
+# pozitif-beklentili sistemler bunlar, AI modelleri henuz canli
+# kanitlanmamisken kapatilmasi yanlis olur (kullanicinin acik karari).
 M15_SCAN_INTERVAL_MINUTES = int(os.environ.get("M15_SCAN_INTERVAL_MINUTES", "15"))
 M15_BB_PERIOD = int(os.environ.get("M15_BB_PERIOD", "20"))
 M15_SQUEEZE_LOOKBACK = int(os.environ.get("M15_SQUEEZE_LOOKBACK", "50"))
@@ -2075,7 +2073,7 @@ def poll_stock_commands():
                     "/motor — motor performansı (isabet, R beklentisi, piyasa bağlamı)\n"
                     "/sinyaller — bugün üretilen motor sinyalleri\n"
                     "/kap — KAP haber kaynağı tazelik ölçümü (pasif, arka planda toplanıyor)\n"
-                    "/radar — öncül radar sonuçları (yalnızca LEGACY_SCANS_ENABLED=true iken)\n"
+                    "/radar — öncül radar sonuçları (KAP'lı/KAP'sız karşılaştırma, sinyal amaçlı)\n"
                     "/ml_rapor — Ana AI Radar (gün içi) sonuçları, başarı oranı\n"
                     "/og_rapor — Gece AI Radar (overnight) sonuçları, başarı oranı\n"
                     "/liste veya /takip — aktif takipteki + tamamlanan tüm AI sinyalleri\n"
@@ -2963,7 +2961,7 @@ def run_forever():
         )
 
     send_telegram_message(
-        "🚀 BIST + ABD hisse tarama botu (AI ODAKLI MİMARİ) başlatıldı.\n\n"
+        "🚀 BIST + ABD hisse tarama botu başlatıldı.\n\n"
         + (
             "🧠 Piyasa Beyni: BIST için XU100, ABD için SPY (ADX+EMA200) — "
             "artık YALNIZCA BİLGİ AMAÇLI. Yön kısıtı 2026-08-07'de kaldırıldı: "
@@ -2980,12 +2978,12 @@ def run_forever():
             f"ABD gün içi: {len(US_INTRADAY_TICKERS)} hisse (dar liste, 15 dk'da bir), piyasa açıkken. Strateji: RSI21 aşırı uç "
             f"(SİNYAL AMAÇLI — kendi opsiyon maliyetine göre değerlendir).\n"
             f"ABD swing: {len(US_TICKERS)} hisse, ABD kapanışından sonra (~{US_SWING_CHECK_HOUR:02d}:{US_SWING_CHECK_MINUTE:02d} New York). "
-            f"İki strateji: Hacim Z-Skor + ATR Kırılımı.\n\n"
-            if LEGACY_SCANS_ENABLED else
-            "🚫 ESKİ İNDİKATÖR TABANLI SİSTEM KAPALI (2026-08-11) — BIST günlük/radar, "
-            "ABD swing, ABD gün içi RSI21 ve öncül radar (hacim/kırılım filtresi) "
-            "çalışmıyor. Kod silinmedi, LEGACY_SCANS_ENABLED=true ile geri açılabilir.\n\n"
-            "🤖 Sistem artık sadece AI modelleriyle çalışıyor:\n"
+            f"İki strateji: Hacim Z-Skor + ATR Kırılımı.\n"
+            + ("🔇 SESSIZ MOD AÇIK — yukarıdaki sinyallerin Telegram mesajları susturuldu, "
+               "/performans ile sorgulanabilir.\n\n" if SESSIZ_MOD else "\n")
+        )
+        + (
+            "🤖 Ayrıca 2 AI modeli de paralel çalışıyor:\n"
             "  • Ana AI Radar (model.pkl) — gün içi, 15 dk'da bir, BIST+ABD\n"
             "  • Gece AI Radar (overnight_model.pkl) — BIST kapanışına doğru, "
             "ertesi gün açılış/gap potansiyeli\n"
@@ -3013,7 +3011,7 @@ def run_forever():
         # Her saat icin ayri bir durum anahtari kullaniyoruz ki 13:00 ve 15:30
         # bagimsiz calissin; telafi mantigi burada da gecerli, ama radar
         # kapanistan SONRA anlamsizlastigi icin sadece seans icinde tetiklenir.
-        if LEGACY_SCANS_ENABLED and bist_is_open(istanbul_now):
+        if bist_is_open(istanbul_now):
             for r_hour, r_minute in BIST_RADAR_TIMES:
                 radar_key = f"bist_radar_{r_hour:02d}{r_minute:02d}"
                 if should_run_daily_scan(radar_key, istanbul_now, r_hour, r_minute):
@@ -3023,7 +3021,7 @@ def run_forever():
                     except Exception as e:
                         dedektif_report("BIST radar taraması (döngü)", e)
 
-        if LEGACY_SCANS_ENABLED and should_run_daily_scan("bist", istanbul_now, BIST_CHECK_HOUR, BIST_CHECK_MINUTE):
+        if should_run_daily_scan("bist", istanbul_now, BIST_CHECK_HOUR, BIST_CHECK_MINUTE):
             try:
                 scan_bist(BIST_TICKERS, "BIST")
                 mark_daily_scan_done("bist", istanbul_now)
@@ -3031,7 +3029,7 @@ def run_forever():
                 dedektif_report("BIST taraması (döngü)", e)
                 # Tarihi ISARETLEMIYORUZ - bir sonraki dongude tekrar denesin.
 
-        if LEGACY_SCANS_ENABLED and should_run_daily_scan("us_swing", ny_now, US_SWING_CHECK_HOUR, US_SWING_CHECK_MINUTE):
+        if should_run_daily_scan("us_swing", ny_now, US_SWING_CHECK_HOUR, US_SWING_CHECK_MINUTE):
             try:
                 scan_us_swing(US_TICKERS)
                 mark_daily_scan_done("us_swing", ny_now)
@@ -3041,7 +3039,7 @@ def run_forever():
         ny_minutes = ny_now.hour * 60 + ny_now.minute
         market_open = 9 * 60 + 30
         market_close = 16 * 60
-        if LEGACY_SCANS_ENABLED and ny_now.weekday() < 5 and market_open <= ny_minutes < market_close:
+        if ny_now.weekday() < 5 and market_open <= ny_minutes < market_close:
             if (_last_us_gunici_scan_time is None or
                     (ny_now - _last_us_gunici_scan_time).total_seconds() >= US_GUNICI_SCAN_INTERVAL_MINUTES * 60):
                 try:
@@ -3174,8 +3172,8 @@ def run_forever():
                 dedektif_report("KAP gözlemci (döngü)", e)
 
         # Canlı öncül radar — indikator tabanli (AI degil), sinyal-amaçlı,
-        # emir açmaz. LEGACY_SCANS_ENABLED ile birlikte kapatilir/acilir.
-        if _RADAR_CANLI_AVAILABLE and LEGACY_SCANS_ENABLED:
+        # emir açmaz. SESSIZ_MOD'dan bagimsiz calisir (kendi bildirimleri var).
+        if _RADAR_CANLI_AVAILABLE:
             try:
                 rc.maybe_scan(BIST_TICKERS, "BIST")
                 rc.maybe_scan(US_INTRADAY_TICKERS, "US")
