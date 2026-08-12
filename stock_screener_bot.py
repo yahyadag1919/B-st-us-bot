@@ -49,6 +49,16 @@ except Exception as _ml_import_err:
     _ML_RADAR_AVAILABLE = False
     print(f"ml_radar yüklenemedi (izole özellik, sistemi etkilemez): {_ml_import_err}")
 
+# Gece AI Radar (2026-08-11) — TAMAMEN İZOLE, overnight_model.pkl tabanlı.
+# ml_radar.py ile ayni izolasyon deseni, ayri model/CSV/zamanlama.
+try:
+    import overnight_radar as og
+    _OVERNIGHT_RADAR_AVAILABLE = True
+except Exception as _og_import_err:
+    og = None
+    _OVERNIGHT_RADAR_AVAILABLE = False
+    print(f"overnight_radar yüklenemedi (izole özellik, sistemi etkilemez): {_og_import_err}")
+
 TELEGRAM_TOKEN = os.environ.get("TELEGRAM_TOKEN", "")
 TELEGRAM_CHAT_ID = os.environ.get("TELEGRAM_CHAT_ID", "")
 
@@ -926,6 +936,73 @@ TRAIL_ATR_MULT = float(os.environ.get("TRAIL_ATR_MULT", "2.0"))
 # Trailing stop her kucuk oynamada mesaj atmasin - en az bu kadar iyilesme sart.
 TRAIL_MIN_MOVE_PCT = float(os.environ.get("TRAIL_MIN_MOVE_PCT", "1.0"))
 
+# SESSIZ MOD (2026-08-11, kullanicinin kendi onerisi): eski/klasik (indikator
+# tabanli, turnuvada dogrulanmis) sistemi KALDIRMAK yerine - bu proje boyunca
+# tek pozitif-kenarli, kanitlanmis sistem oldugu icin - sadece Telegram
+# bildirimlerini susturuyoruz. Sinyal uretimi, takip (signal_tracking.csv)
+# ve sonuc kaydi (LEGACY_OUTCOMES_FILE) AYNEN calismaya devam ediyor - sadece
+# gonderilen mesajlar bastiriliyor. /performans komutuyla ozet sorulabiliyor.
+SESSIZ_MOD = os.environ.get("SESSIZ_MOD", "false").lower() == "true"
+
+LEGACY_OUTCOMES_FILE = _data_path("legacy_outcomes.csv")
+LEGACY_OUTCOMES_FIELDS = ["ticker", "market", "strategy", "direction", "entry_price",
+                           "exit_price", "result_pct", "label", "closed_time"]
+
+
+def _log_legacy_outcome(ticker, market, strategy, direction, entry_price, exit_price, result_pct, label):
+    """check_exit_alerts bir pozisyonu kapattiginda buraya da yazar - cunku
+    _write_tracking(still_open) kapanan satirlari CSV'den tamamen SILIYOR,
+    yani onceden performans gecmisi hic tutulmuyordu. /performans bu dosyayi
+    okuyor."""
+    exists = os.path.isfile(LEGACY_OUTCOMES_FILE)
+    with open(LEGACY_OUTCOMES_FILE, "a", newline="", encoding="utf-8") as f:
+        w = csv.DictWriter(f, fieldnames=LEGACY_OUTCOMES_FIELDS)
+        if not exists:
+            w.writeheader()
+        w.writerow({
+            "ticker": ticker, "market": market, "strategy": strategy, "direction": direction,
+            "entry_price": f"{entry_price:.4f}", "exit_price": f"{exit_price:.4f}",
+            "result_pct": f"{result_pct:.2f}", "label": label,
+            "closed_time": datetime.now().isoformat(),
+        })
+
+
+def build_performans_message() -> str:
+    """/performans komutu - eski (indikator tabanli) sistemin SESSIZ_MOD'da
+    biriktirdigi sonuclarin ozeti. legacy_outcomes.csv (BIST/ABD swing R:R
+    kapanislari) + us_swing_outcomes.csv + us_gunici_outcomes.csv (checkpoint
+    bazli, zaten var olan mekanizmalar) birlikte okunuyor."""
+    lines = ["📈 [ESKİ SİSTEM PERFORMANSI]"]
+
+    if os.path.isfile(LEGACY_OUTCOMES_FILE):
+        with open(LEGACY_OUTCOMES_FILE, newline="", encoding="utf-8") as f:
+            rows = list(csv.DictReader(f))
+        if rows:
+            basarili = [r for r in rows if float(r["result_pct"]) > 0]
+            lines.append(f"\n🎯 R:R kapanışları (BIST + ABD swing): {len(rows)} kapanan")
+            lines.append(f"  Kârlı kapanan: %{len(basarili)/len(rows)*100:.1f} ({len(basarili)}/{len(rows)})")
+            ort = sum(float(r["result_pct"]) for r in rows) / len(rows)
+            lines.append(f"  Ortalama sonuç: {ort:+.2f}%")
+        else:
+            lines.append("\n🎯 R:R kapanışları: henüz kapanan yok")
+    else:
+        lines.append("\n🎯 R:R kapanışları: henüz kapanan yok")
+
+    for dosya, etiket in [(US_SWING_OUTCOME_FILE, "ABD Swing (checkpoint)"),
+                           (US_GUNICI_OUTCOME_FILE, "ABD Gün İçi (checkpoint)")]:
+        if os.path.isfile(dosya):
+            with open(dosya, newline="", encoding="utf-8") as f:
+                r2 = list(csv.DictReader(f))
+            if r2:
+                basarili2 = [r for r in r2 if r.get("hit") in ("1", "True", "true")]
+                lines.append(f"\n📌 {etiket}: {len(r2)} checkpoint | %{len(basarili2)/len(r2)*100:.1f} hedefe ulaştı")
+
+    if SESSIZ_MOD:
+        lines.append("\n🔇 Sessiz mod AÇIK — sinyal/çıkış bildirimleri gelmiyor, sadece bu komutla sorgulanabiliyor.")
+    else:
+        lines.append("\n🔊 Sessiz mod KAPALI — sinyaller normal şekilde Telegram'a da geliyor.")
+    return "\n".join(lines)
+
 
 def _read_tracking():
     if not os.path.isfile(TRACKING_FILE):
@@ -957,12 +1034,14 @@ def track_new_signal(ticker, market, strategy, direction, entry_price, stop_pric
     _write_tracking(rows)
     # Gemini'nin istegi (2026-07-28): CSV kaybolursa takip zinciri kopmasin diye
     # her takibe alma Telegram'a da log dusuyor - boylece kullanicinin elinde
-    # her zaman seviyelerin yazili bir kaydi kalir.
-    send_telegram_message(
-        f"📋 [TAKİBE ALINDI] {ticker} ({direction}) — {market} / {strategy}\n"
-        f"Giriş: {entry_price:.2f} | 🛑 Stop: {stop_price:.2f} | 🎯 TP: {tp_price:.2f} | Adet: {qty}\n"
-        f"(Bu kayıt sistem sıfırlansa bile elinde kalsın diye gönderildi.)"
-    )
+    # her zaman seviyelerin yazili bir kaydi kalir. SESSIZ_MOD'da bu da susar -
+    # ama tracking CSV'ye yazma islemi (yukarida) etkilenmiyor.
+    if not SESSIZ_MOD:
+        send_telegram_message(
+            f"📋 [TAKİBE ALINDI] {ticker} ({direction}) — {market} / {strategy}\n"
+            f"Giriş: {entry_price:.2f} | 🛑 Stop: {stop_price:.2f} | 🎯 TP: {tp_price:.2f} | Adet: {qty}\n"
+            f"(Bu kayıt sistem sıfırlansa bile elinde kalsın diye gönderildi.)"
+        )
 
 
 def check_exit_alerts():
@@ -1002,12 +1081,14 @@ def check_exit_alerts():
                     label = "BREAKEVEN"
                 else:
                     label = "TRAILING STOP"
-                send_telegram_message(
-                    f"🛑 [{label}] {ticker} ({direction})\n"
-                    f"Fiyat {price:.2f}, stop seviyesi {effective_stop:.2f} geçildi.\n"
-                    f"➡️ POZİSYONU KAPAT.\n"
-                    f"Giriş: {entry:.2f} | Sonuç: {pct:+.2f}%"
-                )
+                if not SESSIZ_MOD:
+                    send_telegram_message(
+                        f"🛑 [{label}] {ticker} ({direction})\n"
+                        f"Fiyat {price:.2f}, stop seviyesi {effective_stop:.2f} geçildi.\n"
+                        f"➡️ POZİSYONU KAPAT.\n"
+                        f"Giriş: {entry:.2f} | Sonuç: {pct:+.2f}%"
+                    )
+                _log_legacy_outcome(ticker, r["market"], r["strategy"], direction, entry, price, pct, label)
                 r["closed"] = "1"
                 continue
 
@@ -1021,11 +1102,12 @@ def check_exit_alerts():
                         half = f" (~{int(int(qty) / 2)} adet)"
                     except Exception:
                         pass
-                    send_telegram_message(
-                        f"🎯 [PARSİYEL TP] {ticker} ({direction}) {PARTIAL_TP_R_MULT}R seviyesine ulaştı!\n"
-                        f"Fiyat: {price:.2f} | Giriş: {entry:.2f} | Kâr: {pct:+.2f}%\n"
-                        f"➡️ %50 SATIŞ YAP{half} ve STOP'U GİRİŞE ({entry:.2f}) ÇEK!"
-                    )
+                    if not SESSIZ_MOD:
+                        send_telegram_message(
+                            f"🎯 [PARSİYEL TP] {ticker} ({direction}) {PARTIAL_TP_R_MULT}R seviyesine ulaştı!\n"
+                            f"Fiyat: {price:.2f} | Giriş: {entry:.2f} | Kâr: {pct:+.2f}%\n"
+                            f"➡️ %50 SATIŞ YAP{half} ve STOP'U GİRİŞE ({entry:.2f}) ÇEK!"
+                        )
                     r["partial_done"] = "1"
                     r["trail_stop"] = str(entry)  # breakeven
                     still_open.append(r)
@@ -1040,11 +1122,12 @@ def check_exit_alerts():
                     candidate = price + atr * TRAIL_ATR_MULT
                     improved = trail_stop is None or candidate < trail_stop * (1 - TRAIL_MIN_MOVE_PCT / 100)
                 if improved:
-                    send_telegram_message(
-                        f"📈 [TRAILING STOP GÜNCELLE] {ticker} ({direction})\n"
-                        f"Fiyat: {price:.2f} | Trend devam ediyor.\n"
-                        f"➡️ STOP'U {candidate:.2f} SEVİYESİNE ÇEK ({TRAIL_ATR_MULT}×ATR)."
-                    )
+                    if not SESSIZ_MOD:
+                        send_telegram_message(
+                            f"📈 [TRAILING STOP GÜNCELLE] {ticker} ({direction})\n"
+                            f"Fiyat: {price:.2f} | Trend devam ediyor.\n"
+                            f"➡️ STOP'U {candidate:.2f} SEVİYESİNE ÇEK ({TRAIL_ATR_MULT}×ATR)."
+                        )
                     r["trail_stop"] = str(candidate)
 
             still_open.append(r)
@@ -1265,7 +1348,8 @@ def scan_us_swing(tickers: list):
         if PORTFOLIO_BALANCE_USD is not None:
             msg += "\n" + OPTIONS_SIZING_NOTE
         print(msg)
-        send_telegram_message(msg)
+        if not SESSIZ_MOD:
+            send_telegram_message(msg)
     else:
         print("ABD swing: bugun kriterlere uyan hisse bulunamadi")
 
@@ -1427,6 +1511,16 @@ M15_RR_RATIO = float(os.environ.get("M15_RR_RATIO", "2.0"))
 #   3) ileride farkli bir donemde yeniden olculmek istenirse hazir duruyor.
 # Yeniden acmak icin: M15_ENGINES_ENABLED=true
 M15_ENGINES_ENABLED = os.environ.get("M15_ENGINES_ENABLED", "false").lower() == "true"
+
+# Legacy (indikator tabanli, AI-disi) tarama sistemi anahtari (2026-08-11).
+# false: BIST gunluk/radar, ABD swing, ABD gun ici RSI21 ve radar_canli.py
+# (hacim/kirilim/ayrisma filtresi) calismaz - bot sadece ml_radar.py +
+# overnight_radar.py (AI modelleri) ile calisir. KOD SILINMEDI, sadece
+# kapatildi - M15 kolunun kapatilmasindaki AYNI GEREKCEYLE: bu kollar
+# turnuvada dogrulanmis TEK pozitif-beklentili sistemlerdi, AI modelleri
+# henuz canli kanitlanmamisken geri donus yolu acik tutuluyor.
+# true yaparsan (ML_RADAR_ENABLED=false ile birlikte) eski sisteme donersin.
+LEGACY_SCANS_ENABLED = os.environ.get("LEGACY_SCANS_ENABLED", "false").lower() == "true"
 M15_SCAN_INTERVAL_MINUTES = int(os.environ.get("M15_SCAN_INTERVAL_MINUTES", "15"))
 M15_BB_PERIOD = int(os.environ.get("M15_BB_PERIOD", "20"))
 M15_SQUEEZE_LOOKBACK = int(os.environ.get("M15_SQUEEZE_LOOKBACK", "50"))
@@ -1868,6 +1962,55 @@ def build_sinyaller_message() -> str:
     return "\n".join(lines)
 
 
+def build_takip_listesi() -> str:
+    """/liste komutu icin: ml_radar.py + overnight_radar.py'nin CSV'lerini
+    birlestirip aktif (PENDING) ve tamamlanan (SUCCESS/FAIL) sinyalleri
+    gosterir. Aktif satirlar icin anlik fiyati da ceker (kucuk sayida
+    satir bekleniyor, performans sorunu olmamali). Her iki modul de
+    ayri ayri try/except icinde - biri patlarsa digeri yine gosterilir."""
+    aktif_satirlar, tamam_satirlar = [], []
+
+    kaynaklar = []
+    if _ML_RADAR_AVAILABLE:
+        kaynaklar.append(("🤖 Ana AI Radar", mlr))
+    if _OVERNIGHT_RADAR_AVAILABLE:
+        kaynaklar.append(("🌙 Gece AI Radar", og))
+
+    for etiket, modul in kaynaklar:
+        try:
+            rows = modul._read_signals()
+        except Exception:
+            continue
+        for r in rows:
+            try:
+                if r["result"] == "PENDING":
+                    guncel = ""
+                    try:
+                        df = yf.Ticker(r["symbol"]).history(period="1d")
+                        if not df.empty:
+                            son_fiyat = float(df["Close"].iloc[-1])
+                            entry = float(r["entry_price"])
+                            fark = (son_fiyat - entry) / entry * 100
+                            guncel = f" | anlık {son_fiyat:.2f} ({fark:+.2f}%)"
+                    except Exception:
+                        pass
+                    aktif_satirlar.append(
+                        f"  {etiket} {r['symbol']} — giriş {float(r['entry_price']):.2f}{guncel}"
+                    )
+                elif r["result"] in ("SUCCESS", "FAIL"):
+                    ikon = "✅" if r["result"] == "SUCCESS" else "❌"
+                    tamam_satirlar.append(f"  {ikon} {etiket} {r['symbol']} — {r['result']}")
+            except Exception:
+                continue
+
+    lines = ["📋 [AKTİF TAKİP & PERFORMANS]"]
+    lines.append("\n📌 Aktif Takipteki Hisseler:")
+    lines += aktif_satirlar if aktif_satirlar else ["  (yok)"]
+    lines.append("\n✅ Tamamlanan Hisseler:")
+    lines += tamam_satirlar if tamam_satirlar else ["  (yok)"]
+    return "\n".join(lines)
+
+
 def poll_stock_commands():
     """Telegram komutlarini dinler. Hatalar sessizce yutulur - komut
     dinleyici yuzunden ana dongunun durmasi kabul edilemez."""
@@ -1916,6 +2059,15 @@ def poll_stock_commands():
                     send_telegram_message(mlr.build_ml_report())
                 else:
                     send_telegram_message("🤖 AI radar bu deploy'da yüklenemedi (model.pkl eksik olabilir).")
+            elif text.startswith("/og_rapor"):
+                if _OVERNIGHT_RADAR_AVAILABLE:
+                    send_telegram_message(og.build_overnight_report())
+                else:
+                    send_telegram_message("🌙 Gece AI radar bu deploy'da yüklenemedi (overnight_model.pkl eksik olabilir).")
+            elif text.startswith("/liste") or text.startswith("/takip"):
+                send_telegram_message(build_takip_listesi())
+            elif text.startswith("/performans"):
+                send_telegram_message(build_performans_message())
             elif text.startswith("/yardim") or text.startswith("/help"):
                 send_telegram_message(
                     "📖 Komutlar:\n"
@@ -1923,8 +2075,11 @@ def poll_stock_commands():
                     "/motor — motor performansı (isabet, R beklentisi, piyasa bağlamı)\n"
                     "/sinyaller — bugün üretilen motor sinyalleri\n"
                     "/kap — KAP haber kaynağı tazelik ölçümü (pasif, arka planda toplanıyor)\n"
-                    "/radar — öncül radar sonuçları (BIST KAP'lı/KAP'sız + ABD teknik, sinyal amaçlı)\n"
-                    "/ml_rapor — AI (model.pkl) radar sonuçları, başarı oranı\n"
+                    "/radar — öncül radar sonuçları (yalnızca LEGACY_SCANS_ENABLED=true iken)\n"
+                    "/ml_rapor — Ana AI Radar (gün içi) sonuçları, başarı oranı\n"
+                    "/og_rapor — Gece AI Radar (overnight) sonuçları, başarı oranı\n"
+                    "/liste veya /takip — aktif takipteki + tamamlanan tüm AI sinyalleri\n"
+                    "/performans — eski (indikatör tabanlı) sistemin sessiz mod özeti\n"
                     "/yardim — bu liste")
             else:
                 continue
@@ -2218,7 +2373,8 @@ def scan_us_gunici(tickers: list):
         msg = (f"📊 ABD Gün İçi - RSI21 Sinyalleri (test amaçlı)\n"
                f"🧠 Piyasa rejimi: {regime} ({regime_note})\n\n" + "\n".join(results))
         print(msg)
-        send_telegram_message(msg)
+        if not SESSIZ_MOD:
+            send_telegram_message(msg)
     else:
         print("ABD gun ici: bugun kriterlere uyan hisse bulunamadi")
 
@@ -2355,7 +2511,8 @@ def scan_bist_radar(tickers: list, label: str):
     )
     msg = "\n".join(lines)
     print(msg)
-    send_telegram_message(msg)
+    if not SESSIZ_MOD:
+        send_telegram_message(msg)
 
 
 def scan_bist(tickers: list, market_label: str):
@@ -2480,7 +2637,8 @@ def scan_bist(tickers: list, market_label: str):
             lines.append(OPTIONS_SIZING_NOTE)
         msg = "\n".join(lines)
         print(msg)
-        send_telegram_message(msg)
+        if not SESSIZ_MOD:
+            send_telegram_message(msg)
     else:
         print(f"{market_label}: bugun kriterlere uyan hisse bulunamadi")
         send_telegram_message(
@@ -2805,29 +2963,37 @@ def run_forever():
         )
 
     send_telegram_message(
-        "🚀 BIST + ABD hisse tarama botu (4 KATMANLI MİMARİ) başlatıldı.\n"
-        "1️⃣ Piyasa Beyni | 2️⃣ Portföy/Risk Beyni | 3️⃣ Hibrit Çıkış Uyarıları | 4️⃣ Sistem Dedektifi\n\n"
-        f"🧠 Piyasa Beyni: BIST için XU100, ABD için SPY (ADX+EMA200) — "
-        f"artık YALNIZCA BİLGİ AMAÇLI. Yön kısıtı 2026-08-07'de kaldırıldı: "
-        f"turnuvada %78.2 isabet bu filtre YOKKEN ölçülmüştü, sistem o haline döndü. "
-        f"LONG da SHORT da üretilir, YATAY'da tarama durmaz.\n"
-        + portfoy_satiri +
-        f"🎯 Çıkış: {PARTIAL_TP_R_MULT}R'de %50 satış + breakeven uyarısı, sonra {TRAIL_ATR_MULT}×ATR trailing stop "
-        f"(her {EXIT_CHECK_INTERVAL_MINUTES} dk, sadece piyasa açıkken).\n\n"
-        f"BIST: {len(BIST_TICKERS)} hisse, her gün ~{BIST_CHECK_HOUR:02d}:{BIST_CHECK_MINUTE:02d} (İstanbul) KESİN SİNYAL (kapanmış bar). "
-        f"İki strateji: Fitil+RSI+Hacim + Sadece RSI.\n"
-        f"⏳ BIST ÖN UYARI (radar): "
-        + ", ".join(f"{h:02d}:{m:02d}" for h, m in BIST_RADAR_TIMES)
-        + " — şartlar oluşuyorsa haber verir, kapanış teyidi beklenir (emir talimatı değil).\n"
-        f"ABD gün içi: {len(US_INTRADAY_TICKERS)} hisse (dar liste, 15 dk'da bir), piyasa açıkken. Strateji: RSI21 aşırı uç "
-        f"(SİNYAL AMAÇLI — kendi opsiyon maliyetine göre değerlendir).\n"
-        f"ABD swing: {len(US_TICKERS)} hisse, ABD kapanışından sonra (~{US_SWING_CHECK_HOUR:02d}:{US_SWING_CHECK_MINUTE:02d} New York). "
-        f"İki strateji: Hacim Z-Skor + ATR Kırılımı.\n"
-        + (f"\n⚙️ GÜN İÇİ 3 MOTOR: AÇIK (her {M15_SCAN_INTERVAL_MINUTES} dk, 1:{M15_RR_RATIO:g} R:R)\n\n"
-           if M15_ENGINES_ENABLED else
-           "\n🚫 Gün içi 3 motorlu kol KAPATILDI (2026-08-07). Turnuvada 15 varyantın "
-           "tamamı maliyet sonrası negatif çıktı; Breakout'un eşiğini gevşetmek de "
-           "işe yaramadı. Sistem yalnızca turnuvada doğrulanmış kollarla çalışıyor.\n\n") +
+        "🚀 BIST + ABD hisse tarama botu (AI ODAKLI MİMARİ) başlatıldı.\n\n"
+        + (
+            "🧠 Piyasa Beyni: BIST için XU100, ABD için SPY (ADX+EMA200) — "
+            "artık YALNIZCA BİLGİ AMAÇLI. Yön kısıtı 2026-08-07'de kaldırıldı: "
+            "turnuvada %78.2 isabet bu filtre YOKKEN ölçülmüştü, sistem o haline döndü. "
+            "LONG da SHORT da üretilir, YATAY'da tarama durmaz.\n"
+            + portfoy_satiri +
+            f"🎯 Çıkış: {PARTIAL_TP_R_MULT}R'de %50 satış + breakeven uyarısı, sonra {TRAIL_ATR_MULT}×ATR trailing stop "
+            f"(her {EXIT_CHECK_INTERVAL_MINUTES} dk, sadece piyasa açıkken).\n\n"
+            f"BIST: {len(BIST_TICKERS)} hisse, her gün ~{BIST_CHECK_HOUR:02d}:{BIST_CHECK_MINUTE:02d} (İstanbul) KESİN SİNYAL (kapanmış bar). "
+            f"İki strateji: Fitil+RSI+Hacim + Sadece RSI.\n"
+            f"⏳ BIST ÖN UYARI (radar): "
+            + ", ".join(f"{h:02d}:{m:02d}" for h, m in BIST_RADAR_TIMES)
+            + " — şartlar oluşuyorsa haber verir, kapanış teyidi beklenir (emir talimatı değil).\n"
+            f"ABD gün içi: {len(US_INTRADAY_TICKERS)} hisse (dar liste, 15 dk'da bir), piyasa açıkken. Strateji: RSI21 aşırı uç "
+            f"(SİNYAL AMAÇLI — kendi opsiyon maliyetine göre değerlendir).\n"
+            f"ABD swing: {len(US_TICKERS)} hisse, ABD kapanışından sonra (~{US_SWING_CHECK_HOUR:02d}:{US_SWING_CHECK_MINUTE:02d} New York). "
+            f"İki strateji: Hacim Z-Skor + ATR Kırılımı.\n\n"
+            if LEGACY_SCANS_ENABLED else
+            "🚫 ESKİ İNDİKATÖR TABANLI SİSTEM KAPALI (2026-08-11) — BIST günlük/radar, "
+            "ABD swing, ABD gün içi RSI21 ve öncül radar (hacim/kırılım filtresi) "
+            "çalışmıyor. Kod silinmedi, LEGACY_SCANS_ENABLED=true ile geri açılabilir.\n\n"
+            "🤖 Sistem artık sadece AI modelleriyle çalışıyor:\n"
+            "  • Ana AI Radar (model.pkl) — gün içi, 15 dk'da bir, BIST+ABD\n"
+            "  • Gece AI Radar (overnight_model.pkl) — BIST kapanışına doğru, "
+            "ertesi gün açılış/gap potansiyeli\n"
+            "⚠️ İkisi de sinyal-amaçlıdır, emir açmaz — henüz canlı kanıtlanmamış "
+            "modellerdir, dikkatli değerlendir.\n\n"
+        )
+        + (f"⚙️ GÜN İÇİ 3 MOTOR: AÇIK (her {M15_SCAN_INTERVAL_MINUTES} dk, 1:{M15_RR_RATIO:g} R:R)\n\n"
+           if M15_ENGINES_ENABLED else "") +
         f"⚠️ Bot işlem AÇMIYOR — sadece emir talimatı ve takip uyarısı gönderir."
         + storage_warning
     )
@@ -2847,7 +3013,7 @@ def run_forever():
         # Her saat icin ayri bir durum anahtari kullaniyoruz ki 13:00 ve 15:30
         # bagimsiz calissin; telafi mantigi burada da gecerli, ama radar
         # kapanistan SONRA anlamsizlastigi icin sadece seans icinde tetiklenir.
-        if bist_is_open(istanbul_now):
+        if LEGACY_SCANS_ENABLED and bist_is_open(istanbul_now):
             for r_hour, r_minute in BIST_RADAR_TIMES:
                 radar_key = f"bist_radar_{r_hour:02d}{r_minute:02d}"
                 if should_run_daily_scan(radar_key, istanbul_now, r_hour, r_minute):
@@ -2857,7 +3023,7 @@ def run_forever():
                     except Exception as e:
                         dedektif_report("BIST radar taraması (döngü)", e)
 
-        if should_run_daily_scan("bist", istanbul_now, BIST_CHECK_HOUR, BIST_CHECK_MINUTE):
+        if LEGACY_SCANS_ENABLED and should_run_daily_scan("bist", istanbul_now, BIST_CHECK_HOUR, BIST_CHECK_MINUTE):
             try:
                 scan_bist(BIST_TICKERS, "BIST")
                 mark_daily_scan_done("bist", istanbul_now)
@@ -2865,7 +3031,7 @@ def run_forever():
                 dedektif_report("BIST taraması (döngü)", e)
                 # Tarihi ISARETLEMIYORUZ - bir sonraki dongude tekrar denesin.
 
-        if should_run_daily_scan("us_swing", ny_now, US_SWING_CHECK_HOUR, US_SWING_CHECK_MINUTE):
+        if LEGACY_SCANS_ENABLED and should_run_daily_scan("us_swing", ny_now, US_SWING_CHECK_HOUR, US_SWING_CHECK_MINUTE):
             try:
                 scan_us_swing(US_TICKERS)
                 mark_daily_scan_done("us_swing", ny_now)
@@ -2875,7 +3041,7 @@ def run_forever():
         ny_minutes = ny_now.hour * 60 + ny_now.minute
         market_open = 9 * 60 + 30
         market_close = 16 * 60
-        if ny_now.weekday() < 5 and market_open <= ny_minutes < market_close:
+        if LEGACY_SCANS_ENABLED and ny_now.weekday() < 5 and market_open <= ny_minutes < market_close:
             if (_last_us_gunici_scan_time is None or
                     (ny_now - _last_us_gunici_scan_time).total_seconds() >= US_GUNICI_SCAN_INTERVAL_MINUTES * 60):
                 try:
@@ -3007,9 +3173,9 @@ def run_forever():
             except Exception as e:
                 dedektif_report("KAP gözlemci (döngü)", e)
 
-        # Canlı öncül radar — sinyal-amaçlı, emir açmaz. Kendi zamanlayıcısı,
-        # kendi try/except'i. BIST kapalıyken zaten kendi içinde no-op.
-        if _RADAR_CANLI_AVAILABLE:
+        # Canlı öncül radar — indikator tabanli (AI degil), sinyal-amaçlı,
+        # emir açmaz. LEGACY_SCANS_ENABLED ile birlikte kapatilir/acilir.
+        if _RADAR_CANLI_AVAILABLE and LEGACY_SCANS_ENABLED:
             try:
                 rc.maybe_scan(BIST_TICKERS, "BIST")
                 rc.maybe_scan(US_INTRADAY_TICKERS, "US")
@@ -3017,7 +3183,7 @@ def run_forever():
             except Exception as e:
                 dedektif_report("Öncül radar (döngü)", e)
 
-        # ML Radar (model.pkl + Supabase tabanli) — kendi zamanlayicisi,
+        # ML Radar (model.pkl tabanli, gun ici) — kendi zamanlayicisi,
         # kendi try/except'i, sinyal sisteminden tamamen bagimsiz.
         if _ML_RADAR_AVAILABLE:
             try:
@@ -3026,6 +3192,15 @@ def run_forever():
                 mlr.check_and_update_results()
             except Exception as e:
                 dedektif_report("ML radar (döngü)", e)
+
+        # Gece AI Radar (overnight_model.pkl tabanli) — sadece BIST kapanisina
+        # dogru (17:45-17:55) bir kerelik tarama; kendi try/except'i.
+        if _OVERNIGHT_RADAR_AVAILABLE:
+            try:
+                og.maybe_scan("BIST")
+                og.check_and_update_results()
+            except Exception as e:
+                dedektif_report("Gece AI radar (döngü)", e)
 
         # Futbol günlük özeti — kendi içinde günde bir kez gönderecek şekilde
         # kilitli, bu yüzden her turda güvenle çağrılabilir.
