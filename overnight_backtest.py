@@ -61,8 +61,22 @@ MODEL_PATH = os.environ.get("OVERNIGHT_MODEL_PATH", "overnight_model.pkl")
 FEATURE_COLUMNS = ["volume_factor", "rsi", "price_change_pct", "gap_pct", "cmf",
                     "has_catalyst", "close_to_high_ratio"]
 AI_SCORE_THRESHOLD = float(os.environ.get("OVERNIGHT_AI_SCORE_THRESHOLD", "0.60"))
-SUCCESS_TARGET_PCT = float(os.environ.get("ML_SUCCESS_TARGET_PCT", "2.0"))
 NEXT_DAY_WINDOW = ((10, 0), (12, 0))  # ertesi gunun ilk 2 saati, Istanbul
+
+# Rapor 27 (2026-08-12) - Gemini'nin istedigi genisletilmis giris havuzu:
+# AI modeli VEYA asagidaki 4 teknik kosuldan en az INDICATOR_SCORE_MIN
+# tanesini saglayan gunler de aday sayiliyor. "RSI dip tepkisi" acik
+# tanimli degildi - 35-55 araligi (asiri satimdan toparlanma bolgesi)
+# olarak yorumlandi, net degilse Gemini'ye sorulmasi gereken bir nokta.
+INDICATOR_SCORE_MIN = int(os.environ.get("BACKTEST_INDICATOR_SCORE_MIN", "2"))
+CMF_MIN = float(os.environ.get("BACKTEST_CMF_MIN", "0.10"))
+VOLUME_FACTOR_MIN = float(os.environ.get("BACKTEST_VOLUME_FACTOR_MIN", "1.5"))
+CLOSE_TO_HIGH_MIN = float(os.environ.get("BACKTEST_CLOSE_TO_HIGH_MIN", "0.7"))
+RSI_DIP_MIN, RSI_DIP_MAX = 35.0, 55.0
+
+# Rapor 27 - disiplinli 1:2 R:R cikis kurali (komisyon/slipaj DAHIL DEGIL)
+TP_PCT = float(os.environ.get("BACKTEST_TP_PCT", "2.0"))
+SL_PCT = float(os.environ.get("BACKTEST_SL_PCT", "1.0"))
 
 TELEGRAM_TOKEN = os.environ.get("TELEGRAM_TOKEN", "")
 TELEGRAM_CHAT_ID = os.environ.get("TELEGRAM_CHAT_ID", "")
@@ -160,15 +174,28 @@ def fetch_daily_with_features(ticker: str) -> pd.DataFrame:
     return df
 
 
-def _get_next_day_first2h_range(ticker: str, gun_tarihi):
-    """Ertesi is gununun 10:00-12:00 Istanbul penceresindeki en yuksek,
-    en dusuk ve pencere-sonu (12:00'a en yakin bar) fiyatlarini dondurur:
-    (max_high, min_low, pencere_sonu_close). 15dk veriden - bu tarih araligi
-    (son ~60 gun) yfinance'in 15dk sinirinin icinde oldugu icin calisir.
-    Bulamazsa (None, None, None) doner.
-    radar_canli.py'deki max_up/max_down/session_end raporlama tarzinin ayni
-    mantigi: sadece 'hedefe ulasti mi' degil, basarisiz sinyallerin ne kadar
-    dustugu de gorunsun diye eklendi."""
+def _indicator_score(row) -> tuple:
+    """Modelden BAGIMSIZ, en az INDICATOR_SCORE_MIN kosulu saglayan gunleri
+    de aday havuzuna almak icin (rapor 27). Esikler cevre degiskeniyle
+    ayarlanabilir, varsayilanlar makul kabul edilen degerler - kesin
+    dogrulanmis degil."""
+    kosullar = {
+        "cmf": bool(row["cmf"] > CMF_MIN),
+        "hacim": bool(row["volume_factor"] >= VOLUME_FACTOR_MIN),
+        "zirveye_yakin": bool(row["close_to_high_ratio"] >= CLOSE_TO_HIGH_MIN),
+        "rsi_dip": bool(RSI_DIP_MIN <= row["rsi"] <= RSI_DIP_MAX),
+    }
+    return sum(kosullar.values()), kosullar
+
+
+def _simulate_rr_exit(ticker: str, gun_tarihi, entry_price: float):
+    """Ertesi gunun 10:00-12:00 penceresinde 15dk bar bar yururur: TP
+    (+TP_PCT) mi once vurulur SL (-SL_PCT) mi mi bakar. AYNI BARDA IKISI
+    DE tetiklenirse KAYIP sayilir - bu projenin turnuvalarindaki 'ayni
+    bar stop+TP = kayip' konvansiyonuyla tutarlilik icin. Pencere
+    bitene kadar hicbiri vurulmazsa TIMEOUT, son barin kapanisiyla R
+    hesaplanir. Donen: (sonuc_tipi, r_multiple, gerceklesen_pct) -
+    sonuc_tipi 'TP'/'SL'/'TIMEOUT', bulunamazsa (None, None, None)."""
     try:
         df15 = yf.Ticker(ticker).history(period="60d", interval="15m")
         if df15 is None or df15.empty:
@@ -190,12 +217,26 @@ def _get_next_day_first2h_range(ticker: str, gun_tarihi):
             (df15["tarih"] == ertesi_gun) &
             (df15["ts"].dt.hour * 60 + df15["ts"].dt.minute >= NEXT_DAY_WINDOW[0][0] * 60 + NEXT_DAY_WINDOW[0][1]) &
             (df15["ts"].dt.hour * 60 + df15["ts"].dt.minute <= NEXT_DAY_WINDOW[1][0] * 60 + NEXT_DAY_WINDOW[1][1])
-        ]
+        ].sort_values("ts")
         if pencere.empty:
             return None, None, None
-        return float(pencere["high"].max()), float(pencere["low"].min()), float(pencere.iloc[-1]["close"])
+
+        tp_price = entry_price * (1 + TP_PCT / 100)
+        sl_price = entry_price * (1 - SL_PCT / 100)
+
+        for _, bar in pencere.iterrows():
+            tp_hit = bar["high"] >= tp_price
+            sl_hit = bar["low"] <= sl_price
+            if sl_hit:  # ayni barda ikisi de olsa dahi (tp_hit da True olsa) KAYIP - konservatif
+                return "SL", -1.0, -SL_PCT
+            if tp_hit:
+                return "TP", TP_PCT / SL_PCT, TP_PCT
+
+        son_close = float(pencere.iloc[-1]["close"])
+        gerceklesen_pct = (son_close - entry_price) / entry_price * 100
+        return "TIMEOUT", gerceklesen_pct / SL_PCT, gerceklesen_pct
     except Exception as e:
-        print(f"[HATA] {ticker} ertesi gün kontrolü: {e}")
+        print(f"[HATA] {ticker} R:R simülasyonu: {e}")
         return None, None, None
 
 
@@ -225,25 +266,25 @@ def backtest_ticker(ticker: str, model) -> list:
             print(f"[HATA] {ticker} {gun_tarihi} predict_proba: {e}")
             continue
 
-        sinyal_var = proba >= AI_SCORE_THRESHOLD
-        if not sinyal_var:
-            continue  # sadece gercekten sinyal ureteceginiz gunler kaydediliyor
+        indikator_skor, _ = _indicator_score(row)
+        ai_sinyal = proba >= AI_SCORE_THRESHOLD
+        indikator_sinyal = indikator_skor >= INDICATOR_SCORE_MIN
+
+        if not (ai_sinyal or indikator_sinyal):
+            continue  # ne AI ne indikator havuzuna girdi
+
+        secim = "+".join(k for k, v in [("AI", ai_sinyal), ("INDIKATOR", indikator_sinyal)] if v)
 
         entry_price = float(row["close"])
-        max_high, min_low, pencere_sonu = _get_next_day_first2h_range(ticker, gun_tarihi)
-        if max_high is None:
+        sonuc_tipi, r_multiple, gerceklesen_pct = _simulate_rr_exit(ticker, gun_tarihi, entry_price)
+        if sonuc_tipi is None:
             continue  # 15dk veri yoksa (60 gunden eski) sonuc bilinemez, atla
-
-        max_pct = (max_high - entry_price) / entry_price * 100
-        min_pct = (min_low - entry_price) / entry_price * 100
-        sonu_pct = (pencere_sonu - entry_price) / entry_price * 100
-        basarili = max_pct >= SUCCESS_TARGET_PCT
 
         sonuclar.append({
             "ticker": ticker, "tarih": gun_tarihi.isoformat(), "ai_skor": round(proba, 4),
-            "entry_price": round(entry_price, 4), "ertesi_gun_max_pct": round(max_pct, 2),
-            "ertesi_gun_min_pct": round(min_pct, 2), "ertesi_gun_sonu_pct": round(sonu_pct, 2),
-            "basarili": basarili,
+            "indikator_skor": indikator_skor, "secim_kaynagi": secim,
+            "entry_price": round(entry_price, 4), "sonuc_tipi": sonuc_tipi,
+            "r_multiple": round(r_multiple, 3), "gerceklesen_pct": round(gerceklesen_pct, 2),
         })
     return sonuclar
 
@@ -279,47 +320,53 @@ def run_backtest():
     df_sonuc = pd.DataFrame(tum_sonuclar)
     df_sonuc.to_csv(OUTPUT_CSV, index=False, encoding="utf-8-sig")
 
-    n = len(df_sonuc)
-    basarili_n = int(df_sonuc["basarili"].sum())
-    oran = basarili_n / n * 100
+    def _grup_ozet(grup: pd.DataFrame, baslik: str) -> str:
+        if grup.empty:
+            return f"{baslik}: sinyal yok\n"
+        n = len(grup)
+        tp_n = int((grup["sonuc_tipi"] == "TP").sum())
+        sl_n = int((grup["sonuc_tipi"] == "SL").sum())
+        to_n = int((grup["sonuc_tipi"] == "TIMEOUT").sum())
+        win_rate = (grup["r_multiple"] > 0).mean() * 100
+        expectancy = grup["r_multiple"].mean()
+        return (
+            f"{baslik} — {n} sinyal\n"
+            f"  TP: {tp_n} | SL: {sl_n} | Timeout: {to_n}\n"
+            f"  Kazanma oranı (R>0): %{win_rate:.1f}\n"
+            f"  NET BEKLENTİ: {expectancy:+.3f}R\n"
+        )
 
-    basarili_grup = df_sonuc[df_sonuc["basarili"]]
-    basarisiz_grup = df_sonuc[~df_sonuc["basarili"]]
+    tum_havuz = df_sonuc
+    sadece_ai = df_sonuc[df_sonuc["secim_kaynagi"] == "AI"]
+    sadece_indikator = df_sonuc[df_sonuc["secim_kaynagi"] == "INDIKATOR"]
+    ikisi_de = df_sonuc[df_sonuc["secim_kaynagi"] == "AI+INDIKATOR"]
 
-    mesaj = (
-        f"📊 [{BACKTEST_DAYS} GÜNLÜK GERİYE DÖNÜK TEST SONUCU]\n"
-        f"'Bu sistemi {BACKTEST_DAYS} gün önce kursaydık ne olurdu?'\n\n"
-        f"Toplam sinyal: {n}\n"
-        f"Başarılı (+%{SUCCESS_TARGET_PCT:.1f} hedefine ulaşan): {basarili_n} (%{oran:.1f})\n\n"
+    mesaj1 = (
+        f"📊 [{BACKTEST_DAYS} GÜNLÜK TEST — GENİŞLETİLMİŞ HAVUZ + 1:{TP_PCT/SL_PCT:.0f} R:R]\n"
+        f"TP +%{TP_PCT:.1f} | SL -%{SL_PCT:.1f} | Timeout: pencere sonu (10:00-12:00)\n"
+        f"İndikatör havuzu: CMF/Hacim/Zirveye yakınlık/RSI'dan en az {INDICATOR_SCORE_MIN}/4\n\n"
+        f"🌐 TÜM HAVUZ (AI VEYA İndikatör)\n{_grup_ozet(tum_havuz, 'Toplam')}"
     )
-
-    if not basarili_grup.empty:
-        mesaj += (
-            f"✅ Başarılı grup ({len(basarili_grup)}):\n"
-            f"  Ort. max: {basarili_grup['ertesi_gun_max_pct'].mean():+.2f}% | "
-            f"Ort. pencere sonu: {basarili_grup['ertesi_gun_sonu_pct'].mean():+.2f}%\n"
-        )
-    if not basarisiz_grup.empty:
-        mesaj += (
-            f"❌ Başarısız grup ({len(basarisiz_grup)}) — HEDEFE ULAŞMAYANLARDA NE OLDU:\n"
-            f"  Ort. min (en kötü an): {basarisiz_grup['ertesi_gun_min_pct'].mean():+.2f}% | "
-            f"En kötü tekil: {basarisiz_grup['ertesi_gun_min_pct'].min():+.2f}%\n"
-            f"  Ort. pencere sonu: {basarisiz_grup['ertesi_gun_sonu_pct'].mean():+.2f}% | "
-            f"Sonu eksi bitenler: %{(basarisiz_grup['ertesi_gun_sonu_pct'] < 0).mean()*100:.1f}\n"
-        )
-
-    mesaj += (
-        f"\n⚠️ has_catalyst bu testte HER ZAMAN 0 — KAP verisi henüz bu kadar "
-        f"geriye gitmiyor, gerçek performans muhtemelen biraz daha iyi olurdu.\n"
+    mesaj2 = (
+        f"🤖 Sadece AI eşiği (%{AI_SCORE_THRESHOLD*100:.0f})\n{_grup_ozet(sadece_ai, 'AI-only')}\n"
+        f"📐 Sadece İndikatör puanı\n{_grup_ozet(sadece_indikator, 'İndikatör-only')}\n"
+        f"🎯 İkisi de aynı fikirde\n{_grup_ozet(ikisi_de, 'AI+İndikatör')}"
+    )
+    mesaj3 = (
+        f"⚠️ Komisyon/slipaj DAHİL DEĞİL — gerçek net sonuç bu rakamlardan "
+        f"biraz daha düşük olur.\n"
+        f"⚠️ has_catalyst bu testte HER ZAMAN 0 — KAP verisi henüz bu kadar "
+        f"geriye gitmiyor.\n"
         f"⚠️ Feature'lar günlük barla hesaplandı (canlı radar 15dk kullanıyor) "
-        f"— yaklaşık sonuç, birebir aynısı değil.\n"
-        f"⚠️ 'Başarılı' ölçütü penceredeki EN YÜKSEK fiyata göre — iyimser üst "
-        f"sınır. Başarısız grubun pencere-sonu ortalaması, gerçekte elde "
-        f"tutulsaydı ne olacağına dair daha gerçekçi bir fikir verir."
+        f"— yaklaşık sonuç.\n"
+        f"⚠️ 'RSI dip tepkisi' net tanımlı değildi, RSI 35-55 aralığı olarak "
+        f"yorumlandı — kesinleştirilmesi gerekebilir."
     )
-    print(mesaj, flush=True)
-    send_telegram_message(mesaj)
-    print(f"[KAYDEDİLDİ] {OUTPUT_CSV} — {n} satır", flush=True)
+    for m in (mesaj1, mesaj2, mesaj3):
+        print(m, flush=True)
+        send_telegram_message(m)
+        time.sleep(1)
+    print(f"[KAYDEDİLDİ] {OUTPUT_CSV} — {len(df_sonuc)} satır", flush=True)
 
 
 if __name__ == "__main__":
