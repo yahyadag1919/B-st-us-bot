@@ -160,15 +160,20 @@ def fetch_daily_with_features(ticker: str) -> pd.DataFrame:
     return df
 
 
-def _get_next_day_first2h_high(ticker: str, gun_tarihi, entry_price: float):
-    """Ertesi is gununun 10:00-12:00 Istanbul penceresindeki en yuksek fiyati
-    15dk veriden bulur. Bu tarih araligi (son ~60 gun) yfinance'in 15dk
-    sinirinin icinde oldugu icin calisir. Bulamazsa None doner."""
+def _get_next_day_first2h_range(ticker: str, gun_tarihi):
+    """Ertesi is gununun 10:00-12:00 Istanbul penceresindeki en yuksek,
+    en dusuk ve pencere-sonu (12:00'a en yakin bar) fiyatlarini dondurur:
+    (max_high, min_low, pencere_sonu_close). 15dk veriden - bu tarih araligi
+    (son ~60 gun) yfinance'in 15dk sinirinin icinde oldugu icin calisir.
+    Bulamazsa (None, None, None) doner.
+    radar_canli.py'deki max_up/max_down/session_end raporlama tarzinin ayni
+    mantigi: sadece 'hedefe ulasti mi' degil, basarisiz sinyallerin ne kadar
+    dustugu de gorunsun diye eklendi."""
     try:
         df15 = yf.Ticker(ticker).history(period="60d", interval="15m")
         if df15 is None or df15.empty:
-            return None
-        df15 = df15.reset_index().rename(columns={"Datetime": "ts", "High": "high"})
+            return None, None, None
+        df15 = df15.reset_index().rename(columns={"Datetime": "ts", "High": "high", "Low": "low", "Close": "close"})
         df15["ts"] = pd.to_datetime(df15["ts"])
         if df15["ts"].dt.tz is not None:
             df15["ts"] = df15["ts"].dt.tz_convert("Europe/Istanbul")
@@ -178,7 +183,7 @@ def _get_next_day_first2h_high(ticker: str, gun_tarihi, entry_price: float):
 
         sonraki_gunler = sorted(d for d in df15["tarih"].unique() if d > gun_tarihi)
         if not sonraki_gunler:
-            return None
+            return None, None, None
         ertesi_gun = sonraki_gunler[0]
 
         pencere = df15[
@@ -187,11 +192,11 @@ def _get_next_day_first2h_high(ticker: str, gun_tarihi, entry_price: float):
             (df15["ts"].dt.hour * 60 + df15["ts"].dt.minute <= NEXT_DAY_WINDOW[1][0] * 60 + NEXT_DAY_WINDOW[1][1])
         ]
         if pencere.empty:
-            return None
-        return float(pencere["high"].max())
+            return None, None, None
+        return float(pencere["high"].max()), float(pencere["low"].min()), float(pencere.iloc[-1]["close"])
     except Exception as e:
         print(f"[HATA] {ticker} ertesi gün kontrolü: {e}")
-        return None
+        return None, None, None
 
 
 # =============================================================================
@@ -225,16 +230,19 @@ def backtest_ticker(ticker: str, model) -> list:
             continue  # sadece gercekten sinyal ureteceginiz gunler kaydediliyor
 
         entry_price = float(row["close"])
-        max_high = _get_next_day_first2h_high(ticker, gun_tarihi, entry_price)
+        max_high, min_low, pencere_sonu = _get_next_day_first2h_range(ticker, gun_tarihi)
         if max_high is None:
             continue  # 15dk veri yoksa (60 gunden eski) sonuc bilinemez, atla
 
-        degisim_pct = (max_high - entry_price) / entry_price * 100
-        basarili = degisim_pct >= SUCCESS_TARGET_PCT
+        max_pct = (max_high - entry_price) / entry_price * 100
+        min_pct = (min_low - entry_price) / entry_price * 100
+        sonu_pct = (pencere_sonu - entry_price) / entry_price * 100
+        basarili = max_pct >= SUCCESS_TARGET_PCT
 
         sonuclar.append({
             "ticker": ticker, "tarih": gun_tarihi.isoformat(), "ai_skor": round(proba, 4),
-            "entry_price": round(entry_price, 4), "ertesi_gun_max_pct": round(degisim_pct, 2),
+            "entry_price": round(entry_price, 4), "ertesi_gun_max_pct": round(max_pct, 2),
+            "ertesi_gun_min_pct": round(min_pct, 2), "ertesi_gun_sonu_pct": round(sonu_pct, 2),
             "basarili": basarili,
         })
     return sonuclar
@@ -274,23 +282,40 @@ def run_backtest():
     n = len(df_sonuc)
     basarili_n = int(df_sonuc["basarili"].sum())
     oran = basarili_n / n * 100
-    ort_getiri = df_sonuc["ertesi_gun_max_pct"].mean()
-    medyan_getiri = df_sonuc["ertesi_gun_max_pct"].median()
+
+    basarili_grup = df_sonuc[df_sonuc["basarili"]]
+    basarisiz_grup = df_sonuc[~df_sonuc["basarili"]]
 
     mesaj = (
         f"📊 [{BACKTEST_DAYS} GÜNLÜK GERİYE DÖNÜK TEST SONUCU]\n"
         f"'Bu sistemi {BACKTEST_DAYS} gün önce kursaydık ne olurdu?'\n\n"
         f"Toplam sinyal: {n}\n"
-        f"Başarılı (+%{SUCCESS_TARGET_PCT:.1f} hedefine ulaşan): {basarili_n} (%{oran:.1f})\n"
-        f"Ortalama ertesi gün max hareket: {ort_getiri:+.2f}%\n"
-        f"Medyan: {medyan_getiri:+.2f}%\n\n"
-        f"⚠️ has_catalyst bu testte HER ZAMAN 0 — KAP verisi henüz bu kadar "
+        f"Başarılı (+%{SUCCESS_TARGET_PCT:.1f} hedefine ulaşan): {basarili_n} (%{oran:.1f})\n\n"
+    )
+
+    if not basarili_grup.empty:
+        mesaj += (
+            f"✅ Başarılı grup ({len(basarili_grup)}):\n"
+            f"  Ort. max: {basarili_grup['ertesi_gun_max_pct'].mean():+.2f}% | "
+            f"Ort. pencere sonu: {basarili_grup['ertesi_gun_sonu_pct'].mean():+.2f}%\n"
+        )
+    if not basarisiz_grup.empty:
+        mesaj += (
+            f"❌ Başarısız grup ({len(basarisiz_grup)}) — HEDEFE ULAŞMAYANLARDA NE OLDU:\n"
+            f"  Ort. min (en kötü an): {basarisiz_grup['ertesi_gun_min_pct'].mean():+.2f}% | "
+            f"En kötü tekil: {basarisiz_grup['ertesi_gun_min_pct'].min():+.2f}%\n"
+            f"  Ort. pencere sonu: {basarisiz_grup['ertesi_gun_sonu_pct'].mean():+.2f}% | "
+            f"Sonu eksi bitenler: %{(basarisiz_grup['ertesi_gun_sonu_pct'] < 0).mean()*100:.1f}\n"
+        )
+
+    mesaj += (
+        f"\n⚠️ has_catalyst bu testte HER ZAMAN 0 — KAP verisi henüz bu kadar "
         f"geriye gitmiyor, gerçek performans muhtemelen biraz daha iyi olurdu.\n"
         f"⚠️ Feature'lar günlük barla hesaplandı (canlı radar 15dk kullanıyor) "
         f"— yaklaşık sonuç, birebir aynısı değil.\n"
-        f"⚠️ Sonuç kontrolü ertesi günün 10:00-12:00 penceresindeki EN YÜKSEK "
-        f"fiyata göre — gerçekte o ana kadar elde tutulur mu bilinmez, bu da "
-        f"iyimser bir üst sınırdır."
+        f"⚠️ 'Başarılı' ölçütü penceredeki EN YÜKSEK fiyata göre — iyimser üst "
+        f"sınır. Başarısız grubun pencere-sonu ortalaması, gerçekte elde "
+        f"tutulsaydı ne olacağına dair daha gerçekçi bir fikir verir."
     )
     print(mesaj, flush=True)
     send_telegram_message(mesaj)
