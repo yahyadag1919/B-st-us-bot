@@ -341,6 +341,8 @@ def run_backtest():
         r = backtest_ticker(ticker, model)
         if r:
             print(f"[{n}/{len(BIST_TICKERS)}] {ticker}: {len(r)} sinyal bulundu", flush=True)
+        elif n % 10 == 0:
+            print(f"[{n}/{len(BIST_TICKERS)}] ...devam ediyor (son 10 hissede sinyal yok)", flush=True)
         tum_sonuclar.extend(r)
         time.sleep(0.3)
 
@@ -431,7 +433,25 @@ if __name__ == "__main__":
         port = int(os.environ.get("PORT", 10000))
         HTTPServer(("0.0.0.0", port), _Health).serve_forever()
 
+    def _keep_awake():
+        """Render ucretsiz tier 15 dk disaridan istek gelmezse servisi
+        uyutuyor - bu script suresi (150 gun x ~100 hisse, 15dk-hassas
+        yontem icin ekstra yfinance cagrisi) 15 dk'yi kolayca asabiliyor.
+        Bu ONCEKI SURUMDE EKSIKTI - bu yuzden bir onceki calisma yarida
+        kesilmis olabilir. main.py'nin keep_awake() ile ayni mantik:
+        kendi public URL'ine 5 dk'da bir istek atarak canli tutuyor."""
+        url = os.environ.get("RENDER_EXTERNAL_URL", "")
+        if not url:
+            return
+        while True:
+            try:
+                requests.get(url, timeout=10)
+            except Exception:
+                pass
+            time.sleep(300)
+
     threading.Thread(target=_start_health, daemon=True).start()
+    threading.Thread(target=_keep_awake, daemon=True).start()
     run_backtest()
     print("\n[BİTTİ] Backtest tamamlandı. Start Command'i 'python main.py'ye "
           "geri çevirebilirsin.", flush=True)
