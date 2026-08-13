@@ -59,6 +59,16 @@ except Exception as _og_import_err:
     _OVERNIGHT_RADAR_AVAILABLE = False
     print(f"overnight_radar yüklenemedi (izole özellik, sistemi etkilemez): {_og_import_err}")
 
+# AI Lab (2026-08-13) — arka planda haftalık otonom model karşılaştırma.
+# TAMAMEN İZOLE, kendi try/except'i, hiçbir zaman canlı sinyali etkilemez.
+try:
+    import overnight_model_lab as ai_lab
+    _AI_LAB_AVAILABLE = True
+except Exception as _ai_lab_import_err:
+    ai_lab = None
+    _AI_LAB_AVAILABLE = False
+    print(f"overnight_model_lab yüklenemedi (izole özellik, sistemi etkilemez): {_ai_lab_import_err}")
+
 TELEGRAM_TOKEN = os.environ.get("TELEGRAM_TOKEN", "")
 TELEGRAM_CHAT_ID = os.environ.get("TELEGRAM_CHAT_ID", "")
 
@@ -1972,7 +1982,7 @@ def build_takip_listesi() -> str:
     if _ML_RADAR_AVAILABLE:
         kaynaklar.append(("🤖 Ana AI Radar", mlr))
     if _OVERNIGHT_RADAR_AVAILABLE:
-        kaynaklar.append(("🌙 Gece AI Radar", og))
+        kaynaklar.append(("🌙 Gece Radarı", og))
 
     for etiket, modul in kaynaklar:
         try:
@@ -1995,8 +2005,8 @@ def build_takip_listesi() -> str:
                     aktif_satirlar.append(
                         f"  {etiket} {r['symbol']} — giriş {float(r['entry_price']):.2f}{guncel}"
                     )
-                elif r["result"] in ("SUCCESS", "FAIL"):
-                    ikon = "✅" if r["result"] == "SUCCESS" else "❌"
+                elif r["result"] in ("SUCCESS", "FAIL", "TIMEOUT"):
+                    ikon = {"SUCCESS": "✅", "FAIL": "❌", "TIMEOUT": "⏱️"}[r["result"]]
                     tamam_satirlar.append(f"  {ikon} {etiket} {r['symbol']} — {r['result']}")
             except Exception:
                 continue
@@ -2064,7 +2074,7 @@ def poll_stock_commands():
                     send_telegram_message("🌙 Gece AI radar bu deploy'da yüklenemedi (overnight_model.pkl eksik olabilir).")
             elif text.startswith("/og_test"):
                 if _OVERNIGHT_RADAR_AVAILABLE:
-                    send_telegram_message("🧪 Gece AI radar manuel test taraması başlatılıyor (saatten bağımsız)...")
+                    send_telegram_message("🧪 Gece radar manuel test taraması başlatılıyor (saatten bağımsız)...")
                     try:
                         og.scan("BIST", force=True)
                         send_telegram_message("🧪 Test taraması bitti. Sinyal bulunduysa yukarıda ayrı mesaj olarak geldi, "
@@ -2072,7 +2082,17 @@ def poll_stock_commands():
                     except Exception as e:
                         send_telegram_message(f"🧪 Test taraması hata verdi: {e}")
                 else:
-                    send_telegram_message("🌙 Gece AI radar bu deploy'da yüklenemedi (overnight_model.pkl eksik olabilir).")
+                    send_telegram_message("🌙 Gece radar bu deploy'da yüklenemedi.")
+            elif text.startswith("/ai_golge"):
+                if _OVERNIGHT_RADAR_AVAILABLE:
+                    send_telegram_message(og.build_shadow_report())
+                else:
+                    send_telegram_message("🔬 Gece radar bu deploy'da yüklenemedi (overnight_model.pkl eksik olabilir).")
+            elif text.startswith("/lab_rapor"):
+                if _AI_LAB_AVAILABLE:
+                    send_telegram_message(ai_lab.build_lab_report())
+                else:
+                    send_telegram_message("🔬 AI Lab bu deploy'da yüklenemedi.")
             elif text.startswith("/liste") or text.startswith("/takip"):
                 send_telegram_message(build_takip_listesi())
             elif text.startswith("/performans"):
@@ -2086,8 +2106,10 @@ def poll_stock_commands():
                     "/kap — KAP haber kaynağı tazelik ölçümü (pasif, arka planda toplanıyor)\n"
                     "/radar — öncül radar sonuçları (KAP'lı/KAP'sız karşılaştırma, sinyal amaçlı)\n"
                     "/ml_rapor — Ana AI Radar (gün içi) sonuçları, başarı oranı\n"
-                    "/og_rapor — Gece AI Radar (overnight) sonuçları, başarı oranı\n"
-                    "/og_test — Gece AI Radar'ı saatten bağımsız hemen çalıştırır (test amaçlı)\n"
+                    "/og_rapor — Gece Radarı (indikatör tabanlı) sonuçları, net beklenti\n"
+                    "/og_test — Gece Radarı'nı saatten bağımsız hemen çalıştırır (test amaçlı)\n"
+                    "/ai_golge — AI modelinin gölge modda gözlemlenen performansı (Telegram'a sinyal göndermiyor)\n"
+                    "/lab_rapor — AI Lab: haftalık otonom model karşılaştırma serisi durumu\n"
                     "/liste veya /takip — aktif takipteki + tamamlanan tüm AI sinyalleri\n"
                     "/performans — eski (indikatör tabanlı) sistemin sessiz mod özeti\n"
                     "/yardim — bu liste")
@@ -3203,14 +3225,24 @@ def run_forever():
             except Exception as e:
                 dedektif_report("ML radar (döngü)", e)
 
-        # Gece AI Radar (overnight_model.pkl tabanli) — sadece BIST kapanisina
-        # dogru (17:45-17:55) bir kerelik tarama; kendi try/except'i.
+        # Gece Radarı (indikatör tabanlı canlı sinyal + AI gölge modu) —
+        # sadece BIST kapanışına doğru (17:45-17:55) bir kerelik tarama;
+        # kendi try/except'i.
         if _OVERNIGHT_RADAR_AVAILABLE:
             try:
                 og.maybe_scan("BIST")
                 og.check_and_update_results()
+                og.check_shadow_outcomes()
             except Exception as e:
-                dedektif_report("Gece AI radar (döngü)", e)
+                dedektif_report("Gece radar (döngü)", e)
+
+        # AI Lab — haftada bir otonom model karşılaştırması, kendi
+        # zamanlayıcısı ve try/except'i. Canlı sinyali asla etkilemez.
+        if _AI_LAB_AVAILABLE:
+            try:
+                ai_lab.maybe_run_lab()
+            except Exception as e:
+                dedektif_report("AI Lab (döngü)", e)
 
         # Futbol günlük özeti — kendi içinde günde bir kez gönderecek şekilde
         # kilitli, bu yüzden her turda güvenle çağrılabilir.

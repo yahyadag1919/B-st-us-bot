@@ -330,6 +330,7 @@ def backtest_ticker(ticker: str, model) -> list:
             "indikator_skor": indikator_skor, "secim_kaynagi": secim, "yontem": yontem,
             "entry_price": round(entry_price, 4), "sonuc_tipi": sonuc_tipi,
             "r_multiple": round(r_multiple, 3), "gerceklesen_pct": round(gerceklesen_pct, 2),
+            **{f: round(float(feats[f]), 4) for f in FEATURE_COLUMNS},
         })
     return sonuclar
 

@@ -1,15 +1,29 @@
 """
-overnight_radar.py — GECE AI RADAR (ERTESİ GÜN AÇILIŞ/GAP MODELİ, İZOLE)
+overnight_radar.py — CANLI İNDİKATÖR SİSTEMİ + AI GÖLGE MODU (İZOLE)
 ===========================================================================
-İkinci AI modülü — ml_radar.py'nin (gün içi model) mimarisini temel alır
-ama farklı bir soruya cevap arar: "bugünkü kapanış barının parmak izine
-bakarak, ERTESİ GÜNÜN İLK 2 SAATİNDE +%2 potansiyeli var mı?"
+2026-08-13 MİMARİ DEĞİŞİKLİĞİ (Gemini + backtest sonuçları): 150 günlük
+walk-forward testte AI modeli (tek başına ya da indikatörle birlikte)
+gerçek bir kenar (edge) göstermedi (bkz. rapor 29) — en güvenilir,
+büyük örneklemli sonuç SADECE İNDİKATÖR PUANLAMASIYDI (3184 sinyal,
++0.018R). Bu yüzden:
 
-ÇALIŞMA ZAMANI: Her BIST işlem günü kapanışa doğru, 17:45–17:55 (İstanbul)
-arası bir kez tetiklenir — spesifikasyonda belirtilen pencere. SADECE
-BIST için (spesifikasyon tek bir kapanış-saati penceresi verdi, ABD'nin
-kendi kapanışı farklı saatte olduğundan ABD şimdilik kapsam dışı — istenirse
-~22:00 İstanbul (16:00 New York sonrası) için ayrı bir pencere eklenebilir).
+- CANLI TELEGRAM SİNYALİ artık İNDİKATÖR PUANLAMASI + SABİT 1:2 R:R
+  (TP +%2 / SL -%1 / timeout: ertesi gün 12:00) ile üretiliyor - AI
+  modeli DEĞİL. Günde en yüksek puanlı OVERNIGHT_MAX_SIGNALS (varsayılan
+  4) hisse gönderiliyor.
+- overnight_model.pkl artık GÖLGE MODDA: her tarama turunda taranan
+  TÜM hisseler için tahmin üretmeye devam ediyor ama HİÇBİR TELEGRAM
+  MESAJI GÖNDERMİYOR, hiçbir sinyali engellemiyor/tetiklemiyor - sadece
+  ai_shadow_log.csv'ye kaydediyor. Amaç: modelin gerçekten bir kenar
+  kazanıp kazanmadığını, seçim yanlılığı olmadan (SEÇİLEN değil TÜM
+  taranan hisseler için) izlemeye devam etmek.
+- Modelin kendi kendini "sürekli/sınırsız" optimize etmesi KURULMADI -
+  bu proje defalarca (M15 turnuvası, rapor 28→29) çok sayıda varyant
+  denemenin şans eseri iyi görünen ama gerçek olmayan sonuçlar
+  ürettiğini gördü. Bunun yerine `overnight_model_lab.py`: az sayıda
+  BELİRLENMİŞ feature-alt-kümesi varyantını gerçek train/test ayrımıyla
+  karşılaştıran, SESSİZCE model.pkl'yi asla üzerine yazmayan, ayrı bir
+  script.
 
 FEATURE SIRASI (2026-08-11, kullanıcı Colab eğitimini teyit etti):
 volume_factor, rsi, price_change_pct, gap_pct, cmf, has_catalyst,
@@ -18,9 +32,12 @@ close_to_high_ratio (7. feature — kapanışın günün en yükseğine yakınl�
 ama 0-1 ölçeğinde: (kapanış-düşük)/(yüksek-düşük)).
 has_catalyst SADECE BIST için kap_monitor.py'nin verisinden dolduruluyor.
 
-SONUÇ TAKİBİ farklı çalışıyor (ml_radar.py'den): "48 saat sonra fiyata
-bak" değil, "ERTESİ İŞ GÜNÜNÜN İLK 2 SAATİ (10:00-12:00 İstanbul) içindeki
-en yüksek fiyat +%2'ye ulaştı mı" — hedefin tanımına birebir uysun diye.
+İNDİKATÖR PUANLAMASI (overnight_backtest.py ile BİREBİR AYNI eşikler,
+tutarlılık için): CMF>0.10, hacim_faktörü≥1.5, kapanış-zirve≥0.7,
+RSI 35-55 arası - en az 2/4.
+
+ÇALIŞMA ZAMANI: Her BIST işlem günü kapanışa doğru, 17:45–17:55 (İstanbul)
+arası bir kez tetiklenir. SADECE BIST için.
 
 pandas_ta KULLANILMADI - indikatörler elle yazıldı (ml_radar.py ile aynı).
 """
@@ -55,38 +72,41 @@ TELEGRAM_TOKEN = os.environ.get("TELEGRAM_TOKEN", "")
 TELEGRAM_CHAT_ID = os.environ.get("TELEGRAM_CHAT_ID", "")
 
 OVERNIGHT_RADAR_ENABLED = os.environ.get("OVERNIGHT_RADAR_ENABLED", "true").lower() == "true"
-OVERNIGHT_UNUSED_INTERVAL = int(os.environ.get("OVERNIGHT_UNUSED_INTERVAL", "15"))
-# 2026-08-12: 0.80 -> 0.60 dusuruldu (Gemini talebi - haber katalizoru
-# olmayan ama fiyat/hacim/CMF'i guclu tahtalari da yakalasin diye). Not:
-# has_catalyst ve close_to_high_ratio bu kodda HICBIR ZAMAN sert filtre
-# degildi - hep sadece modele giden feature'lardi (asagida FEATURE_COLUMNS).
-# Onlari "esnetmek" aslinda bu tek esigi dusurmekle ayni sey - modelin
-# kendisi bu feature'lara ne kadar agirlik verdigine karar veriyor.
-AI_SCORE_THRESHOLD = float(os.environ.get("OVERNIGHT_AI_SCORE_THRESHOLD", "0.60"))
 
+# --- CANLI SİNYAL (indikatör tabanlı, backtest'te doğrulanan tek şey) ---
+# overnight_backtest.py ile BİREBİR AYNI eşikler - tutarlılık şart.
+INDICATOR_SCORE_MIN = int(os.environ.get("OVERNIGHT_INDICATOR_SCORE_MIN", "2"))
+CMF_MIN = float(os.environ.get("OVERNIGHT_CMF_MIN", "0.10"))
+VOLUME_FACTOR_MIN = float(os.environ.get("OVERNIGHT_VOLUME_FACTOR_MIN", "1.5"))
+CLOSE_TO_HIGH_MIN = float(os.environ.get("OVERNIGHT_CLOSE_TO_HIGH_MIN", "0.7"))
+RSI_DIP_MIN, RSI_DIP_MAX = 35.0, 55.0
+MAX_SIGNALS_PER_DAY = int(os.environ.get("OVERNIGHT_MAX_SIGNALS", "4"))
+TP_PCT = float(os.environ.get("OVERNIGHT_TP_PCT", "2.0"))
+SL_PCT = float(os.environ.get("OVERNIGHT_SL_PCT", "1.0"))
+
+# --- AI GÖLGE MODU (Telegram'a hiç gitmez, sadece gözlem/log) ---
+AI_SHADOW_ENABLED = os.environ.get("AI_SHADOW_ENABLED", "true").lower() == "true"
 MODEL_PATH = os.environ.get("OVERNIGHT_MODEL_PATH", "overnight_model.pkl")
-
-# Kullanıcının Colab eğitiminde kullandığı BİREBİR isim + sıra (2026-08-11 teyit edildi)
-# overnight_model.pkl'nin 7. feature'ı var: close_to_high_ratio.
 FEATURE_COLUMNS = ["volume_factor", "rsi", "price_change_pct", "gap_pct", "cmf",
                     "has_catalyst", "close_to_high_ratio"]
+AI_SHADOW_LOG_FILE = _data_path("ai_shadow_log.csv")
+AI_SHADOW_FIELDS = ["id", "created_at", "symbol", "ai_score", "indikator_skor",
+                     "secildi_mi"] + FEATURE_COLUMNS + ["entry_price", "checked_at", "result", "gerceklesen_pct"]
 
 # Tetiklenme penceresi: BIST kapanışına doğru, İstanbul saatiyle
 TRIGGER_WINDOW_START = (17, 45)
 TRIGGER_WINDOW_END = (17, 55)
 
-SUCCESS_TARGET_PCT = float(os.environ.get("OVERNIGHT_SUCCESS_TARGET_PCT", "2.0"))  # spesifikasyonla ayni: ertesi gun ilk 2 saatte +%2
-# CHECK_WINDOW_HOURS KALDIRILDI - sonuc kontrolu artik "ertesi is gunu ilk 2 saat"
-# penceresine gore yapiliyor, sabit saat sayisina gore degil (asagida check_and_update_results).
 NEXT_DAY_CHECK_WINDOW = ((10, 0), (12, 0))  # BIST'in ilk 2 saati, Istanbul
-KAP_MATCH_WINDOW_MINUTES = int(os.environ.get("OVERNIGHT_KAP_MATCH_WINDOW_MINUTES", "240"))  # has_catalyst icin, radar_canli.py ile ayni varsayilan
+KAP_MATCH_WINDOW_MINUTES = int(os.environ.get("OVERNIGHT_KAP_MATCH_WINDOW_MINUTES", "240"))
 
 INDEX_TICKERS = {"BIST": "XU100.IS", "US": "SPY"}
 
 SIGNAL_LOG_FILE = _data_path("overnight_radar_signals.csv")
-SIGNAL_FIELDS = ["id", "created_at", "symbol", "market", "ai_score", "volume_factor",
+SIGNAL_FIELDS = ["id", "created_at", "symbol", "market", "indikator_skor", "volume_factor",
                   "rsi", "pct_change", "gap_percent", "cmf", "has_catalyst",
-                  "close_to_high_ratio", "entry_price", "checked_at", "result"]
+                  "close_to_high_ratio", "entry_price", "tp_price", "sl_price",
+                  "checked_at", "result", "exit_price", "r_multiple"]
 
 _last_scan_time = {}
 _model = None
@@ -94,7 +114,7 @@ _MODEL_AVAILABLE = False
 
 
 # =============================================================================
-# MODEL YÜKLEME (hata olsa bile ana sistemi düşürmez)
+# MODEL YÜKLEME (hata olsa bile ana sistemi düşürmez - artık sadece golge modu icin)
 # =============================================================================
 
 def _load_model():
@@ -103,10 +123,10 @@ def _load_model():
         import joblib
         _model = joblib.load(MODEL_PATH)
         _MODEL_AVAILABLE = True
-        print(f"[OVERNIGHT] model.pkl yüklendi ({MODEL_PATH}).", flush=True)
+        print(f"[OVERNIGHT] model.pkl yüklendi ({MODEL_PATH}) - GÖLGE MODDA (Telegram'a gitmiyor).", flush=True)
     except Exception as e:
         _MODEL_AVAILABLE = False
-        print(f"[OVERNIGHT] model.pkl YÜKLENEMEDİ - ML radar devre dışı: {e}", flush=True)
+        print(f"[OVERNIGHT] model.pkl YÜKLENEMEDİ - gölge mod devre dışı (canlı sinyal etkilenmez): {e}", flush=True)
 
 
 _load_model()
@@ -124,48 +144,83 @@ def send_telegram_message(text: str):
 
 
 # =============================================================================
-# YEREL CSV KAYIT (Supabase yerine — daha basit, yeni hesap gerektirmez)
+# YEREL CSV KAYIT
 # =============================================================================
 
-def _next_id() -> int:
-    rows = _read_signals()
+def _next_id(dosya, alanlar) -> int:
+    if not os.path.exists(dosya):
+        return 1
+    with open(dosya, newline="", encoding="utf-8") as f:
+        rows = list(csv.DictReader(f))
     return (max((int(r["id"]) for r in rows), default=0) + 1) if rows else 1
 
 
-def _append_signal(row: dict):
-    exists = os.path.exists(SIGNAL_LOG_FILE)
-    with open(SIGNAL_LOG_FILE, "a", newline="", encoding="utf-8") as f:
-        w = csv.DictWriter(f, fieldnames=SIGNAL_FIELDS)
+def _append_row(dosya, alanlar, row: dict):
+    exists = os.path.exists(dosya)
+    with open(dosya, "a", newline="", encoding="utf-8") as f:
+        w = csv.DictWriter(f, fieldnames=alanlar)
         if not exists:
             w.writeheader()
         w.writerow(row)
 
 
-def _read_signals():
-    if not os.path.exists(SIGNAL_LOG_FILE):
+def _read_rows(dosya):
+    if not os.path.exists(dosya):
         return []
-    with open(SIGNAL_LOG_FILE, newline="", encoding="utf-8") as f:
+    with open(dosya, newline="", encoding="utf-8") as f:
         return list(csv.DictReader(f))
 
 
-def _write_signals(rows):
-    with open(SIGNAL_LOG_FILE, "w", newline="", encoding="utf-8") as f:
-        w = csv.DictWriter(f, fieldnames=SIGNAL_FIELDS)
+def _write_rows(dosya, alanlar, rows):
+    with open(dosya, "w", newline="", encoding="utf-8") as f:
+        w = csv.DictWriter(f, fieldnames=alanlar)
         w.writeheader()
         w.writerows(rows)
 
 
-def _log_signal(market, ticker, ai_score, ham):
+def _read_signals():
+    return _read_rows(SIGNAL_LOG_FILE)
+
+
+def _write_signals(rows):
+    _write_rows(SIGNAL_LOG_FILE, SIGNAL_FIELDS, rows)
+
+
+def _log_signal(market, ticker, indikator_skor, ham, tp_price, sl_price):
     row = {
-        "id": _next_id(), "created_at": datetime.now(timezone.utc).isoformat(),
-        "symbol": ticker, "market": market, "ai_score": round(float(ai_score), 4),
+        "id": _next_id(SIGNAL_LOG_FILE, SIGNAL_FIELDS), "created_at": datetime.now(timezone.utc).isoformat(),
+        "symbol": ticker, "market": market, "indikator_skor": indikator_skor,
         "volume_factor": ham["volume_factor"], "rsi": ham["rsi14"],
         "pct_change": ham["pct_change"], "gap_percent": ham["gap_percent"],
         "cmf": ham["cmf"], "has_catalyst": ham["has_catalyst"],
         "close_to_high_ratio": ham["close_to_high_ratio"],
-        "entry_price": ham["fiyat"], "checked_at": "", "result": "PENDING",
+        "entry_price": ham["fiyat"], "tp_price": round(tp_price, 4), "sl_price": round(sl_price, 4),
+        "checked_at": "", "result": "PENDING", "exit_price": "", "r_multiple": "",
     }
-    _append_signal(row)
+    _append_row(SIGNAL_LOG_FILE, SIGNAL_FIELDS, row)
+
+
+def _log_shadow(ticker, proba, indikator_skor, secildi_mi, feats, ham):
+    row = {
+        "id": _next_id(AI_SHADOW_LOG_FILE, AI_SHADOW_FIELDS), "created_at": datetime.now(timezone.utc).isoformat(),
+        "symbol": ticker, "ai_score": round(float(proba), 4), "indikator_skor": indikator_skor,
+        "secildi_mi": int(secildi_mi),
+        **{c: feats[c] for c in FEATURE_COLUMNS},
+        "entry_price": ham["fiyat"], "checked_at": "", "result": "PENDING", "gerceklesen_pct": "",
+    }
+    _append_row(AI_SHADOW_LOG_FILE, AI_SHADOW_FIELDS, row)
+
+
+def _indicator_score(ham) -> int:
+    """overnight_backtest.py'deki _indicator_score ile BİREBİR AYNI mantık -
+    canlı sinyal ile backtest sonucu tutarlı olsun diye."""
+    kosullar = [
+        ham["cmf"] > CMF_MIN,
+        ham["volume_factor"] >= VOLUME_FACTOR_MIN,
+        ham["close_to_high_ratio"] >= CLOSE_TO_HIGH_MIN,
+        RSI_DIP_MIN <= ham["rsi14"] <= RSI_DIP_MAX,
+    ]
+    return sum(kosullar)
 
 
 def _has_catalyst(market: str, ticker: str) -> int:
@@ -377,17 +432,14 @@ def _in_trigger_window(now_ist=None) -> bool:
 
 
 def scan(market: str = "BIST", force: bool = False):
-    """Sadece BIST icin, sadece TRIGGER_WINDOW icinde (17:45-17:55 Istanbul)
-    calisir - gunluk kapanisa dogru bir kerelik tarama. AI_SCORE_THRESHOLD
-    (varsayilan %60, 2026-08-12'de %80'den dusuruldu) disinda ek filtre yok -
-    has_catalyst/close_to_high_ratio hicbir zaman sert filtre olmadi, sadece
-    modele giden feature'lar.
-    force=True: zaman penceresini atlar (/og_test komutu icin) - o an
-    piyasa kapaliysa yfinance zaten en son kapanan barin verisini dondurur,
-    yani gunun kapanis verisiyle ayni sonucu uretir, gercek 17:45-17:55
-    turundan farkli bir sey degil, sadece saatten bagimsiz calistirilmis
-    olur."""
-    if not OVERNIGHT_RADAR_ENABLED or not _MODEL_AVAILABLE:
+    """YENİ MİMARİ (2026-08-13): canlı sinyal İNDİKATÖR PUANLAMASIYLA
+    üretiliyor (en az INDICATOR_SCORE_MIN/4 şart), günün en yüksek puanlı
+    en fazla MAX_SIGNALS_PER_DAY hissesi gönderiliyor, sabit 1:2 R:R
+    (TP/SL/timeout) ile takibe alınıyor. AI modeli GÖLGE MODDA - taranan
+    HER hisse için tahmin üretip ai_shadow_log.csv'ye yazıyor, hiçbir
+    Telegram mesajı göndermiyor, hiçbir seçimi etkilemiyor.
+    force=True: zaman penceresini atlar (/og_test için)."""
+    if not OVERNIGHT_RADAR_ENABLED:
         return
     if market != "BIST":
         print(f"[OVERNIGHT] {market} desteklenmiyor - şimdilik sadece BIST.", flush=True)
@@ -396,7 +448,8 @@ def scan(market: str = "BIST", force: bool = False):
         return
 
     index_pct = _get_index_today_pct(market)
-    taranan, sinyal = 0, 0
+    taranan = 0
+    adaylar = []  # (skor, ticker, ham) - indikator sartini gecenler
 
     for ticker in MARKET_TICKERS[market]:
         try:
@@ -405,32 +458,50 @@ def scan(market: str = "BIST", force: bool = False):
                 continue
             taranan += 1
 
-            X = pd.DataFrame([[feats[c] for c in FEATURE_COLUMNS]], columns=FEATURE_COLUMNS)
-            proba = float(_model.predict_proba(X)[0][1])  # 1 = basari sinifi varsayimi
+            indikator_skor = _indicator_score(ham)
+            indikator_sinyal = indikator_skor >= INDICATOR_SCORE_MIN
 
-            if proba < AI_SCORE_THRESHOLD:
-                continue
+            # AI GÖLGE MODU - HER taranan hisse icin (secim yanliligi
+            # olmasin diye), Telegram'a gitmez, hicbir seyi etkilemez.
+            if AI_SHADOW_ENABLED and _MODEL_AVAILABLE:
+                try:
+                    X = pd.DataFrame([[feats[c] for c in FEATURE_COLUMNS]], columns=FEATURE_COLUMNS)
+                    proba = float(_model.predict_proba(X)[0][1])
+                    _log_shadow(ticker, proba, indikator_skor, indikator_sinyal, feats, ham)
+                except Exception as e:
+                    print(f"[OVERNIGHT-GÖLGE] {ticker}: {e}", flush=True)
 
-            sinyal += 1
-            _log_signal(market, ticker, proba, ham)
-            katalizor_satiri = "🟢 KAP katalizörü VAR" if ham["has_catalyst"] else "⚪ Katalizör yok"
-            send_telegram_message(
-                f"🌙 [GECE AI RADAR] {ticker}\n"
-                f"Güven Skoru: %{proba*100:.1f}\n"
-                f"Kapanış: {ham['fiyat']:.2f} | Gün içi: {ham['pct_change']:+.2f}%\n"
-                f"Hacim Faktörü: {ham['volume_factor']:.2f}x | RSI14: {ham['rsi14']:.1f}\n"
-                f"Gap: {ham['gap_percent']:+.2f}% | CMF: {ham['cmf']:+.3f}\n"
-                f"Kapanış-zirve oranı: {ham['close_to_high_ratio']:.2f}\n"
-                f"{katalizor_satiri}\n\n"
-                "⚠️ Model tahmini — ertesi günün ilk 2 saatinde +%2 potansiyeli "
-                "öngörüyor. Emir talimatı değildir. /liste ile takip edilebilir."
-            )
-            print(f"[OVERNIGHT] {market} SİNYAL: {ticker} skor={proba:.3f}", flush=True)
+            if indikator_sinyal:
+                adaylar.append((indikator_skor, ham["cmf"], ticker, ham))
         except Exception as e:
             print(f"[OVERNIGHT] {market} {ticker}: hata - {e}", flush=True)
             continue
 
-    print(f"[OVERNIGHT] {market}: tur bitti, {taranan} hisse tarandı, {sinyal} sinyal", flush=True)
+    # En yuksek puanlilardan en fazla MAX_SIGNALS_PER_DAY tanesi (esitlikte CMF'e gore)
+    adaylar.sort(key=lambda x: (x[0], x[1]), reverse=True)
+    secilenler = adaylar[:MAX_SIGNALS_PER_DAY]
+
+    for indikator_skor, _cmf, ticker, ham in secilenler:
+        entry_price = ham["fiyat"]
+        tp_price = entry_price * (1 + TP_PCT / 100)
+        sl_price = entry_price * (1 - SL_PCT / 100)
+        _log_signal(market, ticker, indikator_skor, ham, tp_price, sl_price)
+        katalizor_satiri = "🟢 KAP katalizörü VAR" if ham["has_catalyst"] else "⚪ Katalizör yok"
+        send_telegram_message(
+            f"🌙 [GECE RADAR — İNDİKATÖR] {ticker}\n"
+            f"Puan: {indikator_skor}/4\n"
+            f"Kapanış: {entry_price:.2f} | Gün içi: {ham['pct_change']:+.2f}%\n"
+            f"Hacim Faktörü: {ham['volume_factor']:.2f}x | RSI14: {ham['rsi14']:.1f}\n"
+            f"CMF: {ham['cmf']:+.3f} | Kapanış-zirve oranı: {ham['close_to_high_ratio']:.2f}\n"
+            f"{katalizor_satiri}\n"
+            f"🎯 TP: {tp_price:.2f} (+%{TP_PCT:.1f}) | 🛑 SL: {sl_price:.2f} (-%{SL_PCT:.1f})\n"
+            f"⏱️ Timeout: ertesi gün 12:00'de (ne TP ne SL vurulmazsa)\n\n"
+            "⚠️ Sinyal amaçlıdır — emir talimatı değildir. /liste ile takip edilebilir."
+        )
+        print(f"[OVERNIGHT] {market} SİNYAL: {ticker} puan={indikator_skor}", flush=True)
+
+    print(f"[OVERNIGHT] {market}: tur bitti, {taranan} hisse tarandı, "
+          f"{len(adaylar)} aday, {len(secilenler)} sinyal gönderildi", flush=True)
 
 
 _scanned_today = None  # tarih string - ayni gun tekrar tetiklenmesin
@@ -450,15 +521,12 @@ def maybe_scan(market: str = "BIST"):
 
 
 # =============================================================================
-# SONUÇ TAKİBİ — PENDING sinyalleri SUCCESS/FAIL'e çevirir (yerel CSV'de)
+# CANLI SİNYAL SONUÇ TAKİBİ — gerçek 1:2 R:R (TP/SL/timeout), her çağrıda
+# açık pozisyonların bar-bar durumuna bakar (check_exit_alerts ile ayni
+# felsefe: sabit hedef/stop varsa, ulaşılıp ulaşılmadığını sık kontrol et).
 # =============================================================================
 
 def check_and_update_results():
-    """ml_radar.py'den farkli: sabit saat sayisi yerine 'ertesi is gununun
-    ilk 2 saati (10:00-12:00 Istanbul) icindeki en yuksek fiyat +%2'ye
-    ulasti mi' sorusuna gore SUCCESS/FAIL veriyor - hedefin tanimina birebir
-    uysun diye. Bu pencere henuz tamamlanmadiysa (bugun sinyal gunuyle ayni
-    gunse ya da hala o sabahin icindeysek) dokunmuyor."""
     rows = _read_signals()
     if not rows:
         return
@@ -475,53 +543,178 @@ def check_and_update_results():
 
             ticker = r["symbol"]
             entry_price = float(r["entry_price"])
+            tp_price = float(r["tp_price"])
+            sl_price = float(r["sl_price"])
             df = _fetch_15m(ticker, period="5d")
             if df.empty:
                 continue
-            # ertesi is gunu = sinyalden sonraki ilk oturum (df["session"] zaten tarih tipinde)
             gunler = sorted(df["session"].unique())
             sonraki_gunler = [g for g in gunler if g > signal_day]
             if not sonraki_gunler:
                 continue
             hedef_gun = sonraki_gunler[0]
 
-            hedef_bar = df[df["session"] == hedef_gun]
+            hedef_bar = df[df["session"] == hedef_gun].copy()
             if hedef_bar.empty:
                 continue
-            dakika = pd.to_datetime(hedef_bar["ts"]).dt.hour * 60 + pd.to_datetime(hedef_bar["ts"]).dt.minute
+            hedef_bar["dakika"] = pd.to_datetime(hedef_bar["ts"]).dt.hour * 60 + pd.to_datetime(hedef_bar["ts"]).dt.minute
             pencere = hedef_bar[
-                (dakika >= NEXT_DAY_CHECK_WINDOW[0][0] * 60 + NEXT_DAY_CHECK_WINDOW[0][1]) &
-                (dakika < NEXT_DAY_CHECK_WINDOW[1][0] * 60 + NEXT_DAY_CHECK_WINDOW[1][1])
-            ]
-            # pencere henuz gecmediyse (bugun hedef gunse ve saat 12:00'i gecmediyse) bekle
-            if hedef_gun == now_ist.date() and now_ist.hour * 60 + now_ist.minute < NEXT_DAY_CHECK_WINDOW[1][0] * 60 + NEXT_DAY_CHECK_WINDOW[1][1]:
-                continue
+                (hedef_bar["dakika"] >= NEXT_DAY_CHECK_WINDOW[0][0] * 60 + NEXT_DAY_CHECK_WINDOW[0][1]) &
+                (hedef_bar["dakika"] < NEXT_DAY_CHECK_WINDOW[1][0] * 60 + NEXT_DAY_CHECK_WINDOW[1][1])
+            ].sort_values("ts")
             if pencere.empty:
                 continue
 
-            en_yuksek = float(pencere["high"].max())
-            degisim_pct = (en_yuksek - entry_price) / entry_price * 100
-            r["result"] = "SUCCESS" if degisim_pct >= SUCCESS_TARGET_PCT else "FAIL"
+            # Bar bar yuru: TP/SL hangisi once vuruldu? Ayni barda ikisi de
+            # olursa KAYIP (bu projenin turnuva konvansiyonuyla tutarli).
+            sonuc = None
+            for _, bar in pencere.iterrows():
+                sl_hit = bar["low"] <= sl_price
+                tp_hit = bar["high"] >= tp_price
+                if sl_hit:
+                    sonuc = "FAIL"
+                    break
+                if tp_hit:
+                    sonuc = "SUCCESS"
+                    break
+
+            pencere_bitti = (hedef_gun < now_ist.date()) or (
+                hedef_gun == now_ist.date() and
+                now_ist.hour * 60 + now_ist.minute >= NEXT_DAY_CHECK_WINDOW[1][0] * 60 + NEXT_DAY_CHECK_WINDOW[1][1]
+            )
+            if sonuc is None:
+                if not pencere_bitti:
+                    continue  # hala pencere icinde, TP/SL henuz vurulmadi - bekle
+                # timeout - pencere sonu fiyatiyla kapat
+                sonuc = "TIMEOUT"
+                son_fiyat = float(pencere.iloc[-1]["close"])
+            else:
+                son_fiyat = tp_price if sonuc == "SUCCESS" else sl_price
+
+            degisim_pct = (son_fiyat - entry_price) / entry_price * 100
+            r["result"] = sonuc
             r["checked_at"] = datetime.now(timezone.utc).isoformat()
+            r["exit_price"] = round(son_fiyat, 4)
+            if sonuc == "SUCCESS":
+                r["r_multiple"] = round(TP_PCT / SL_PCT, 3)
+            elif sonuc == "FAIL":
+                r["r_multiple"] = -1.0
+            else:
+                r["r_multiple"] = round(degisim_pct / SL_PCT, 3)
             changed = True
-            print(f"[OVERNIGHT] {ticker} sonuçlandı: {r['result']} (ilk 2 saat max {degisim_pct:+.2f}%)", flush=True)
+            print(f"[OVERNIGHT] {ticker} sonuçlandı: {sonuc} ({degisim_pct:+.2f}%, R={r['r_multiple']})", flush=True)
         except Exception as e:
             print(f"[OVERNIGHT] Sonuç güncelleme hatası ({r.get('symbol')}): {e}", flush=True)
     if changed:
         _write_signals(rows)
 
 
+def check_shadow_outcomes():
+    """AI golge log'undaki HER satirin (secilsin ya da secilmesin) gercek
+    sonucunu doldurur - SUCCESS_TARGET_PCT (+%2, ertesi gun ilk 2 saat max)
+    tanimiyla. Secim yanliligi OLMADAN (sadece secilenler degil TARANAN
+    HERKES) modelin gercek performansini olcmek icin - overnight_model_lab.py
+    bu dosyayi okuyup yeniden egitim/karsilastirma yapiyor."""
+    rows = _read_rows(AI_SHADOW_LOG_FILE)
+    if not rows:
+        return
+    now_ist = datetime.now(ZoneInfo("Europe/Istanbul"))
+    changed = False
+    for r in rows:
+        if r["result"] != "PENDING":
+            continue
+        try:
+            created_ist = datetime.fromisoformat(r["created_at"]).astimezone(ZoneInfo("Europe/Istanbul"))
+            signal_day = created_ist.date()
+            if now_ist.date() <= signal_day:
+                continue
+
+            ticker = r["symbol"]
+            entry_price = float(r["entry_price"])
+            df = _fetch_15m(ticker, period="5d")
+            if df.empty:
+                continue
+            gunler = sorted(df["session"].unique())
+            sonraki_gunler = [g for g in gunler if g > signal_day]
+            if not sonraki_gunler:
+                continue
+            hedef_gun = sonraki_gunler[0]
+
+            hedef_bar = df[df["session"] == hedef_gun].copy()
+            if hedef_bar.empty:
+                continue
+            hedef_bar["dakika"] = pd.to_datetime(hedef_bar["ts"]).dt.hour * 60 + pd.to_datetime(hedef_bar["ts"]).dt.minute
+            pencere = hedef_bar[
+                (hedef_bar["dakika"] >= NEXT_DAY_CHECK_WINDOW[0][0] * 60 + NEXT_DAY_CHECK_WINDOW[0][1]) &
+                (hedef_bar["dakika"] < NEXT_DAY_CHECK_WINDOW[1][0] * 60 + NEXT_DAY_CHECK_WINDOW[1][1])
+            ]
+            gecti = (hedef_gun < now_ist.date()) or (
+                hedef_gun == now_ist.date() and
+                now_ist.hour * 60 + now_ist.minute >= NEXT_DAY_CHECK_WINDOW[1][0] * 60 + NEXT_DAY_CHECK_WINDOW[1][1]
+            )
+            if not gecti or pencere.empty:
+                continue
+
+            en_yuksek = float(pencere["high"].max())
+            degisim_pct = (en_yuksek - entry_price) / entry_price * 100
+            r["result"] = "SUCCESS" if degisim_pct >= 2.0 else "FAIL"
+            r["gerceklesen_pct"] = round(degisim_pct, 2)
+            r["checked_at"] = datetime.now(timezone.utc).isoformat()
+            changed = True
+        except Exception as e:
+            print(f"[OVERNIGHT-GÖLGE] Sonuç güncelleme hatası ({r.get('symbol')}): {e}", flush=True)
+    if changed:
+        _write_rows(AI_SHADOW_LOG_FILE, AI_SHADOW_FIELDS, rows)
+
+
 def build_overnight_report() -> str:
     rows = _read_signals()
     if not rows:
-        return "🌙 [GECE AI RADAR] Henüz sinyal yok."
+        return "🌙 [GECE RADAR] Henüz sinyal yok."
     n = len(rows)
-    closed = [r for r in rows if r["result"] in ("SUCCESS", "FAIL")]
+    closed = [r for r in rows if r["result"] in ("SUCCESS", "FAIL", "TIMEOUT")]
     success = [r for r in closed if r["result"] == "SUCCESS"]
-    lines = [f"🌙 [GECE AI RADAR RAPORU]", f"Toplam sinyal: {n} (kapanan {len(closed)}, bekleyen {n - len(closed)})"]
+    lines = [f"🌙 [GECE RADAR RAPORU — İNDİKATÖR TABANLI]",
+             f"Toplam sinyal: {n} (kapanan {len(closed)}, bekleyen {n - len(closed)})"]
     if closed:
         oran = len(success) / len(closed) * 100
-        lines.append(f"Başarı oranı: %{oran:.1f} ({len(success)}/{len(closed)})")
-        skorlar = [float(r["ai_score"]) for r in closed]
-        lines.append(f"Ortalama AI skoru (kapananlar): %{sum(skorlar)/len(skorlar)*100:.1f}")
+        lines.append(f"TP oranı: %{oran:.1f} ({len(success)}/{len(closed)})")
+        r_degerleri = [float(r["r_multiple"]) for r in closed if r.get("r_multiple") not in (None, "")]
+        if r_degerleri:
+            lines.append(f"Net beklenti: {sum(r_degerleri)/len(r_degerleri):+.3f}R "
+                         f"({len(r_degerleri)} kapanan sinyal)")
+    return "\n".join(lines)
+
+
+def build_shadow_report() -> str:
+    """AI golge modunun rapor edilmesi - /ai_golge komutu icin. Secilen ve
+    secilmeyenleri ayri gosterir, secim yanliligi olmadan modelin gercek
+    performansini gormek icin."""
+    rows = _read_rows(AI_SHADOW_LOG_FILE)
+    if not rows:
+        return "🔬 [AI GÖLGE MODU] Henüz veri yok."
+    n = len(rows)
+    closed = [r for r in rows if r["result"] in ("SUCCESS", "FAIL")]
+    lines = [f"🔬 [AI GÖLGE MODU RAPORU]", f"Toplam gözlem: {n} (kapanan {len(closed)})"]
+    if closed:
+        basarili = [r for r in closed if r["result"] == "SUCCESS"]
+        oran = len(basarili) / len(closed) * 100
+        lines.append(f"Genel başarı oranı (+%2 hedefi): %{oran:.1f} ({len(basarili)}/{len(closed)})")
+
+        secilen = [r for r in closed if r["secildi_mi"] in ("1", 1, "True", True)]
+        secilmeyen = [r for r in closed if r not in secilen]
+        if secilen:
+            b1 = sum(1 for r in secilen if r["result"] == "SUCCESS") / len(secilen) * 100
+            lines.append(f"  İndikatör de seçmişti ({len(secilen)}): %{b1:.1f} başarı")
+        if secilmeyen:
+            b2 = sum(1 for r in secilmeyen if r["result"] == "SUCCESS") / len(secilmeyen) * 100
+            lines.append(f"  İndikatör seçmemişti ({len(secilmeyen)}): %{b2:.1f} başarı")
+
+        # yuksek AI skor esigi >= 0.6 olanlarin performansi (gercek kenar var mi diye)
+        yuksek_skor = [r for r in closed if float(r["ai_score"]) >= 0.6]
+        if yuksek_skor:
+            b3 = sum(1 for r in yuksek_skor if r["result"] == "SUCCESS") / len(yuksek_skor) * 100
+            lines.append(f"  AI skoru ≥%60 olanlar ({len(yuksek_skor)}): %{b3:.1f} başarı")
+    lines.append("\nBu model canlıya hiç sinyal göndermiyor, sadece gözlemleniyor. "
+                 "Yeterli örneklemde tutarlı pozitif kenar görülürse tekrar değerlendirilir.")
     return "\n".join(lines)
