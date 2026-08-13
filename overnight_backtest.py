@@ -212,6 +212,17 @@ def _simulate_rr_exit(ticker: str, gun_tarihi, entry_price: float):
         if not sonraki_gunler:
             return None, None, None
         ertesi_gun = sonraki_gunler[0]
+        # KRITIK DUZELTME (2026-08-13): df15 HER ZAMAN bugunden geriye son 60
+        # gunu kapsar, gun_tarihi'ne gore DEGIL. Eski bir gun_tarihi (ornegin
+        # 100 gun once) icin df15'teki TUM tarihler > gun_tarihi olur, bu da
+        # sonraki_gunler[0]'in gercek "ertesi gun" yerine 15dk penceresindeki
+        # EN ESKI tarihi (haftalarca sonrasi olabilir) secmesine yol aciyordu -
+        # yani 60 gunden eski sinyaller sessizce YANLIS bir "ertesi gun" ile
+        # kontrol ediliyor, gunluk-yaklasik yedegine hic dusmuyordu. Bulunan
+        # tarih gercekten YAKIN degilse (haftasonu/tatil icin 5 gun payi ile)
+        # bu 15dk verisi bu sinyal icin GECERSIZ sayilir, yedek yontem devreye girer.
+        if (ertesi_gun - gun_tarihi).days > 5:
+            return None, None, None
 
         pencere = df15[
             (df15["tarih"] == ertesi_gun) &
