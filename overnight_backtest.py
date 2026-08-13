@@ -53,7 +53,7 @@ warnings.filterwarnings("ignore")
 # AYARLAR
 # =============================================================================
 
-BACKTEST_DAYS = int(os.environ.get("BACKTEST_DAYS", "60"))
+BACKTEST_DAYS = int(os.environ.get("BACKTEST_DAYS", "150"))  # rapor 27 sonrasi 60->150 (Gemini istegi, 120-180 arasi)
 FEATURE_LOOKBACK_BUFFER = 30  # vol_ma20/rsi/cmf icin gereken minimum gecmis
 DAILY_FETCH_PERIOD = f"{BACKTEST_DAYS + FEATURE_LOOKBACK_BUFFER + 10}d"
 
@@ -240,6 +240,35 @@ def _simulate_rr_exit(ticker: str, gun_tarihi, entry_price: float):
         return None, None, None
 
 
+def _simulate_rr_exit_daily_fallback(df: pd.DataFrame, i: int, entry_price: float):
+    """15dk veri yoksa (60 gunden eski gunler icin, 120-180 gunluk test
+    istendiginde kacinilmaz) YEDEK yontem: ertesi GUNUN TAMAMININ (sadece
+    ilk 2 saat degil) yuksek/dusuk/kapanisina bakar. Ayni gun icinde hem
+    TP hem SL araligina girmisse - hangisi once oldugunu GUNLUK BARDAN
+    BILEMEYIZ - ayni-bar konvansiyonuyla tutarli olarak KAYIP sayilir.
+    Bu, sadece ilk 2 saati degil TUM GUNU kapsadigi icin TP/SL'e daha
+    kolay ulasir - yani 15dk-hassas sonuçlarla BIREBIR KARSILASTIRILAMAZ,
+    raporda ayri etiketlenir."""
+    if i + 1 >= len(df):
+        return None, None, None
+    ertesi = df.iloc[i + 1]
+    if pd.isna(ertesi["high"]) or pd.isna(ertesi["low"]) or pd.isna(ertesi["close"]):
+        return None, None, None
+
+    tp_price = entry_price * (1 + TP_PCT / 100)
+    sl_price = entry_price * (1 - SL_PCT / 100)
+
+    tp_hit = ertesi["high"] >= tp_price
+    sl_hit = ertesi["low"] <= sl_price
+    if sl_hit:  # ayni gun icinde ikisi de olsa dahi (tp_hit da True olsa) KAYIP - konservatif
+        return "SL", -1.0, -SL_PCT
+    if tp_hit:
+        return "TP", TP_PCT / SL_PCT, TP_PCT
+
+    gerceklesen_pct = (float(ertesi["close"]) - entry_price) / entry_price * 100
+    return "TIMEOUT", gerceklesen_pct / SL_PCT, gerceklesen_pct
+
+
 # =============================================================================
 # WALK-FORWARD SİMÜLASYON
 # =============================================================================
@@ -277,12 +306,17 @@ def backtest_ticker(ticker: str, model) -> list:
 
         entry_price = float(row["close"])
         sonuc_tipi, r_multiple, gerceklesen_pct = _simulate_rr_exit(ticker, gun_tarihi, entry_price)
+        yontem = "15dk_hassas"
         if sonuc_tipi is None:
-            continue  # 15dk veri yoksa (60 gunden eski) sonuc bilinemez, atla
+            # 60 gunden eski - 15dk veri yok, gunluk-bar yedegine dus
+            sonuc_tipi, r_multiple, gerceklesen_pct = _simulate_rr_exit_daily_fallback(df, i, entry_price)
+            yontem = "gunluk_yaklasik"
+        if sonuc_tipi is None:
+            continue  # ikisi de basarisizsa (ertesi gun verisi hic yoksa) atla
 
         sonuclar.append({
             "ticker": ticker, "tarih": gun_tarihi.isoformat(), "ai_skor": round(proba, 4),
-            "indikator_skor": indikator_skor, "secim_kaynagi": secim,
+            "indikator_skor": indikator_skor, "secim_kaynagi": secim, "yontem": yontem,
             "entry_price": round(entry_price, 4), "sonuc_tipi": sonuc_tipi,
             "r_multiple": round(r_multiple, 3), "gerceklesen_pct": round(gerceklesen_pct, 2),
         })
@@ -344,7 +378,11 @@ def run_backtest():
     mesaj1 = (
         f"📊 [{BACKTEST_DAYS} GÜNLÜK TEST — GENİŞLETİLMİŞ HAVUZ + 1:{TP_PCT/SL_PCT:.0f} R:R]\n"
         f"TP +%{TP_PCT:.1f} | SL -%{SL_PCT:.1f} | Timeout: pencere sonu (10:00-12:00)\n"
-        f"İndikatör havuzu: CMF/Hacim/Zirveye yakınlık/RSI'dan en az {INDICATOR_SCORE_MIN}/4\n\n"
+        f"İndikatör havuzu: CMF/Hacim/Zirveye yakınlık/RSI'dan en az {INDICATOR_SCORE_MIN}/4\n"
+        f"Yöntem: {int((df_sonuc['yontem']=='15dk_hassas').sum())} sinyal 15dk-hassas "
+        f"(son ~60 gün), {int((df_sonuc['yontem']=='gunluk_yaklasik').sum())} sinyal "
+        f"günlük-yaklaşık (60 günden eski, sadece ilk 2 saat değil TÜM gün baz alındı — "
+        f"birebir karşılaştırılamaz)\n\n"
         f"🌐 TÜM HAVUZ (AI VEYA İndikatör)\n{_grup_ozet(tum_havuz, 'Toplam')}"
     )
     mesaj2 = (
@@ -362,7 +400,14 @@ def run_backtest():
         f"⚠️ 'RSI dip tepkisi' net tanımlı değildi, RSI 35-55 aralığı olarak "
         f"yorumlandı — kesinleştirilmesi gerekebilir."
     )
-    for m in (mesaj1, mesaj2, mesaj3):
+    hassas = df_sonuc[df_sonuc["yontem"] == "15dk_hassas"]
+    yaklasik = df_sonuc[df_sonuc["yontem"] == "gunluk_yaklasik"]
+    mesaj4 = (
+        f"🔍 YÖNTEM KIRILIMI (asıl kanıt gücü 15dk-hassas kısımda):\n"
+        f"{_grup_ozet(hassas, '15dk-hassas (son ~60 gün)')}\n"
+        f"{_grup_ozet(yaklasik, 'Günlük-yaklaşık (60+ gün önce, TÜM gün baz alındı)')}"
+    )
+    for m in (mesaj1, mesaj2, mesaj3, mesaj4):
         print(m, flush=True)
         send_telegram_message(m)
         time.sleep(1)
