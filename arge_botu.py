@@ -80,10 +80,22 @@ MIN_TRAIN_ROWS = int(os.environ.get("MIN_TRAIN_ROWS", "200"))
 SUCCESS_THRESHOLD_PCT = float(os.environ.get("SUCCESS_THRESHOLD_PCT", "1.5"))
 MIN_SAMPLE_PER_STAGE = int(os.environ.get("MIN_SAMPLE_PER_STAGE", "20"))
 
+# Onaylanan bir hipotez TEK SEFERLİK testten sonra "kesin güvenilir"
+# sayılmaz - overnight_model_lab.py'deki ayni felsefe: RECONFIRM_STREAK_REQUIRED
+# kez UST USTE (RECONFIRM_INTERVAL_HOURS arayla, her seferinde GÜNCEL/genislemis
+# veriyle) ayni 3 asamayi da gecmesi gerekiyor. Bir kez basarisiz olursa seri
+# sifirlaniyor - "bir kere sansli cikti" ile "gercekten tutarli" ayirt ediliyor.
+RECONFIRM_STREAK_REQUIRED = int(os.environ.get("RECONFIRM_STREAK_REQUIRED", "3"))
+RECONFIRM_INTERVAL_HOURS = int(os.environ.get("RECONFIRM_INTERVAL_HOURS", "24"))
+
 HISTORY_FILE = _data_path("arge_hipotez_gecmisi.csv")
 HISTORY_FIELDS = ["tarih", "isim", "yon", "kosullar_json", "gerekce",
                    "egitim_n", "egitim_beklenti", "dogrulama_n", "dogrulama_beklenti",
                    "sinav_n", "sinav_beklenti", "onayli_mi", "asama"]
+
+RECONFIRM_FILE = _data_path("arge_yeniden_dogrulama.csv")
+RECONFIRM_FIELDS = ["isim", "yon", "kosullar_json", "gerekce", "seri", "son_test_tarih",
+                     "kesin_guvenilir_mi", "son_sinav_beklenti"]
 
 CMD_OFFSET_FILE = _data_path("arge_cmd_offset.txt")
 
@@ -485,10 +497,116 @@ def run_research_cycle():
             f"bu {toplam_onayli}. onaylanan — çok sayıda deneme arasından "
             f"çıkan bir onay, az denemeyle çıkandan daha temkinli "
             f"değerlendirilmeli (rastgele denemede bile ara sıra şans "
-            f"eseri geçen olur)."
+            f"eseri geçen olur).\n\n"
+            f"🔁 Bu hipotez şimdi YENİDEN-DOĞRULAMA listesine eklendi — "
+            f"her {RECONFIRM_INTERVAL_HOURS} saatte bir güncel veriyle "
+            f"tekrar test edilecek. {RECONFIRM_STREAK_REQUIRED} kez üst "
+            f"üste geçerse 'KESİN GÜVENİLİR' ilan edilecek, bir kez bile "
+            f"başarısız olursa seri sıfırlanacak."
         )
+        _register_for_reconfirmation(h)
     else:
         print(f"[ARGE] Hipotez '{asama}' aşamasında elendi, sessizce kaydedildi.", flush=True)
+
+
+# =============================================================================
+# YENİDEN-DOĞRULAMA — onaylanan bir hipotez tek seferlik testle "kesin
+# güvenilir" sayılmaz. RECONFIRM_STREAK_REQUIRED kez üst üste, her seferinde
+# GÜNCEL/genişlemiş veriyle aynı 3 aşamayı da geçmesi gerekir.
+# =============================================================================
+
+def _read_reconfirm():
+    if not os.path.exists(RECONFIRM_FILE):
+        return []
+    with open(RECONFIRM_FILE, newline="", encoding="utf-8") as f:
+        return list(csv.DictReader(f))
+
+
+def _write_reconfirm(rows):
+    with open(RECONFIRM_FILE, "w", newline="", encoding="utf-8") as f:
+        w = csv.DictWriter(f, fieldnames=RECONFIRM_FIELDS)
+        w.writeheader()
+        w.writerows(rows)
+
+
+def _register_for_reconfirmation(h: dict):
+    rows = _read_reconfirm()
+    kosullar_json = json.dumps(h["kosullar"], ensure_ascii=False)
+    if any(r["isim"] == h["isim"] and r["kosullar_json"] == kosullar_json for r in rows):
+        return  # zaten listede
+    rows.append({
+        "isim": h["isim"], "yon": h["yon"], "kosullar_json": kosullar_json,
+        "gerekce": h["gerekce"], "seri": 0,
+        "son_test_tarih": datetime.now(timezone.utc).isoformat(),
+        "kesin_guvenilir_mi": 0, "son_sinav_beklenti": "",
+    })
+    _write_reconfirm(rows)
+
+
+def reconfirm_pending_hypotheses():
+    """Her cagrida, RECONFIRM_INTERVAL_HOURS'i gecmis kayitlari GUNCEL/genislemis
+    veriyle yeniden test eder. Basarili -> seri += 1 (esige ulasirsa KESIN
+    GUVENILIR ilan edilir). Basarisiz -> seri = 0'a sifirlanir ve daha once
+    kesinlesmisse 'aslinda o kadar saglam degilmis' diye geri cekilir."""
+    rows = _read_reconfirm()
+    if not rows:
+        return
+    now = datetime.now(timezone.utc)
+    degisti = False
+
+    df = None  # tembel yukleme - hic zamani gelen kayit yoksa hic veri cekme
+    for r in rows:
+        son_test = datetime.fromisoformat(r["son_test_tarih"])
+        if (now - son_test).total_seconds() < RECONFIRM_INTERVAL_HOURS * 3600:
+            continue
+        if df is None:
+            df = fetch_all_data()
+            if df.empty or len(df) < MIN_TRAIN_ROWS:
+                print("[ARGE] Yeniden-doğrulama için yetersiz veri, bu tur atlanıyor.", flush=True)
+                return
+
+        h = {"isim": r["isim"], "yon": r["yon"], "kosullar": json.loads(r["kosullar_json"]),
+             "gerekce": r["gerekce"]}
+        egitim, dogrulama, sinav = chronological_split(df)
+        _, eb = evaluate_on_slice(egitim, h)
+        _, db = evaluate_on_slice(dogrulama, h) if eb is not None and eb > 0 else (0, None)
+        sn, sb = evaluate_on_slice(sinav, h) if db is not None and db > 0 else (0, None)
+        gecti = sb is not None and sb > 0
+
+        r["son_test_tarih"] = now.isoformat()
+        r["son_sinav_beklenti"] = round(sb, 3) if sb is not None else ""
+        degisti = True
+
+        onceki_kesin = r["kesin_guvenilir_mi"] in ("1", 1, "True", True)
+        if gecti:
+            r["seri"] = str(int(r["seri"]) + 1)
+            print(f"[ARGE] Yeniden-doğrulama: '{r['isim']}' geçti, seri={r['seri']}", flush=True)
+            if int(r["seri"]) >= RECONFIRM_STREAK_REQUIRED and not onceki_kesin:
+                r["kesin_guvenilir_mi"] = "1"
+                send_telegram_message(
+                    f"🏆 [AR-GE — KESİN GÜVENİLİR] '{r['isim']}' ({r['yon']})\n\n"
+                    f"{RECONFIRM_STREAK_REQUIRED} kez üst üste, her seferinde "
+                    f"GÜNCEL veriyle, 3 aşamayı da geçti (son sınav: "
+                    f"{r['son_sinav_beklenti']}%).\n"
+                    f"Koşullar: {r['kosullar_json']}\n\n"
+                    f"Bu artık tek seferlik şans olma ihtimali düşük bir "
+                    f"bulgu. Yine de canlıya almadan önce ayrıca "
+                    f"değerlendirilmeli — hiçbir sisteme otomatik bağlanmadı."
+                )
+        else:
+            if onceki_kesin:
+                send_telegram_message(
+                    f"⚠️ [AR-GE — GERİ ÇEKİLDİ] '{r['isim']}' daha önce "
+                    f"'kesin güvenilir' ilan edilmişti, ama bu yeniden-"
+                    f"doğrulama turunda başarısız oldu. Seri sıfırlandı — "
+                    f"aslında sanıldığı kadar tutarlı değilmiş."
+                )
+            r["seri"] = "0"
+            r["kesin_guvenilir_mi"] = "0"
+            print(f"[ARGE] Yeniden-doğrulama: '{r['isim']}' başarısız, seri sıfırlandı", flush=True)
+
+    if degisti:
+        _write_reconfirm(rows)
 
 
 def maybe_run_research():
@@ -505,6 +623,7 @@ def maybe_run_research():
     _last_run_time = now
     try:
         run_research_cycle()
+        reconfirm_pending_hypotheses()
     except Exception as e:
         print(f"[ARGE] Döngü hatası: {e}", flush=True)
 
@@ -534,12 +653,22 @@ def build_report() -> str:
         return "🔬 [AR-GE BOTU] Henüz hiç hipotez denenmedi."
     toplam = len(gecmis)
     onayli = [r for r in gecmis if r["onayli_mi"] == "1"]
-    lines = [f"🔬 [AR-GE RAPORU] Toplam denenen hipotez: {toplam}", f"Onaylı: {len(onayli)}", ""]
-    if onayli:
-        lines.append("✅ Onaylı hipotezler:")
-        for r in onayli:
-            lines.append(f"  {r['isim']} ({r['yon']}): sınav {r['sinav_beklenti']}% ({r['sinav_n']} örnek)")
-    lines.append("\nSon 5 deneme:")
+    lines = [f"🔬 [AR-GE RAPORU] Toplam denenen hipotez: {toplam}", f"İlk onay: {len(onayli)}", ""]
+
+    reconfirm = _read_reconfirm()
+    if reconfirm:
+        kesin = [r for r in reconfirm if r["kesin_guvenilir_mi"] in ("1", 1, "True", True)]
+        lines.append(f"🏆 KESİN GÜVENİLİR (tekrar tekrar doğrulandı): {len(kesin)}")
+        for r in kesin:
+            lines.append(f"  {r['isim']} ({r['yon']}): seri {r['seri']}/{RECONFIRM_STREAK_REQUIRED}")
+        bekleyen = [r for r in reconfirm if r not in kesin]
+        if bekleyen:
+            lines.append(f"\n🔁 Yeniden-doğrulama sürecinde: {len(bekleyen)}")
+            for r in bekleyen:
+                lines.append(f"  {r['isim']}: seri {r['seri']}/{RECONFIRM_STREAK_REQUIRED}")
+        lines.append("")
+
+    lines.append("Son 5 deneme:")
     for r in gecmis[-5:]:
         lines.append(f"  {r['tarih']} {r['isim']}: {r['asama']}")
     return "\n".join(lines)
