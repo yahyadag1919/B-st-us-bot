@@ -69,6 +69,18 @@ except Exception as _ai_lab_import_err:
     _AI_LAB_AVAILABLE = False
     print(f"overnight_model_lab yüklenemedi (izole özellik, sistemi etkilemez): {_ai_lab_import_err}")
 
+# Ar-Ge Botu (2026-08-14) — kendi Telegram kimliği (eski kripto botunun
+# token'ı, ARGE_TELEGRAM_TOKEN/ARGE_TELEGRAM_CHAT_ID), kendi Gemini API
+# çağrısı, TAMAMEN İZOLE. Ana sinyal sistemine hiç bağlı değil, sadece
+# arka planda hipotez üretip test ediyor.
+try:
+    import arge_botu as arge
+    _ARGE_BOTU_AVAILABLE = True
+except Exception as _arge_import_err:
+    arge = None
+    _ARGE_BOTU_AVAILABLE = False
+    print(f"arge_botu yüklenemedi (izole özellik, sistemi etkilemez): {_arge_import_err}")
+
 TELEGRAM_TOKEN = os.environ.get("TELEGRAM_TOKEN", "")
 TELEGRAM_CHAT_ID = os.environ.get("TELEGRAM_CHAT_ID", "")
 
@@ -3030,6 +3042,14 @@ def run_forever():
         + storage_warning
     )
 
+    # Ar-Ge Botu'nun kendi Telegram sohbetine kendi başlangıç mesajı - ana
+    # bota hiç dokunmadan, izole try/except icinde.
+    if _ARGE_BOTU_AVAILABLE:
+        try:
+            arge.send_startup_message()
+        except Exception as e:
+            dedektif_report("Ar-Ge Botu (başlangıç mesajı)", e)
+
     # Bir onceki dongude cokme olsa bile bot yasamaya devam etsin: her tarama
     # kendi try/except'inde. ONCEDEN: taramalar ciplak cagriliyordu, yani
     # tarama fonksiyonunun kendi ic hata yakalayicilarinin DISINDA olusan bir
@@ -3243,6 +3263,15 @@ def run_forever():
                 ai_lab.maybe_run_lab()
             except Exception as e:
                 dedektif_report("AI Lab (döngü)", e)
+
+        # Ar-Ge Botu — kendi Telegram kimliği, kendi zamanlayıcısı, kendi
+        # try/except'i. Ana sinyal sistemine hiç bağlı değil.
+        if _ARGE_BOTU_AVAILABLE:
+            try:
+                arge.maybe_run_research()
+                arge.poll_arge_commands()
+            except Exception as e:
+                dedektif_report("Ar-Ge Botu (döngü)", e)
 
         # Futbol günlük özeti — kendi içinde günde bir kez gönderecek şekilde
         # kilitli, bu yüzden her turda güvenle çağrılabilir.
