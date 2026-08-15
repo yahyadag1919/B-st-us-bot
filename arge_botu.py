@@ -75,7 +75,10 @@ GEMINI_API_KEY = os.environ.get("GEMINI_API_KEY", "")
 GEMINI_MODEL = os.environ.get("GEMINI_MODEL", "gemini-3.6-flash")  # 2026-08-15: 2.5-flash "yeni hesaplara kapalı" hatası verdi, 3.6-flash şu an güncel/GA model
 
 ARGE_BOTU_ENABLED = os.environ.get("ARGE_BOTU_ENABLED", "true").lower() == "true"
-RESEARCH_COOLDOWN_MINUTES = int(os.environ.get("RESEARCH_COOLDOWN_MINUTES", "10"))
+RESEARCH_COOLDOWN_MINUTES = int(os.environ.get("RESEARCH_COOLDOWN_MINUTES", "20"))  # 2026-08-15: artik TOPLU istek var, kota degil sadece Yahoo nezaketi icin bekleniyor
+BATCH_SIZE = int(os.environ.get("ARGE_BATCH_SIZE", "15"))  # Gemini'ye TEK istekte kac hipotez birden istenecek - kota "kac soru sordun" uzerinden isliyor, tek celp cok fikir = kota tasarrufu
+QUEUE_FILE_KURAL = _data_path("arge_kuyruk_kural.json")
+QUEUE_FILE_AI = _data_path("arge_kuyruk_ai.json")
 MIN_TRAIN_ROWS = int(os.environ.get("MIN_TRAIN_ROWS", "200"))
 SUCCESS_THRESHOLD_PCT = float(os.environ.get("SUCCESS_THRESHOLD_PCT", "1.5"))
 MIN_SAMPLE_PER_STAGE = int(os.environ.get("MIN_SAMPLE_PER_STAGE", "20"))
@@ -461,20 +464,21 @@ def _call_gemini(prompt: str):
         return None
 
 
-def ask_gemini_for_hypothesis() -> dict:
-    """Gemini API'ye gecmis KURAL denemelerini gosterip yeni bir esik-kurali
-    hipotezi ister. Donen deger dogrulanmis (validate_hypothesis'i gecmis)
-    bir sozluk ya da None (API hatasi / gecersiz cevap)."""
+def ask_gemini_for_hypothesis_batch() -> list:
+    """Gemini'ye TEK istekte BATCH_SIZE kadar (varsayilan 15) KURAL hipotezi
+    birden ister - kota "kac soru sordun" uzerinden isledigi icin, 1 istekte
+    15 fikir almak 15 istekte 15 fikir almaktan 15 KAT daha az kota harcar.
+    Donen: gecerli (validate_hypothesis'i gecmis) hipotezlerin listesi."""
     gecmis = [r for r in _read_history() if r.get("tur_tipi", "kural") == "kural"]
     gecmis_ozet = "\n".join(
         f"- {r['isim']} ({r['yon']}): {r['kosullar_json']} -> "
         f"{'ONAYLANDI' if r['onayli_mi'] == '1' else r['asama'] + ' aşamasında elendi'}"
-        for r in gecmis[-30:]  # son 30 deneme, prompt cok uzamasin
+        for r in gecmis[-30:]
     ) or "(henüz hiç deneme yok)"
 
     prompt = f"""Sen bir kantitatif finans araştırmacısısın. BIST ve ABD hisseleri için,
-bugünün kapanış verisinden ERTESİ GÜNÜN performansını tahmin edecek yeni bir
-teknik hipotez öner.
+bugünün kapanış verisinden ERTESİ GÜNÜN performansını tahmin edecek {BATCH_SIZE}
+FARKLI teknik hipotez öner.
 
 SADECE şu özellikleri kullanabilirsin (başka hiçbir şey icat etme):
 {', '.join(FEATURE_LIBRARY)}
@@ -482,25 +486,29 @@ SADECE şu özellikleri kullanabilirsin (başka hiçbir şey icat etme):
 Şimdiye kadar denenenler ve sonuçları:
 {gecmis_ozet}
 
-Daha önce denenmemiş, YENİ bir kombinasyon öner (en fazla 4 koşul).
-SADECE şu JSON formatında cevap ver, başka hiçbir metin ekleme:
-{{"isim": "kisa_isim", "yon": "LONG veya SHORT", "kosullar": [{{"ozellik": "...", "operator": "< veya <= veya > veya >= veya ==", "deger": sayı}}], "gerekce": "kısa açıklama"}}"""
+Daha önce denenmemiş, BİRBİRİNDEN FARKLI {BATCH_SIZE} kombinasyon öner (her biri en fazla 4 koşul).
+SADECE şu JSON DİZİ formatında cevap ver, başka hiçbir metin ekleme:
+[{{"isim": "kisa_isim", "yon": "LONG veya SHORT", "kosullar": [{{"ozellik": "...", "operator": "< veya <= veya > veya >= veya ==", "deger": sayı}}], "gerekce": "kısa açıklama"}}, ...]"""
 
-    h = _call_gemini(prompt)
-    if h is None:
-        return None
-    gecerli, hata = validate_hypothesis(h)
-    if not gecerli:
-        print(f"[ARGE] Gemini'nin hipotezi geçersiz: {hata}", flush=True)
-        return None
-    return h
+    liste = _call_gemini(prompt)
+    if not isinstance(liste, list):
+        print(f"[ARGE] Gemini'den beklenen JSON dizisi gelmedi.", flush=True)
+        return []
+
+    gecerliler = []
+    for h in liste:
+        gecerli, hata = validate_hypothesis(h)
+        if gecerli:
+            gecerliler.append(h)
+        else:
+            print(f"[ARGE] Toplu hipotezde geçersiz bir tane elendi: {hata}", flush=True)
+    print(f"[ARGE] Toplu istek: {len(liste)} hipotez geldi, {len(gecerliler)} geçerli.", flush=True)
+    return gecerliler
 
 
-def ask_gemini_for_ai_hypothesis() -> dict:
-    """AI-hipotez kolu: Gemini burada bir ESIK KURALI degil, kucuk bir
-    modelin HANGI OZELLIKLERLE egitilecegini seciyor. Motor (bu dosya)
-    sabit, onceden test edilmis bir XGBoost yapilandirmasiyla egitip test
-    ediyor - Gemini yine hicbir kod/hiperparametre yazmiyor."""
+def ask_gemini_for_ai_hypothesis_batch() -> list:
+    """AI-hipotez kolu icin AYNI toplu-istek mantigi - TEK cagrida BATCH_SIZE
+    kadar ozellik-kombinasyonu birden istenir."""
     gecmis = [r for r in _read_history() if r.get("tur_tipi") == "ai"]
     gecmis_ozet = "\n".join(
         f"- {r['isim']} ({r['yon']}): {r['kosullar_json']} -> "
@@ -509,27 +517,76 @@ def ask_gemini_for_ai_hypothesis() -> dict:
     ) or "(henüz hiç deneme yok)"
 
     prompt = f"""Sen bir kantitatif finans araştırmacısısın. BIST ve ABD hisseleri için,
-bugünün kapanış verisinden ERTESİ GÜNÜN performansını tahmin edecek küçük bir
-makine öğrenmesi modeli için hangi özelliklerin kullanılacağını seç.
+bugünün kapanış verisinden ERTESİ GÜNÜN performansını tahmin edecek küçük
+makine öğrenmesi modelleri için {BATCH_SIZE} FARKLI özellik kombinasyonu seç.
 
-SADECE şu özelliklerden 2-6 tanesini seçebilirsin (başka hiçbir şey icat etme,
-kod/hiperparametre YAZMA - sadece hangi özellikler kullanılsın onu seç):
+SADECE şu özelliklerden her kombinasyonda 2-6 tanesini seçebilirsin (kod/
+hiperparametre YAZMA - sadece hangi özellikler kullanılsın onu seç):
 {', '.join(FEATURE_LIBRARY)}
 
 Şimdiye kadar denenen özellik kombinasyonları ve sonuçları:
 {gecmis_ozet}
 
-Daha önce denenmemiş, YENİ bir özellik kombinasyonu öner.
-SADECE şu JSON formatında cevap ver, başka hiçbir metin ekleme:
-{{"isim": "kisa_isim", "yon": "LONG veya SHORT", "kullanilacak_ozellikler": ["ozellik1", "ozellik2", ...], "gerekce": "kısa açıklama"}}"""
+Daha önce denenmemiş, BİRBİRİNDEN FARKLI {BATCH_SIZE} kombinasyon öner.
+SADECE şu JSON DİZİ formatında cevap ver, başka hiçbir metin ekleme:
+[{{"isim": "kisa_isim", "yon": "LONG veya SHORT", "kullanilacak_ozellikler": ["ozellik1", "ozellik2", ...], "gerekce": "kısa açıklama"}}, ...]"""
 
-    h = _call_gemini(prompt)
-    if h is None:
-        return None
-    gecerli, hata = validate_ai_hypothesis(h)
-    if not gecerli:
-        print(f"[ARGE] Gemini'nin AI hipotezi geçersiz: {hata}", flush=True)
-        return None
+    liste = _call_gemini(prompt)
+    if not isinstance(liste, list):
+        print(f"[ARGE] Gemini'den beklenen JSON dizisi gelmedi.", flush=True)
+        return []
+
+    gecerliler = []
+    for h in liste:
+        gecerli, hata = validate_ai_hypothesis(h)
+        if gecerli:
+            gecerliler.append(h)
+        else:
+            print(f"[ARGE] Toplu AI hipotezinde geçersiz bir tane elendi: {hata}", flush=True)
+    print(f"[ARGE] Toplu istek (AI): {len(liste)} hipotez geldi, {len(gecerliler)} geçerli.", flush=True)
+    return gecerliler
+
+
+def _read_queue(path: str) -> list:
+    if not os.path.exists(path):
+        return []
+    try:
+        with open(path, encoding="utf-8") as f:
+            return json.load(f)
+    except Exception:
+        return []
+
+
+def _write_queue(path: str, queue: list):
+    with open(path, "w", encoding="utf-8") as f:
+        json.dump(queue, f, ensure_ascii=False)
+
+
+def get_next_kural_hypothesis():
+    """Kuyruk bossa YENI bir toplu istek atar (kota tuketen tek an burasi),
+    doluysa kuyruktan bir tane cikarip DONER - kota harcamadan. Bir kuyruk
+    dolumu (15 fikir) ortalama 15 test turu boyunca hic Gemini'ye
+    dokunmadan calismayi saglar."""
+    q = _read_queue(QUEUE_FILE_KURAL)
+    if not q:
+        q = ask_gemini_for_hypothesis_batch()
+        if not q:
+            return None
+    h = q.pop(0)
+    _write_queue(QUEUE_FILE_KURAL, q)
+    print(f"[ARGE] Kural kuyruğunda kalan: {len(q)}", flush=True)
+    return h
+
+
+def get_next_ai_hypothesis():
+    q = _read_queue(QUEUE_FILE_AI)
+    if not q:
+        q = ask_gemini_for_ai_hypothesis_batch()
+        if not q:
+            return None
+    h = q.pop(0)
+    _write_queue(QUEUE_FILE_AI, q)
+    print(f"[ARGE] AI kuyruğunda kalan: {len(q)}", flush=True)
     return h
 
 
@@ -630,9 +687,9 @@ def run_research_cycle():
     """KURAL hipotezi kolu - esik tabanli basit kurallar."""
     print(f"[ARGE] Araştırma turu başlıyor (kural)...", flush=True)
 
-    h = ask_gemini_for_hypothesis()
+    h = get_next_kural_hypothesis()
     if h is None:
-        print("[ARGE] Bu tur hipotez alınamadı, atlanıyor.", flush=True)
+        print("[ARGE] Bu tur hipotez alınamadı (kuyruk boş + toplu istek başarısız), atlanıyor.", flush=True)
         return
     print(f"[ARGE] Hipotez: {h['isim']} ({h['yon']}) - {h['kosullar']}", flush=True)
 
@@ -664,9 +721,9 @@ def run_ai_research_cycle():
     modeli egitilir. AYNI 3 asamali disiplin, AYNI maliyet-dusulmus kriter."""
     print(f"[ARGE] Araştırma turu başlıyor (AI)...", flush=True)
 
-    h = ask_gemini_for_ai_hypothesis()
+    h = get_next_ai_hypothesis()
     if h is None:
-        print("[ARGE] Bu tur AI hipotezi alınamadı, atlanıyor.", flush=True)
+        print("[ARGE] Bu tur AI hipotezi alınamadı (kuyruk boş + toplu istek başarısız), atlanıyor.", flush=True)
         return
     features = h["kullanilacak_ozellikler"]
     print(f"[ARGE] AI Hipotez: {h['isim']} ({h['yon']}) - özellikler: {features}", flush=True)
@@ -828,9 +885,10 @@ def reconfirm_pending_hypotheses():
 
 def maybe_run_research():
     """ONCEDEN: sabit 24 saat bekliyordu, bir tur birkac dakika surdugu icin
-    gunun buyuk kismi bos gecıyordu. ARTIK: her turdan sonra sadece kisa bir
-    bekleme (RESEARCH_COOLDOWN_MINUTES, varsayilan 10 dk) var - Yahoo/Gemini'yi
-    art arda yormamak icin bir tampon, "surekli calis ama makul hizda" mantigi.
+    gunun buyuk kismi bos gecıyordu. 10 dk'lik bekleme de denendi ama Gemini
+    ucretsiz kotasi (gunde 20 istek/model) hemen asildi - simdi 80 dk
+    (RESEARCH_COOLDOWN_MINUTES) ile gunde ~18 istek yapiliyor, kotanin
+    guvenle altinda.
     KURAL ve AI kollari NOBETLESE calisir - toplam gecmis uzunlugunun tek/cift
     olmasina gore hangi turun sirasi geldigi belirlenir, ekstra durum dosyasi
     gerekmez."""
@@ -860,9 +918,14 @@ def send_startup_message():
         "İki kol NÖBETLEŞE çalışıyor:\n"
         "  🔹 KURAL kolu — basit eşik kuralları (\"RSI<30 ise\")\n"
         "  🔹 AI kolu — Gemini'nin seçtiği özelliklerle küçük bir model eğitiliyor\n\n"
-        f"Her tur bitince {RESEARCH_COOLDOWN_MINUTES} dk bekleyip hemen "
-        "yeni bir hipotez dener — boşta durmaz, ama Yahoo/Gemini'yi de "
-        "yormamak için art arda değil, kısa bir tamponla.\n\n"
+        f"Her kolun kendi TOPLU hipotez kuyruğu var — bir seferde Gemini'ye "
+        f"{BATCH_SIZE} fikir birden sorulup kuyruğa alınıyor, sonra kuyruk "
+        f"bitene kadar HİÇ Gemini'ye dokunmadan sırayla test ediliyor. "
+        f"Böylece kota (günde 20 istek/model) sadece kuyruk boşaldığında "
+        f"harcanıyor, çok daha verimli.\n\n"
+        f"Her tur bitince {RESEARCH_COOLDOWN_MINUTES} dk bekleyip yeni bir "
+        "hipotez test eder (Yahoo'yu yormamak için, Gemini kotası artık "
+        "sorun değil).\n\n"
         f"Onay kriteri artık MALİYET-DÜŞÜLMÜŞ ortalama (~%{TRANSACTION_COST_PCT:.2f} "
         "tahmini komisyon+kayma düşülmüş) — ham pozitif yetmiyor.\n\n"
         "⚠️ Bu bot SADECE araştırma yapar — hiçbir sinyal/emir üretmez, "
