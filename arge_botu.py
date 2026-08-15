@@ -407,20 +407,17 @@ SADECE şu JSON formatında cevap ver, başka hiçbir metin ekleme:
 {{"isim": "kisa_isim", "yon": "LONG veya SHORT", "kosullar": [{{"ozellik": "...", "operator": "< veya <= veya > veya >= veya ==", "deger": sayı}}], "gerekce": "kısa açıklama"}}"""
 
     try:
-        # 2026-08-15: Google bazi hesaplara YENI "AQ." formatinda anahtar
-        # veriyor - bu format URL'nin sonuna "?key=..." eklendiginde
-        # calismiyor (Google'in kendi gelistirici forumunda bilinen,
-        # cozulmemis bir sorun). Bunun yerine "x-goog-api-key" header'i
-        # ile deniyoruz - dokumantasyonda gecen alternatif yontem.
-        resp = requests.post(
-            f"https://generativelanguage.googleapis.com/v1beta/models/{GEMINI_MODEL}:generateContent",
-            headers={"x-goog-api-key": GEMINI_API_KEY, "Content-Type": "application/json"},
-            json={"contents": [{"parts": [{"text": prompt}]}]},
-            timeout=30,
-        )
-        resp.raise_for_status()
-        data = resp.json()
-        metin = data["candidates"][0]["content"]["parts"][0]["text"]
+        # 2026-08-15: Header'a tasima da cozmedi - bu, Google'in yeni "AQ."
+        # formatlı anahtarlarının ham REST endpoint'inde (query VEYA header,
+        # ikisi de) hiç çalışmadığı, bilinen çözülmemiş bir Google sorunu
+        # olduğunu doğruluyor. Resmi google-genai SDK'sına geçildi - SDK
+        # kimlik doğrulamayı kendi içinde farklı ele alabiliyor, ham
+        # REST'te çalışmayan bu anahtar türüyle çalışma ihtimali daha
+        # yüksek. requirements.txt'ye google-genai eklenmesi gerekiyor.
+        from google import genai
+        client = genai.Client(api_key=GEMINI_API_KEY)
+        resp = client.models.generate_content(model=GEMINI_MODEL, contents=prompt)
+        metin = resp.text
         metin = metin.strip().removeprefix("```json").removeprefix("```").removesuffix("```").strip()
         h = json.loads(metin)
     except Exception as e:

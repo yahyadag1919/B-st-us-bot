@@ -20,3 +20,9 @@ numpy>=1.26               # gösterge hesapları
 xgboost>=2.0.0             # model.pkl'nin eğitildiği algoritma
 scikit-learn>=1.3.0        # train/test ayrımı, doğruluk metrikleri
 joblib>=1.3.0              # model.pkl'yi diskten yüklemek için
+
+# Ar-Ge Botu (2026-08-15) — Gemini API'ye hipotez sormak için resmi SDK.
+# Ham REST istegi (?key=... veya header) Google'in yeni "AQ." formatli
+# anahtarlariyla calismiyordu (Google'in kendi bilinen, cozulmemis sorunu) -
+# resmi SDK kimlik dogrulamayi kendi icinde farkli ele alabiliyor.
+google-genai>=0.3.0
