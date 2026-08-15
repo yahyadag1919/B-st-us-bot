@@ -407,9 +407,14 @@ SADECE şu JSON formatında cevap ver, başka hiçbir metin ekleme:
 {{"isim": "kisa_isim", "yon": "LONG veya SHORT", "kosullar": [{{"ozellik": "...", "operator": "< veya <= veya > veya >= veya ==", "deger": sayı}}], "gerekce": "kısa açıklama"}}"""
 
     try:
+        # 2026-08-15: Google bazi hesaplara YENI "AQ." formatinda anahtar
+        # veriyor - bu format URL'nin sonuna "?key=..." eklendiginde
+        # calismiyor (Google'in kendi gelistirici forumunda bilinen,
+        # cozulmemis bir sorun). Bunun yerine "x-goog-api-key" header'i
+        # ile deniyoruz - dokumantasyonda gecen alternatif yontem.
         resp = requests.post(
             f"https://generativelanguage.googleapis.com/v1beta/models/{GEMINI_MODEL}:generateContent",
-            params={"key": GEMINI_API_KEY},
+            headers={"x-goog-api-key": GEMINI_API_KEY, "Content-Type": "application/json"},
             json={"contents": [{"parts": [{"text": prompt}]}]},
             timeout=30,
         )
