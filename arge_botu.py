@@ -49,7 +49,7 @@ import threading
 # mesajlarında görünür kılmak için (2026-08-17: 3 kez üst üste "aynı
 # sonuç geldi" şüphesi sonrası eklendi - deploy'un gerçekten güncel
 # olup olmadığını KANITLA göstermek için).
-ARGE_KOD_SURUMU = "v5-relative-strength-agirlik-2026-08-17"
+ARGE_KOD_SURUMU = "v6-tarih-teshis-2026-08-17"
 import warnings
 from datetime import datetime, timezone
 
@@ -847,6 +847,7 @@ def hesap_makinesi_backtest(tarih_str: str) -> str:
           f"hesaplandı (filtre yok).", flush=True)
 
     sonuclar = []
+    ilk_ornek_notu = ""
     for ticker, karar in kararlar.items():
         df = ticker_df_cache.get(ticker)
         if df is None or hedef_tarih not in df.index:
@@ -854,8 +855,18 @@ def hesap_makinesi_backtest(tarih_str: str) -> str:
         idx = df.index.get_loc(hedef_tarih)
         if idx + 1 >= len(df):
             continue  # ertesi gun verisi henuz yok (gelecek tarih)
+        entry_tarihi = df.index[idx]
+        ertesi_tarihi = df.index[idx + 1]
+        if ertesi_tarihi <= entry_tarihi:
+            print(f"[ARGE] UYARI: {ticker} için 'ertesi gün' tarihi ({ertesi_tarihi.date()}) "
+                  f"giriş tarihinden ({entry_tarihi.date()}) sonra değil - atlandı", flush=True)
+            continue
         entry = df.iloc[idx]["close"]
         ertesi_kapanis = df.iloc[idx + 1]["close"]
+        if not ilk_ornek_notu:
+            ilk_ornek_notu = (f"🔍 Örnek (ilk hisse, {ticker}): giriş tarihi={entry_tarihi.date()} "
+                              f"(kapanış={entry:.2f}), ertesi gün tarihi={ertesi_tarihi.date()} "
+                              f"(kapanış={ertesi_kapanis:.2f})\n\n")
         getiri = (ertesi_kapanis - entry) / entry * 100
         dogru = (karar["yon"] == "LONG" and getiri > 0) or (karar["yon"] == "SHORT" and getiri < 0)
         sonuclar.append({
@@ -882,7 +893,7 @@ def hesap_makinesi_backtest(tarih_str: str) -> str:
         for s in sonuclar
     )
     return (
-        f"{duzeltme_notu}"
+        f"{duzeltme_notu}{ilk_ornek_notu}"
         f"🧮 [HESAP MAKİNESİ TESTİ] {hedef_tarih.date()} kapanışı → ertesi gün\n\n"
         f"Sonuç: {dogru_n}/{n} doğru (%{dogru_n/n*100:.1f})\n\n{detay}\n\n"
         f"⚠️ Bu, geçmişten 'öğrenmiş' bir model DEĞİL — her göstergeye "
