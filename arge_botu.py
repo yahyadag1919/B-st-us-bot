@@ -49,7 +49,7 @@ import threading
 # mesajlarında görünür kılmak için (2026-08-17: 3 kez üst üste "aynı
 # sonuç geldi" şüphesi sonrası eklendi - deploy'un gerçekten güncel
 # olup olmadığını KANITLA göstermek için).
-ARGE_KOD_SURUMU = "v4-katki-sinirlama-2026-08-17"
+ARGE_KOD_SURUMU = "v5-relative-strength-agirlik-2026-08-17"
 import warnings
 from datetime import datetime, timezone
 
@@ -633,27 +633,25 @@ def hesapla_yon_kod_ile(gostergeler: dict) -> dict:
     (LONG ya da SHORT) üretilir. Her göstergenin katkısı ayrı ayrı
     dönüyor ki şeffaf olsun - 'kara kutu' değil, hangi göstergenin ne
     kadar katkı yaptığı görülebiliyor.
-    2026-08-17 İKİNCİ DÜZELTME (ilk RSI/MFI/Stochastic düzeltmesi
-    yetmedi - /hesap_debug ASELS 2026-07-09 ile bulundu): SMA20/SMA50
-    uzaklığı, VWAP uzaklığı, kapanış-zirve konumu, relative strength ve
-    günlük değişim - bunların 5'i de ASLINDA BAĞIMSIZ DEĞİL, hepsi
-    "bugün fiyat ne kadar hareket etti" gerçeğinin FARKLI matematiksel
-    yansımaları. Sert TEK GÜNLÜK bir hareket olduğunda (ör. ASELS'in
-    %-4.84 düştüğü gün) bu 5 gösterge AYNI OLAYI 5 KERE sayıp skoru
-    tek başına ele geçiriyor, RSI/MACD/CMF gibi gerçekten bağımsız
-    göstergeleri boğuyor - VE literatürde bilinen "sert tek günlük
-    hareketler ertesi gün kısmen tepki/geri döner" olgusunun tam tersi
-    yönde aşırı güvenli bir karar üretiyor. ÇÖZÜM: her faktörün katkısı
-    ±KATKI_SINIRI ile SINIRLANIYOR (clip) - tek bir olay artık skoru
-    tek başına domine edemiyor."""
+    2026-08-17 ÜÇÜNCÜ DÜZELTME (4 gerçek tarihte test edildi - 66/116 = %56.9
+    genel doğruluk ama 3 tarihte hisselerin %83-90'ı SHORT, 1 tarihte
+    %96.6'sı LONG çıktı - sistem HİSSEYE ÖZEL değil, "o günkü genel piyasa
+    havasını 29 hisseye kopyalıyor"du. Sebep: SMA20/SMA50/VWAP uzaklığı,
+    momentum gibi göstergeler büyük ölçüde GENEL PİYASA TRENDİYLE
+    KORELE - bir hisseyi değil, o günkü piyasayı ölçüyorlar. Kullanıcının
+    isteğiyle: relative_strength (hissenin ENDEKSE GÖRE, yani piyasa
+    trendinden ARINDIRILMIŞ ayrışması - tanım gereği hisseye özel) ağırlığı
+    ARTIRILDI, piyasa-trendiyle-korele göstergelerin (SMA/VWAP uzaklığı)
+    ağırlığı AZALTILDI - sistem artık 'piyasa ne yapıyor' yerine 'bu hisse
+    piyasadan ne kadar farklı davranıyor' sorusuna daha çok odaklanıyor."""
     KATKI_SINIRI = 3.0
 
     def g(ad):
         v = gostergeler.get(ad)
         return float(v) if v is not None else 0.0
 
-    def sinirla(deger):
-        return max(-KATKI_SINIRI, min(KATKI_SINIRI, deger))
+    def sinirla(deger, sinir=KATKI_SINIRI):
+        return max(-sinir, min(sinir, deger))
 
     katkilar = {
         "RSI (50 merkezli, trend-takip)": sinirla((g("rsi14") - 50) / 10),
@@ -661,13 +659,15 @@ def hesapla_yon_kod_ile(gostergeler: dict) -> dict:
         "CMF": sinirla(g("cmf") * 10),
         "MFI (50 merkezli, trend-takip)": sinirla((g("mfi") - 50) / 10),
         "Stochastic %K (50 merkezli, trend-takip)": sinirla((g("stoch_k") - 50) / 10),
-        "SMA20'ye uzaklık": sinirla(g("dist_sma20_pct")),
-        "SMA50'ye uzaklık": sinirla(g("dist_sma50_pct")),
-        "VWAP'a uzaklık (yaklaşık)": sinirla(g("vwap_dist_pct")),
+        # Piyasa-genel-trendle KORELE gostergeler - agirlik AZALTILDI (x0.5)
+        "SMA20'ye uzaklık (azaltılmış ağırlık)": sinirla(g("dist_sma20_pct") * 0.5),
+        "SMA50'ye uzaklık (azaltılmış ağırlık)": sinirla(g("dist_sma50_pct") * 0.5),
+        "VWAP'a uzaklık (azaltılmış ağırlık)": sinirla(g("vwap_dist_pct") * 0.5),
         "Kapanış-zirve konumu (50 merkezli)": sinirla((g("close_to_high_pct") - 50) / 10),
-        "Endekse göre relative strength": sinirla(g("relative_strength")),
+        # HİSSEYE ÖZEL (piyasa trendinden arındırılmış) - agirlik ARTIRILDI (x2)
+        "Endekse göre relative strength (artırılmış ağırlık)": sinirla(g("relative_strength") * 2, sinir=KATKI_SINIRI * 1.5),
         "Gap": sinirla(g("gap_pct")),
-        "Günlük değişim (momentum)": sinirla(g("pct_change")),
+        "Günlük değişim (momentum, azaltılmış ağırlık)": sinirla(g("pct_change") * 0.5),
     }
     # volume_factor yon vermez (buyukluk gostergesi), sadece MEVCUT
     # toplamin buyuklugunu carpanla guclendirir - hesaplamaya KATILIYOR,
@@ -779,7 +779,6 @@ def hesap_makinesi_backtest(tarih_str: str) -> str:
     duzeltme_notu = ""
 
     if hedef_tarih.weekday() >= 5:  # 5=Cumartesi, 6=Pazar
-        # En yakin ONCEKI is gunune (Cuma'ya) kaydir - BIST o gun zaten kapali
         gun_farki = hedef_tarih.weekday() - 4
         hedef_tarih = hedef_tarih - pd.Timedelta(days=gun_farki)
         duzeltme_notu = (f"⚠️ {orijinal_tarih_str} bir {['Pazartesi','Salı','Çarşamba','Perşembe','Cuma','Cumartesi','Pazar'][pd.Timestamp(orijinal_tarih_str).weekday()]} "
@@ -791,6 +790,22 @@ def hesap_makinesi_backtest(tarih_str: str) -> str:
     if index_df is not None and not index_df.empty:
         index_df.index = pd.to_datetime(index_df.index).tz_localize(None)
         index_pct = (index_df["Close"] - index_df["Close"].shift(1)) / index_df["Close"].shift(1) * 100
+
+        # 2026-08-17: HAFTASONU DISINDA da BIST kapali olabilir (resmi tatiller,
+        # ornegin 19 Mayis) - hafta ici kontrolu bunlari YAKALAMAZ. Bunun yerine
+        # XU100 endeksinin KENDI VERISINI (zaten cekilmis) "gercekten islem
+        # gunu muydu" sorusunun otoritesi olarak kullaniyoruz - herhangi bir
+        # tatil takvimi ELLE TANIMLAMAYA gerek kalmadan TUM tatilleri
+        # genel olarak yakalar.
+        if hedef_tarih not in index_df.index and not duzeltme_notu:
+            onceki_gunler = index_df.index[index_df.index <= hedef_tarih]
+            if len(onceki_gunler) > 0:
+                yeni_tarih = onceki_gunler.max()
+                if yeni_tarih != hedef_tarih:
+                    duzeltme_notu = (f"⚠️ {orijinal_tarih_str} tarihinde BIST kapalıydı "
+                                     f"(muhtemelen resmi tatil). En yakın önceki işlem "
+                                     f"gününe ({yeni_tarih.date()}) kaydırıldı.\n\n")
+                    hedef_tarih = yeni_tarih
 
     ticker_gostergeleri = {}
     ticker_df_cache = {}
