@@ -751,7 +751,10 @@ def hesap_makinesi_backtest(tarih_str: str) -> str:
 
 def build_hesap_rapor() -> str:
     """/hesap_rapor - hesap_makinesi_backtest ile şimdiye kadar biriken
-    TÜM test sonuçlarının toplamı - tek bir tarih değil, genel doğruluk."""
+    TÜM test sonuçlarının toplamı - tek bir tarih değil, genel doğruluk.
+    LONG/SHORT ayrı gösteriliyor - Gemini'nin bir yöne yaslanma (bias)
+    eğilimi olup olmadığını görmek için (ilk testte %72 SHORT çağrısı
+    bulunmuştu, bu potansiyel bir sorun işareti)."""
     if not os.path.exists(HESAP_TEST_HISTORY_FILE):
         return "🧮 [HESAP MAKİNESİ RAPORU] Henüz hiç test yapılmadı. /hesap_test TARİH ile başlat."
     with open(HESAP_TEST_HISTORY_FILE, newline="", encoding="utf-8") as f:
@@ -761,12 +764,50 @@ def build_hesap_rapor() -> str:
     n = len(satirlar)
     dogru_n = sum(int(s["dogru_mu"]) for s in satirlar)
     tarihler = sorted(set(s["test_tarihi"] for s in satirlar))
+
+    uzun = [s for s in satirlar if s["yon"] == "LONG"]
+    kisa = [s for s in satirlar if s["yon"] == "SHORT"]
+    satir_ekle = []
+    if uzun:
+        dn = sum(int(s["dogru_mu"]) for s in uzun)
+        satir_ekle.append(f"  LONG: {len(uzun)} çağrı, %{dn/len(uzun)*100:.1f} doğru")
+    if kisa:
+        dn = sum(int(s["dogru_mu"]) for s in kisa)
+        satir_ekle.append(f"  SHORT: {len(kisa)} çağrı, %{dn/len(kisa)*100:.1f} doğru")
+    yon_dagilimi = f"  Dağılım: %{len(uzun)/n*100:.0f} LONG / %{len(kisa)/n*100:.0f} SHORT"
+
     return (
         f"🧮 [HESAP MAKİNESİ RAPORU]\n"
         f"Toplam test edilen karar: {n} ({len(tarihler)} farklı tarih)\n"
         f"Genel doğruluk: %{dogru_n/n*100:.1f} ({dogru_n}/{n})\n\n"
+        f"{yon_dagilimi}\n" + "\n".join(satir_ekle) + "\n\n"
         f"Test edilen tarihler: {', '.join(tarihler)}"
     )
+
+
+MAX_SERI_TARIH = int(os.environ.get("MAX_SERI_TARIH", "5"))
+
+
+def hesap_makinesi_backtest_seri(tarihler: list):
+    """Birden fazla tarihi ARKA ARKAYA test eder - her tarih kendi Gemini
+    isteğini harcıyor (kota ÖNEMLİ, bu yüzden MAX_SERI_TARIH ile
+    sınırlandırıldı). Her tarihin sonucu ayrı Telegram mesajı olarak
+    gönderilir (tek mesaja sığdırmaya çalışmak Telegram'ın karakter
+    sınırını aşardı), en sonda birikmiş TOPLAM rapor da eklenir."""
+    if len(tarihler) > MAX_SERI_TARIH:
+        send_telegram_message(f"⚠️ En fazla {MAX_SERI_TARIH} tarih birden test edilebilir "
+                              f"(Gemini kotasını korumak için) - {len(tarihler)} tarih verildi, "
+                              f"ilk {MAX_SERI_TARIH} tanesi kullanılacak.")
+        tarihler = tarihler[:MAX_SERI_TARIH]
+
+    for t in tarihler:
+        try:
+            send_telegram_message(hesap_makinesi_backtest(t))
+        except Exception as e:
+            send_telegram_message(f"🧮 {t} test hatası: {e}")
+        time.sleep(1)
+
+    send_telegram_message("📊 Seri test bitti — toplam birikmiş sonuç:\n\n" + build_hesap_rapor())
 
 
 def ask_gemini_for_hypothesis_batch() -> list:
@@ -1402,6 +1443,18 @@ def poll_arge_commands():
                     send_telegram_message(f"🧮 Test hata verdi: {e}")
         elif text.startswith("/hesap_rapor"):
             send_telegram_message(build_hesap_rapor())
+        elif text.startswith("/hesap_test_seri"):
+            parcalar = text.split()[1:]
+            if not parcalar:
+                send_telegram_message(f"Kullanım: /hesap_test_seri 2026-06-01 2026-06-08 2026-06-15 "
+                                       f"(en fazla {MAX_SERI_TARIH} tarih, boşlukla ayrılmış)")
+            else:
+                send_telegram_message(f"🧮 {len(parcalar)} tarih sırayla test edilecek, "
+                                       f"her biri ayrı mesaj olarak gelecek...")
+                try:
+                    hesap_makinesi_backtest_seri(parcalar)
+                except Exception as e:
+                    send_telegram_message(f"🧮 Seri test hatası: {e}")
         elif text.startswith("/arge_test"):
             send_telegram_message("🧪 Manuel test turu başlatılıyor...")
             try:
@@ -1418,7 +1471,8 @@ def poll_arge_commands():
                 "/hesap_sonuclari — anlık hesap makinesi yorumlarının isabet takibi\n"
                 "/hesap_test TARİH — geçmiş bir tarihte (örn. 2026-07-04) BIST hisseleri için "
                 "toplu karar aldırıp GERÇEK ertesi günle hemen karşılaştırır\n"
-                "/hesap_rapor — /hesap_test ile şimdiye kadar biriken toplam isabet oranı\n"
+                "/hesap_rapor — /hesap_test ile şimdiye kadar biriken toplam isabet oranı (LONG/SHORT ayrımıyla)\n"
+                f"/hesap_test_seri TARİH1 TARİH2 ... — birden fazla tarihi arka arkaya test eder (en fazla {MAX_SERI_TARIH})\n"
                 "/arge_test — hemen bir hipotez dener (test amaçlı)\n"
                 "/arge_yardim — bu liste"
             )
