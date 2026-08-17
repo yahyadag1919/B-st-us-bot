@@ -654,6 +654,16 @@ def hesap_makinesi_backtest(tarih_str: str) -> str:
     kaydediliyor ki zamanla "kaç tanesi doğru çıktı" birikip izlenebilsin."""
     import yfinance as yf
     hedef_tarih = pd.Timestamp(tarih_str)
+    orijinal_tarih_str = tarih_str
+    duzeltme_notu = ""
+
+    if hedef_tarih.weekday() >= 5:  # 5=Cumartesi, 6=Pazar
+        # En yakin ONCEKI is gunune (Cuma'ya) kaydir - BIST o gun zaten kapali
+        gun_farki = hedef_tarih.weekday() - 4
+        hedef_tarih = hedef_tarih - pd.Timedelta(days=gun_farki)
+        duzeltme_notu = (f"⚠️ {orijinal_tarih_str} bir {['Pazartesi','Salı','Çarşamba','Perşembe','Cuma','Cumartesi','Pazar'][pd.Timestamp(orijinal_tarih_str).weekday()]} "
+                         f"— BIST o gün kapalı. En yakın önceki işlem gününe "
+                         f"({hedef_tarih.date()}) kaydırıldı.\n\n")
 
     index_df = yf.Ticker("XU100.IS").history(period="2y", interval="1d")
     index_pct = None
@@ -685,12 +695,12 @@ def hesap_makinesi_backtest(tarih_str: str) -> str:
         time.sleep(0.2)
 
     if not ticker_gostergeleri:
-        return f"🧮 {tarih_str} için hiçbir hisseden veri alınamadı."
+        return f"{duzeltme_notu}🧮 {hedef_tarih.date()} için hiçbir hisseden veri alınamadı."
 
     print(f"[ARGE] {len(ticker_gostergeleri)} hisse için Gemini'den toplu karar isteniyor...", flush=True)
     kararlar = ask_gemini_for_verdicts_batch(ticker_gostergeleri)
     if not kararlar:
-        return f"🧮 {tarih_str}: Gemini'den geçerli karar alınamadı."
+        return f"{duzeltme_notu}🧮 {hedef_tarih.date()}: Gemini'den geçerli karar alınamadı."
 
     sonuclar = []
     for ticker, karar in kararlar.items():
@@ -705,13 +715,13 @@ def hesap_makinesi_backtest(tarih_str: str) -> str:
         getiri = (ertesi_kapanis - entry) / entry * 100
         dogru = (karar["yon"] == "LONG" and getiri > 0) or (karar["yon"] == "SHORT" and getiri < 0)
         sonuclar.append({
-            "test_tarihi": tarih_str, "ticker": ticker, "yon": karar["yon"],
+            "test_tarihi": str(hedef_tarih.date()), "ticker": ticker, "yon": karar["yon"],
             "guven": karar["guven"], "gerekce": karar.get("gerekce", ""),
             "ertesi_gun_getiri_pct": round(getiri, 3), "dogru_mu": 1 if dogru else 0,
         })
 
     if not sonuclar:
-        return (f"🧮 {tarih_str}: {len(kararlar)} karar alındı ama hiçbiri için "
+        return (f"{duzeltme_notu}🧮 {hedef_tarih.date()}: {len(kararlar)} karar alındı ama hiçbiri için "
                 f"ertesi günün gerçek verisi bulunamadı (tarih çok yeni olabilir).")
 
     exists = os.path.exists(HESAP_TEST_HISTORY_FILE)
@@ -728,7 +738,8 @@ def hesap_makinesi_backtest(tarih_str: str) -> str:
         for s in sonuclar
     )
     return (
-        f"🧮 [HESAP MAKİNESİ TESTİ] {tarih_str} kapanışı → ertesi gün\n\n"
+        f"{duzeltme_notu}"
+        f"🧮 [HESAP MAKİNESİ TESTİ] {hedef_tarih.date()} kapanışı → ertesi gün\n\n"
         f"Sonuç: {dogru_n}/{n} doğru (%{dogru_n/n*100:.1f})\n\n"
         f"{detay}\n\n"
         f"⚠️ Bu, geçmişten 'öğrenmiş' bir model değil — Gemini'nin genel "
