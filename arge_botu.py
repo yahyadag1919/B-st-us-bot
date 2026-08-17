@@ -44,6 +44,12 @@ import csv
 import json
 import time
 import threading
+
+# SÜRÜM ETİKETİ - Render'da hangi kodun gerçekten çalıştığını Telegram
+# mesajlarında görünür kılmak için (2026-08-17: 3 kez üst üste "aynı
+# sonuç geldi" şüphesi sonrası eklendi - deploy'un gerçekten güncel
+# olup olmadığını KANITLA göstermek için).
+ARGE_KOD_SURUMU = "v4-katki-sinirlama-2026-08-17"
 import warnings
 from datetime import datetime, timezone
 
@@ -756,6 +762,7 @@ def hesap_makinesi_debug(ticker: str, tarih_str: str) -> str:
         toplam += v
         lines.append(f"  {k}: {v:+.3f}")
     lines.append(f"\nTOPLAM SKOR: {sonuc['skor']:+.3f} → {sonuc['yon']}")
+    lines.append(f"\n🔖 Kod sürümü: {ARGE_KOD_SURUMU}")
     return "\n".join(lines)
 
 
@@ -867,7 +874,8 @@ def hesap_makinesi_backtest(tarih_str: str) -> str:
         f"standart bir teknik analiz kuralı uygulanıp oylanıyor, TAMAMEN "
         f"KOD İÇİNDE (Gemini'ye sorulmuyor, kotasız, deterministik). "
         f"Bu sonuç kalıcı geçmişe kaydedildi, /hesap_rapor ile birikimi "
-        f"görebilirsin."
+        f"görebilirsin.\n\n"
+        f"🔖 Kod sürümü: {ARGE_KOD_SURUMU}"
     )
 
 
@@ -1257,24 +1265,25 @@ def maybe_run_research():
 
 def send_startup_message():
     send_telegram_message(
-        "🔬 Ar-Ge Botu (aynı deploy içinde, izole) başlatıldı.\n\n"
-        "SADECE gece radarı için, SADECE AI/model araştırması yapıyor.\n\n"
-        f"Strateji: kapanışa yakın (~17:40-17:50) giriş, ertesi gün fiyat "
-        f"+%{TARGET_PCT:.1f} üzerine çıkınca satış. Gemini'nin seçtiği "
-        f"özelliklerle küçük bir XGBoost modeli eğitilip bu kurala göre "
-        f"test ediliyor.\n\n"
-        f"Tek karar kriteri: kazanma oranı ≥%{MIN_WIN_RATE_PCT:.0f} — "
-        f"10 sinyalden en az {int(MIN_WIN_RATE_PCT/10)} tanesinin gerçekten "
-        f"hedefe ulaşması gerekiyor.\n\n"
-        f"Tek bir istekte {BATCH_SIZE} hipotez birden isteniyor, kuyruğa "
-        f"alınıp Gemini'ye tekrar dokunmadan sırayla test ediliyor. Her "
-        f"{RESEARCH_COOLDOWN_MINUTES} dk'da bir kuyruktan bir tane çekiliyor.\n\n"
-        "⚠️ Bu bot SADECE araştırma yapar — hiçbir sinyal/emir üretmez, "
-        "gece radarına (overnight_radar.py) bağlı değildir. Sadece bir "
-        "hipotez 3 aşamayı da geçerse haber verir, o zaman bile hiçbir "
-        "sisteme otomatik bağlanmaz.\n\n"
+        f"🔬 Ar-Ge Botu (aynı deploy içinde, izole) başlatıldı.\n"
+        f"🔖 Kod sürümü: {ARGE_KOD_SURUMU}\n\n"
+        "SADECE gece radarı için çalışıyor. İki araç var:\n"
+        "  1) Hipotez araştırması (kural+AI kuyruğu, Gemini'ye soruyor)\n"
+        "  2) Hesap Makinesi — TAMAMEN KOD İÇİNDE (Gemini'siz), her "
+        "göstergeye standart teknik analiz kuralı uygulayıp oylayan, "
+        "deterministik bir LONG/SHORT hesaplayıcı\n\n"
+        "🧮 Hesap Makinesi komutları:\n"
+        "/hesap_test TARİH — o günün kapanışıyla BIST hisseleri için "
+        "toplu hesaplama yapıp ertesi günle karşılaştırır\n"
+        "/hesap_test_seri TARİH1 TARİH2 ... — birden fazla tarihi art arda\n"
+        "/hesap_debug TICKER TARİH — bir hissenin tam hesaplama dökümü\n"
+        "/hesap_rapor — birikmiş toplam isabet oranı\n"
+        "/hesap_makinesi TICKER — anlık canlı hesaplama\n\n"
+        "🔬 Hipotez araştırması komutları:\n"
         "/arge_rapor — şimdiye kadarki tüm denemelerin özeti\n"
-        "/arge_test — hemen bir hipotez dener (test amaçlı)"
+        "/arge_test — hemen bir hipotez dener (test amaçlı)\n\n"
+        "⚠️ Bu bot SADECE araştırma yapar — hiçbir sinyal/emir üretmez, "
+        "gece radarına (overnight_radar.py) bağlı değildir."
     )
 
 
