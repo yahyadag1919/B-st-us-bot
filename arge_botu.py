@@ -43,6 +43,7 @@ import os
 import csv
 import json
 import time
+import threading
 import warnings
 from datetime import datetime, timezone
 
@@ -1437,10 +1438,13 @@ def poll_arge_commands():
             else:
                 send_telegram_message(f"🧮 {parcalar[1]} için BIST hisseleri taranıyor, "
                                        f"Gemini'den toplu karar isteniyor...")
-                try:
-                    send_telegram_message(hesap_makinesi_backtest(parcalar[1]))
-                except Exception as e:
-                    send_telegram_message(f"🧮 Test hata verdi: {e}")
+
+                def _arka_plan_test(tarih):
+                    try:
+                        send_telegram_message(hesap_makinesi_backtest(tarih))
+                    except Exception as e:
+                        send_telegram_message(f"🧮 Test hata verdi: {e}")
+                threading.Thread(target=_arka_plan_test, args=(parcalar[1],), daemon=True).start()
         elif text.startswith("/hesap_rapor"):
             send_telegram_message(build_hesap_rapor())
         elif text.startswith("/hesap_test_seri"):
@@ -1449,20 +1453,27 @@ def poll_arge_commands():
                 send_telegram_message(f"Kullanım: /hesap_test_seri 2026-06-01 2026-06-08 2026-06-15 "
                                        f"(en fazla {MAX_SERI_TARIH} tarih, boşlukla ayrılmış)")
             else:
-                send_telegram_message(f"🧮 {len(parcalar)} tarih sırayla test edilecek, "
-                                       f"her biri ayrı mesaj olarak gelecek...")
-                try:
-                    hesap_makinesi_backtest_seri(parcalar)
-                except Exception as e:
-                    send_telegram_message(f"🧮 Seri test hatası: {e}")
+                send_telegram_message(f"🧮 {len(parcalar)} tarih sırayla test edilecek "
+                                       f"(ARKA PLANDA, ana botu bloklamadan), her biri ayrı mesaj "
+                                       f"olarak gelecek — birkaç dakika sürebilir...")
+
+                def _arka_plan_seri(tarihler):
+                    try:
+                        hesap_makinesi_backtest_seri(tarihler)
+                    except Exception as e:
+                        send_telegram_message(f"🧮 Seri test hatası: {e}")
+                threading.Thread(target=_arka_plan_seri, args=(parcalar,), daemon=True).start()
         elif text.startswith("/arge_test"):
-            send_telegram_message("🧪 Manuel test turu başlatılıyor...")
-            try:
-                run_ai_research_cycle()
-                send_telegram_message("🧪 Test turu bitti — onaylıysa yukarıda ayrı mesaj geldi, "
-                                       "değilse /arge_rapor ile son denemeyi görebilirsin.")
-            except Exception as e:
-                send_telegram_message(f"🧪 Test turu hata verdi: {e}")
+            send_telegram_message("🧪 Manuel test turu başlatılıyor (arka planda)...")
+
+            def _arka_plan_arge_test():
+                try:
+                    run_ai_research_cycle()
+                    send_telegram_message("🧪 Test turu bitti — onaylıysa yukarıda ayrı mesaj geldi, "
+                                           "değilse /arge_rapor ile son denemeyi görebilirsin.")
+                except Exception as e:
+                    send_telegram_message(f"🧪 Test turu hata verdi: {e}")
+            threading.Thread(target=_arka_plan_arge_test, daemon=True).start()
         elif text.startswith("/arge_yardim"):
             send_telegram_message(
                 "📖 Ar-Ge Botu komutları (sadece gece radarı için):\n"
