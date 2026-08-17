@@ -233,6 +233,16 @@ def _stoch_k(high, low, close, n=14):
     return (close - lo) / (hi - lo).replace(0, np.nan) * 100
 
 
+def _vwap_dist_pct(high, low, close, volume, n=20):
+    """VWAP (Hacim Ağırlıklı Ortalama Fiyat) - günlük bar verisiyle GÜN İÇİ
+    VWAP birebir hesaplanamaz (tick veri gerekir), bunun yerine N günlük
+    kayan VWAP'a olan uzaklık hesaplanıyor - kullanıcının istediği "VWAP"ı
+    kütüphaneye ekleyen, dürüstçe yaklaşık bir versiyon."""
+    tipik = (high + low + close) / 3
+    vwap = (tipik * volume).rolling(n).sum() / volume.rolling(n).sum().replace(0, np.nan)
+    return (close - vwap) / vwap.replace(0, np.nan) * 100
+
+
 # Kapanış-penceresi (proxy emir defteri) özellikleri — gerçek Level 2 emir
 # defteri verisi (Matriks vb.) hem lisanslı/ücretli hem Python/Linux'tan
 # programatik erişimi belirsiz - bunun yerine BEDAVA Yahoo 15dk verisinden,
@@ -248,7 +258,7 @@ CLOSING_PROXY_FEATURES = ["kapanis_hacim_orani", "kapanis_momentum_pct",
 BASE_FEATURE_LIBRARY = [
     "rsi14", "macd_hist", "bb_bandwidth", "atr_pct", "volume_factor", "cmf", "mfi",
     "stoch_k", "dist_sma20_pct", "dist_sma50_pct", "close_to_high_pct", "gap_pct",
-    "pct_change", "day_of_week", "relative_strength",
+    "pct_change", "day_of_week", "relative_strength", "vwap_dist_pct",
 ]
 FEATURE_LIBRARY = BASE_FEATURE_LIBRARY + CLOSING_PROXY_FEATURES
 
@@ -278,6 +288,7 @@ def compute_features(df: pd.DataFrame, index_pct_change: pd.Series = None) -> pd
     df["sma50"] = df["close"].rolling(50).mean()
     df["dist_sma20_pct"] = (df["close"] - df["sma20"]) / df["sma20"].replace(0, np.nan) * 100
     df["dist_sma50_pct"] = (df["close"] - df["sma50"]) / df["sma50"].replace(0, np.nan) * 100
+    df["vwap_dist_pct"] = _vwap_dist_pct(df["high"], df["low"], df["close"], df["volume"])
     df["close_to_high_pct"] = (df["close"] - df["low"]) / (df["high"] - df["low"]).replace(0, np.nan) * 100
     df["day_of_week"] = df.index.dayofweek
     if index_pct_change is not None:
@@ -573,6 +584,180 @@ def _call_gemini(prompt: str):
         return None
 
 
+# =============================================================================
+# HESAP MAKİNESİ v2 — Gemini'nin KENDİSİ analist gibi karar veriyor
+# =============================================================================
+# 2026-08-16 YENİDEN TASARIM: Kullanıcı önceki sürümü ("Gemini sadece hangi
+# özellik kullanılsın diye seçer, motor XGBoost eğitir") yanlış anlaşılma
+# olarak işaretledi - istediği İSTATİSTİKSEL BİR MODEL DEĞİL, Gemini'nin
+# TÜM gösterge değerlerine bakıp KENDİ akıl yürütmesiyle LONG/SHORT kararı
+# vermesi. Yani "geçmiş veriden öğrenen bir model" yerine "her seferinde
+# ham sayılara bakıp yorumlayan bir analist" mantığı. Bunu DÜRÜSTÇE
+# belirtmek gerekir: bu, geçmişten "öğrenmiyor" - Gemini'nin genel teknik
+# analiz bilgisini (RSI>70 aşırı alım gibi standart kurallar) her seferinde
+# yeniden uyguluyor. Gerçekten işe yarayıp yaramadığını SADECE backtest
+# gösterir - bu yüzden kullanıcının istediği tarih-bazlı test kuruldu.
+
+def _gostergeleri_hesapla(df: pd.DataFrame, tarih) -> dict:
+    """df'nin (compute_features çıkışı) belirli bir TARİHİNDEKİ (o tarihe
+    kadar hesaplanmış, İLERİ SIZINTI YOK) tüm gösterge değerlerini sözlük
+    olarak döner - Gemini'ye gönderilecek ham veri budur."""
+    if tarih not in df.index:
+        return None
+    satir = df.loc[tarih]
+    return {f: (round(float(satir[f]), 4) if pd.notna(satir[f]) else None) for f in BASE_FEATURE_LIBRARY}
+
+
+def ask_gemini_for_verdicts_batch(ticker_gostergeleri: dict) -> dict:
+    """TEK istekte BİRDEN FAZLA hisse için LONG/SHORT kararı ister - kota
+    tasarrufu için (hipotez toplu-isteğiyle AYNI mantık). Dönen: {ticker:
+    {"yon":..., "guven":..., "gerekce":...}} sözlüğü, ya da gecersiz/hatali
+    olanlar icin o ticker hic yoktur (sessizce atlanir)."""
+    prompt = f"""Sen deneyimli bir teknik analiz uzmanısın. Aşağıdaki BIST
+hisseleri için, kapanışa yakın (~17:40-17:50) alınan gösterge değerlerine
+bakarak her biri için ERTESİ GÜN piyasa açıldığında fiyatın YUKARI (LONG)
+mı AŞAĞI (SHORT) mı gideceğine dair kararını ver:
+
+{json.dumps(ticker_gostergeleri, ensure_ascii=False, indent=2)}
+
+SADECE şu JSON formatında (hisse kodu -> karar) cevap ver, başka hiçbir
+metin ekleme:
+{{"HİSSE_KODU": {{"yon": "LONG veya SHORT", "guven": 0-100 arası sayı, "gerekce": "kısa açıklama"}}, ...}}"""
+
+    cevap = _call_gemini(prompt)
+    if not isinstance(cevap, dict):
+        print("[ARGE] Gemini'den beklenen JSON sözlüğü gelmedi.", flush=True)
+        return {}
+
+    gecerliler = {}
+    for ticker, karar in cevap.items():
+        if (isinstance(karar, dict) and karar.get("yon") in ("LONG", "SHORT")
+                and isinstance(karar.get("guven"), (int, float))):
+            gecerliler[ticker] = karar
+        else:
+            print(f"[ARGE] {ticker} için geçersiz karar formatı, atlandı.", flush=True)
+    print(f"[ARGE] Toplu karar isteği: {len(cevap)} geldi, {len(gecerliler)} geçerli.", flush=True)
+    return gecerliler
+
+
+HESAP_TEST_HISTORY_FILE = _data_path("arge_hesap_test_gecmisi.csv")
+HESAP_TEST_FIELDS = ["test_tarihi", "ticker", "yon", "guven", "gerekce",
+                      "ertesi_gun_getiri_pct", "dogru_mu"]
+
+
+def hesap_makinesi_backtest(tarih_str: str) -> str:
+    """Kullanıcının istediği DOĞRULAMA TESTİ: verilen tarihin (örn.
+    '2026-07-04') kapanışındaki gösterge değerleriyle Gemini'den BIST
+    hisseleri için LONG/SHORT kararı alır, ERTESİ GÜNÜN GERÇEK sonucuyla
+    karşılaştırır. Otomatik döngüde YOK - /hesap_test KOMUTUYLA elle
+    tetikleniyor, sonuçlar kalıcı geçmişe (HESAP_TEST_HISTORY_FILE)
+    kaydediliyor ki zamanla "kaç tanesi doğru çıktı" birikip izlenebilsin."""
+    import yfinance as yf
+    hedef_tarih = pd.Timestamp(tarih_str)
+
+    index_df = yf.Ticker("XU100.IS").history(period="2y", interval="1d")
+    index_pct = None
+    if index_df is not None and not index_df.empty:
+        index_df.index = pd.to_datetime(index_df.index).tz_localize(None)
+        index_pct = (index_df["Close"] - index_df["Close"].shift(1)) / index_df["Close"].shift(1) * 100
+
+    ticker_gostergeleri = {}
+    ticker_df_cache = {}
+    for ticker in BIST_TICKERS:
+        try:
+            df = yf.Ticker(ticker).history(period="2y", interval="1d")
+            if df is None or df.empty or len(df) < 100:
+                continue
+            df = df.rename(columns={"Open": "open", "High": "high", "Low": "low",
+                                     "Close": "close", "Volume": "volume"})
+            df = df[["open", "high", "low", "close", "volume"]].copy()
+            df.index = pd.to_datetime(df.index).tz_localize(None)
+            df = compute_features(df, index_pct)
+            gostergeler = _gostergeleri_hesapla(df, hedef_tarih)
+            if gostergeler is None:
+                continue
+            # SIZINTI KONTROLU: hedef_tarih'ten SONRAKI hicbir satir kullanilmiyor -
+            # sadece o tarihe kadar hesaplanmis gosterge degerleri gonderiliyor.
+            ticker_gostergeleri[ticker] = gostergeler
+            ticker_df_cache[ticker] = df
+        except Exception as e:
+            print(f"[ARGE] {ticker} backtest veri hatası: {e}", flush=True)
+        time.sleep(0.2)
+
+    if not ticker_gostergeleri:
+        return f"🧮 {tarih_str} için hiçbir hisseden veri alınamadı."
+
+    print(f"[ARGE] {len(ticker_gostergeleri)} hisse için Gemini'den toplu karar isteniyor...", flush=True)
+    kararlar = ask_gemini_for_verdicts_batch(ticker_gostergeleri)
+    if not kararlar:
+        return f"🧮 {tarih_str}: Gemini'den geçerli karar alınamadı."
+
+    sonuclar = []
+    for ticker, karar in kararlar.items():
+        df = ticker_df_cache.get(ticker)
+        if df is None or hedef_tarih not in df.index:
+            continue
+        idx = df.index.get_loc(hedef_tarih)
+        if idx + 1 >= len(df):
+            continue  # ertesi gun verisi henuz yok (gelecek tarih)
+        entry = df.iloc[idx]["close"]
+        ertesi_kapanis = df.iloc[idx + 1]["close"]
+        getiri = (ertesi_kapanis - entry) / entry * 100
+        dogru = (karar["yon"] == "LONG" and getiri > 0) or (karar["yon"] == "SHORT" and getiri < 0)
+        sonuclar.append({
+            "test_tarihi": tarih_str, "ticker": ticker, "yon": karar["yon"],
+            "guven": karar["guven"], "gerekce": karar.get("gerekce", ""),
+            "ertesi_gun_getiri_pct": round(getiri, 3), "dogru_mu": 1 if dogru else 0,
+        })
+
+    if not sonuclar:
+        return (f"🧮 {tarih_str}: {len(kararlar)} karar alındı ama hiçbiri için "
+                f"ertesi günün gerçek verisi bulunamadı (tarih çok yeni olabilir).")
+
+    exists = os.path.exists(HESAP_TEST_HISTORY_FILE)
+    with open(HESAP_TEST_HISTORY_FILE, "a", newline="", encoding="utf-8") as f:
+        w = csv.DictWriter(f, fieldnames=HESAP_TEST_FIELDS)
+        if not exists:
+            w.writeheader()
+        w.writerows(sonuclar)
+
+    n = len(sonuclar)
+    dogru_n = sum(s["dogru_mu"] for s in sonuclar)
+    detay = "\n".join(
+        f"  {'✅' if s['dogru_mu'] else '❌'} {s['ticker']}: {s['yon']} → gerçek {s['ertesi_gun_getiri_pct']:+.2f}%"
+        for s in sonuclar
+    )
+    return (
+        f"🧮 [HESAP MAKİNESİ TESTİ] {tarih_str} kapanışı → ertesi gün\n\n"
+        f"Sonuç: {dogru_n}/{n} doğru (%{dogru_n/n*100:.1f})\n\n"
+        f"{detay}\n\n"
+        f"⚠️ Bu, geçmişten 'öğrenmiş' bir model değil — Gemini'nin genel "
+        f"teknik analiz bilgisiyle her seferinde yeniden karar vermesi. "
+        f"Bu sonuç kalıcı geçmişe kaydedildi, /hesap_rapor ile birikimi "
+        f"görebilirsin."
+    )
+
+
+def build_hesap_rapor() -> str:
+    """/hesap_rapor - hesap_makinesi_backtest ile şimdiye kadar biriken
+    TÜM test sonuçlarının toplamı - tek bir tarih değil, genel doğruluk."""
+    if not os.path.exists(HESAP_TEST_HISTORY_FILE):
+        return "🧮 [HESAP MAKİNESİ RAPORU] Henüz hiç test yapılmadı. /hesap_test TARİH ile başlat."
+    with open(HESAP_TEST_HISTORY_FILE, newline="", encoding="utf-8") as f:
+        satirlar = list(csv.DictReader(f))
+    if not satirlar:
+        return "🧮 [HESAP MAKİNESİ RAPORU] Henüz hiç test yapılmadı."
+    n = len(satirlar)
+    dogru_n = sum(int(s["dogru_mu"]) for s in satirlar)
+    tarihler = sorted(set(s["test_tarihi"] for s in satirlar))
+    return (
+        f"🧮 [HESAP MAKİNESİ RAPORU]\n"
+        f"Toplam test edilen karar: {n} ({len(tarihler)} farklı tarih)\n"
+        f"Genel doğruluk: %{dogru_n/n*100:.1f} ({dogru_n}/{n})\n\n"
+        f"Test edilen tarihler: {', '.join(tarihler)}"
+    )
+
+
 def ask_gemini_for_hypothesis_batch() -> list:
     """TEK istekte BATCH_SIZE (15) kadar ozellik-kombinasyonu birden ister -
     kota "kac soru sordun" uzerinden isledigi icin, 15 fikri 1 istekte
@@ -641,10 +826,27 @@ def _write_queue(queue: list):
 
 def get_next_hypothesis():
     """Kuyruk bossa YENI bir toplu istek atar (kota tuketen tek an burasi),
-    doluysa kuyruktan bir tane cikarip DONER - kota harcamadan."""
+    doluysa kuyruktan bir tane cikarip DONER - kota harcamadan.
+    Her yeni toplu istekte, kullanicinin fikrini de ekliyoruz: Gemini'nin
+    sectigi kucuk alt kumelerin YANI SIRA, TUM kutuphaneyi (RSI, MACD,
+    VWAP, hacim, kapanis-penceresi - hepsi) BIRDEN kullanan iki hipotez
+    (LONG+SHORT) da kuyruga ekleniyor - "tek pencere degil, hepsini
+    birlikte hesapla" fikrinin dogrudan karsiligi. Bu ikisi Gemini'den
+    gelmedigi (elle, guvenilir sekilde tanimlandigi) icin 2-6 ozellik
+    sinirina tabi degil - validate_ai_hypothesis'i BYPASS ediyor, ÇÜNKÜ
+    bu sinirlama sadece Gemini kaynakli/kontrolsuz girdiler icin var."""
     q = _read_queue()
     if not q:
         q = ask_gemini_for_hypothesis_batch()
+        for yon in ("LONG", "SHORT"):
+            q.append({
+                "isim": f"tum_gostergeler_birlikte_{yon.lower()}", "yon": yon,
+                "kullanilacak_ozellikler": list(FEATURE_LIBRARY),
+                "gerekce": "Kullanıcının fikri: hiçbir tek gösterge/pencere yeterli "
+                           "değil - RSI, MACD, VWAP, hacim, kapanış-penceresi ve "
+                           "diğer tüm göstergeler BİRLİKTE modele veriliyor, "
+                           "XGBoost hangi kombinasyonun işe yaradığını kendi öğreniyor.",
+            })
         if not q:
             return None
     h = q.pop(0)
@@ -874,6 +1076,7 @@ def maybe_run_research():
     try:
         run_ai_research_cycle()
         reconfirm_pending_hypotheses()
+        check_hesap_makinesi_sonuclari()
     except Exception as e:
         print(f"[ARGE] Döngü hatası: {e}", flush=True)
 
@@ -933,6 +1136,203 @@ def build_report() -> str:
 
 
 # =============================================================================
+# HESAP MAKİNESİ — istek üzerine, herhangi bir hisse için ANLIK tam gösterge
+# dökümü + varsa onaylı/kesinleşmiş modelin verdiği LONG/SHORT tahmini.
+# =============================================================================
+
+HESAP_MAKINESI_LOG_FILE = _data_path("arge_hesap_makinesi_log.csv")
+HESAP_MAKINESI_LOG_FIELDS = ["tarih", "ticker", "yon", "guven", "gerekce",
+                              "entry_price", "checked_at", "sonuc", "gerceklesen_pct"]
+
+
+def _read_hesap_log():
+    if not os.path.exists(HESAP_MAKINESI_LOG_FILE):
+        return []
+    with open(HESAP_MAKINESI_LOG_FILE, newline="", encoding="utf-8") as f:
+        return list(csv.DictReader(f))
+
+
+def _append_hesap_log(row: dict):
+    exists = os.path.exists(HESAP_MAKINESI_LOG_FILE)
+    with open(HESAP_MAKINESI_LOG_FILE, "a", newline="", encoding="utf-8") as f:
+        w = csv.DictWriter(f, fieldnames=HESAP_MAKINESI_LOG_FIELDS)
+        if not exists:
+            w.writeheader()
+        w.writerow(row)
+
+
+def build_hesap_makinesi(ticker: str) -> str:
+    """GERÇEK 'hesap makinesi' - istatistiksel model EĞİTMİYOR. Bir
+    hissenin TÜM güncel gösterge değerlerini (RSI, MACD, VWAP, hacim,
+    Bollinger, ATR, CMF, MFI, Stochastic, kapanış-penceresi proxy'leri,
+    vb.) hesaplayıp doğrudan Gemini'ye gösteriyor - bir insan analistin
+    ekrana bakıp yorum yapması gibi. Gemini LONG/SHORT + gerekçe veriyor.
+    ⚠️ BU İSTATİSTİKSEL OLARAK DOĞRULANMIŞ BİR TAHMİN DEĞİL - sadece
+    Gemini'nin sayılara bakarak ürettiği bir YORUM. Her çağrı kaydediliyor
+    ve ertesi gün gerçekte ne olduğu kontrol edilip (check_hesap_makinesi_sonuclari
+    ile) zamanla Gemini'nin bu yorumlarının gerçekten isabetli olup
+    olmadığı görülebilecek - kör güven yerine izlenebilir bir kayıt."""
+    import yfinance as yf
+    if not ticker.upper().endswith(".IS"):
+        ticker = ticker.upper() + ".IS"
+    else:
+        ticker = ticker.upper()
+
+    try:
+        df = yf.Ticker(ticker).history(period="6mo", interval="1d")
+        if df is None or df.empty or len(df) < 60:
+            return f"🧮 {ticker}: yeterli geçmiş veri yok (en az ~60 gün gerekli)."
+        df = df.rename(columns={"Open": "open", "High": "high", "Low": "low",
+                                 "Close": "close", "Volume": "volume"})
+        df = df[["open", "high", "low", "close", "volume"]].copy()
+        df.index = pd.to_datetime(df.index).tz_localize(None)
+
+        index_pct = None
+        try:
+            idf = yf.Ticker("XU100.IS").history(period="6mo", interval="1d")
+            if idf is not None and not idf.empty:
+                idf.index = pd.to_datetime(idf.index).tz_localize(None)
+                index_pct = (idf["Close"] - idf["Close"].shift(1)) / idf["Close"].shift(1) * 100
+        except Exception:
+            pass
+
+        df = compute_features(df, index_pct)
+        son = df.iloc[-1]
+        entry_price = float(son["close"])
+    except Exception as e:
+        return f"🧮 {ticker}: veri çekme hatası — {e}"
+
+    gosterge_satirlari = []
+    for ad, deger in [
+        ("RSI14", son["rsi14"]), ("MACD histogram", son["macd_hist"]),
+        ("Bollinger genişliği %", son["bb_bandwidth"]), ("ATR %", son["atr_pct"]),
+        ("Hacim oranı (20g ort.)", son["volume_factor"]), ("CMF", son["cmf"]),
+        ("MFI", son["mfi"]), ("Stochastic %K", son["stoch_k"]),
+        ("SMA20'ye uzaklık %", son["dist_sma20_pct"]), ("SMA50'ye uzaklık %", son["dist_sma50_pct"]),
+        ("VWAP'a uzaklık % (yaklaşık)", son["vwap_dist_pct"]),
+        ("Kapanış-zirve konumu %", son["close_to_high_pct"]), ("Gap %", son["gap_pct"]),
+        ("Günlük değişim %", son["pct_change"]), ("Relative strength (XU100'e göre)", son["relative_strength"]),
+    ]:
+        gosterge_satirlari.append(f"{ad}: {deger:.2f}" if pd.notna(deger) else f"{ad}: bilinmiyor")
+
+    prompt = f"""Sen bir teknik analiz uzmanısın. {ticker} hissesi için, bugünün
+kapanışına ({df.index[-1].date()}) ait şu göstergeler hesaplandı:
+
+{chr(10).join(gosterge_satirlari)}
+
+Bu göstergelere bakarak, ERTESİ GÜN piyasa açıldığında bu hissenin
+YÖNÜNÜ (LONG=yukarı, SHORT=aşağı) tahmin et. Kararını SADECE yukarıdaki
+sayılara dayandır, başka veri uydurma.
+
+SADECE şu JSON formatında cevap ver, başka hiçbir metin ekleme:
+{{"yon": "LONG veya SHORT", "guven": 0-100 arası bir sayı (ne kadar eminsin), "gerekce": "kısa açıklama, hangi göstergelere dayandın"}}"""
+
+    yanit = _call_gemini(prompt)
+    lines = [f"🧮 [HESAP MAKİNESİ] {ticker} — {df.index[-1].date()} kapanışı", ""]
+    lines.extend(f"  {s}" for s in gosterge_satirlari)
+    lines.append("")
+
+    if not isinstance(yanit, dict) or "yon" not in yanit:
+        lines.append("⚠️ Gemini'den geçerli bir yorum alınamadı, sadece göstergeler yukarıda.")
+        return "\n".join(lines)
+
+    yon = yanit.get("yon", "").upper()
+    if yon not in ("LONG", "SHORT"):
+        lines.append("⚠️ Gemini'den geçerli bir yön gelmedi, sadece göstergeler yukarıda.")
+        return "\n".join(lines)
+
+    guven = yanit.get("guven", "?")
+    gerekce = yanit.get("gerekce", "")
+    yon_ikon = "🟢 LONG" if yon == "LONG" else "🔴 SHORT"
+    lines.append(f"{yon_ikon} — Gemini'nin görüşü (güven: %{guven})")
+    lines.append(f"Gerekçe: {gerekce}")
+    lines.append("")
+    lines.append("⚠️ Bu İSTATİSTİKSEL OLARAK DOĞRULANMIŞ bir tahmin DEĞİL — sadece "
+                 "Gemini'nin sayılara bakarak ürettiği bir yorum. Kaydedildi, ertesi "
+                 "gün /hesap_sonuclari ile gerçekte ne olduğu görülüp zamanla isabet "
+                 "oranı takip edilebilecek.")
+
+    _append_hesap_log({
+        "tarih": datetime.now(timezone.utc).isoformat(), "ticker": ticker, "yon": yon,
+        "guven": guven, "gerekce": gerekce, "entry_price": entry_price,
+        "checked_at": "", "sonuc": "PENDING", "gerceklesen_pct": "",
+    })
+    return "\n".join(lines)
+
+
+def check_hesap_makinesi_sonuclari():
+    """Gecmis /hesap_makinesi cagrilarinin ERTESI GUN 10:00-12:00 penceresine
+    bakip Gemini'nin yorumu dogru cikmis mi kontrol eder - overnight_radar.py
+    ile AYNI pencere/mantik. SONUC otomatik Telegram'a gitmez, sadece
+    kaydedilir - /hesap_sonuclari ile sorgulanir, spam yapilmaz."""
+    import yfinance as yf
+    from zoneinfo import ZoneInfo
+    rows = _read_hesap_log()
+    if not rows:
+        return
+    now_ist = datetime.now(timezone.utc).astimezone(ZoneInfo("Europe/Istanbul"))
+    degisti = False
+    for r in rows:
+        if r["sonuc"] != "PENDING":
+            continue
+        try:
+            olusturma = datetime.fromisoformat(r["tarih"]).astimezone(ZoneInfo("Europe/Istanbul"))
+        except Exception:
+            continue
+        gun = olusturma.date()
+        if now_ist.date() <= gun:
+            continue  # ertesi gun henuz gelmedi
+        try:
+            df15 = yf.Ticker(r["ticker"]).history(period="60d", interval="15m")
+            if df15 is None or df15.empty:
+                continue
+            idx = pd.to_datetime(df15.index)
+            idx = idx.tz_convert("Europe/Istanbul") if idx.tz is not None else idx.tz_localize("Europe/Istanbul")
+            df15.index = idx
+            df15["gun_norm"] = df15.index.normalize().tz_localize(None)
+            dakika = df15.index.hour * 60 + df15.index.minute
+            pencere = df15[(dakika >= 600) & (dakika < 720)]
+            gunler = sorted(d for d in pencere["gun_norm"].unique() if d.date() > gun)
+            if not gunler:
+                continue
+            hedef_gun = gunler[0]
+            if (hedef_gun.date() - gun).days > 5:
+                continue
+            tepe = float(pencere[pencere["gun_norm"] == hedef_gun]["High"].max())
+            entry = float(r["entry_price"])
+            gerceklesen = (tepe - entry) / entry * 100
+            if r["yon"] == "SHORT":
+                gerceklesen = -gerceklesen
+            r["gerceklesen_pct"] = round(gerceklesen, 2)
+            r["sonuc"] = "DOGRU" if gerceklesen > 0 else "YANLIS"
+            r["checked_at"] = now_ist.isoformat()
+            degisti = True
+        except Exception as e:
+            print(f"[ARGE] {r['ticker']} hesap makinesi sonuç kontrolü hatası: {e}", flush=True)
+    if degisti:
+        with open(HESAP_MAKINESI_LOG_FILE, "w", newline="", encoding="utf-8") as f:
+            w = csv.DictWriter(f, fieldnames=HESAP_MAKINESI_LOG_FIELDS)
+            w.writeheader()
+            w.writerows(rows)
+
+
+def build_hesap_sonuclari() -> str:
+    rows = _read_hesap_log()
+    if not rows:
+        return "🧮 Henüz hiç /hesap_makinesi çağrısı yapılmadı."
+    kapanan = [r for r in rows if r["sonuc"] in ("DOGRU", "YANLIS")]
+    lines = [f"🧮 [HESAP MAKİNESİ İSABET TAKİBİ] Toplam: {len(rows)} (kapanan {len(kapanan)})"]
+    if kapanan:
+        dogru = sum(1 for r in kapanan if r["sonuc"] == "DOGRU")
+        lines.append(f"İsabet oranı: %{dogru/len(kapanan)*100:.1f} ({dogru}/{len(kapanan)})")
+    lines.append("\nSon 5:")
+    for r in rows[-5:]:
+        lines.append(f"  {r['ticker']} ({r['yon']}, güven %{r['guven']}): {r['sonuc']}"
+                     + (f" ({r['gerceklesen_pct']}%)" if r.get("gerceklesen_pct") else ""))
+    return "\n".join(lines)
+
+
+# =============================================================================
 # KENDİ TELEGRAM KOMUT DİNLEYİCİSİ (ana bottan AYRI token/chat_id)
 # =============================================================================
 
@@ -969,6 +1369,28 @@ def poll_arge_commands():
             continue
         if text.startswith("/arge_rapor"):
             send_telegram_message(build_report())
+        elif text.startswith("/hesap_makinesi"):
+            parcalar = text.split()
+            if len(parcalar) < 2:
+                send_telegram_message("Kullanım: /hesap_makinesi ASTOR (ya da THYAO, TUPRS gibi)")
+            else:
+                send_telegram_message(build_hesap_makinesi(parcalar[1]))
+        elif text.startswith("/hesap_sonuclari"):
+            send_telegram_message(build_hesap_sonuclari())
+        elif text.startswith("/hesap_test"):
+            parcalar = text.split()
+            if len(parcalar) < 2:
+                send_telegram_message("Kullanım: /hesap_test 2026-07-04 (o günün kapanışıyla "
+                                       "BIST hisseleri için toplu karar alır, ertesi günle karşılaştırır)")
+            else:
+                send_telegram_message(f"🧮 {parcalar[1]} için BIST hisseleri taranıyor, "
+                                       f"Gemini'den toplu karar isteniyor...")
+                try:
+                    send_telegram_message(hesap_makinesi_backtest(parcalar[1]))
+                except Exception as e:
+                    send_telegram_message(f"🧮 Test hata verdi: {e}")
+        elif text.startswith("/hesap_rapor"):
+            send_telegram_message(build_hesap_rapor())
         elif text.startswith("/arge_test"):
             send_telegram_message("🧪 Manuel test turu başlatılıyor...")
             try:
@@ -981,6 +1403,11 @@ def poll_arge_commands():
             send_telegram_message(
                 "📖 Ar-Ge Botu komutları (sadece gece radarı için):\n"
                 "/arge_rapor — şimdiye kadarki tüm denemelerin özeti\n"
+                "/hesap_makinesi TICKER — Gemini'ye ANLIK göstergeleri gösterip LONG/SHORT yorumu ister\n"
+                "/hesap_sonuclari — anlık hesap makinesi yorumlarının isabet takibi\n"
+                "/hesap_test TARİH — geçmiş bir tarihte (örn. 2026-07-04) BIST hisseleri için "
+                "toplu karar aldırıp GERÇEK ertesi günle hemen karşılaştırır\n"
+                "/hesap_rapor — /hesap_test ile şimdiye kadar biriken toplam isabet oranı\n"
                 "/arge_test — hemen bir hipotez dener (test amaçlı)\n"
                 "/arge_yardim — bu liste"
             )
