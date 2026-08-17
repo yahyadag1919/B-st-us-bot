@@ -627,20 +627,28 @@ def hesapla_yon_kod_ile(gostergeler: dict) -> dict:
     (LONG ya da SHORT) üretilir. Her göstergenin katkısı ayrı ayrı
     dönüyor ki şeffaf olsun - 'kara kutu' değil, hangi göstergenin ne
     kadar katkı yaptığı görülebiliyor.
-    RSI/MFI/Stochastic 0-100 arası, 50 ETRAFINDA MERKEZLENİYOR (50=nötr).
-    Bunlar KLASİK (mean-reversion) yorumla kullanılıyor: değer 50'nin
-    ALTINDAYSA (aşırı satıma yakınsa) LONG lehine, ÜSTÜNDEYSE SHORT
-    lehine - bu tersi (momentum) yorumla de yapılabilirdi, seçim bu."""
+    2026-08-17 DÜZELTME: RSI/MFI/Stochastic İLK SÜRÜMDE "ters" (mean-
+    reversion: aşırı alım=SHORT, aşırı satım=LONG) mantıkla kullanılıyordu
+    - ama diğer 9 gösterge TREND-TAKİP mantığıyla çalışıyordu. Bu 3 tanesi
+    birbirine ÇOK BENZER (hepsi aynı momentumu farklı şekillerde ölçüyor,
+    neredeyse aynı anda hareket ediyorlar) - yani aslında TEK bir görüşü
+    3 KERE sayıyordu ve o tek görüş diğer 9'una TERS yönde çalışıyordu.
+    Gerçek testte (8-9 Temmuz) bu, sistemi hemen hemen HER ZAMAN SHORT
+    demeye zorladı (%86-90 SHORT çağrısı) - sağlıklı yükselen hisselerde
+    bile, çünkü RSI/MFI/Stochastic sağlıklı trendlerde doğal olarak
+    50'nin üstünde durur. ŞİMDİ: tutarlılık için bu 3'ü de TREND-TAKİP
+    mantığına çevrildi (50 üstü = LONG lehine, diğer 9 gösterge ile
+    AYNI felsefe)."""
     def g(ad):
         v = gostergeler.get(ad)
         return float(v) if v is not None else 0.0
 
     katkilar = {
-        "RSI (50 merkezli, ters)": -(g("rsi14") - 50) / 10,
+        "RSI (50 merkezli, trend-takip)": (g("rsi14") - 50) / 10,
         "MACD histogram": g("macd_hist") * 2,
         "CMF": g("cmf") * 10,
-        "MFI (50 merkezli, ters)": -(g("mfi") - 50) / 10,
-        "Stochastic %K (50 merkezli, ters)": -(g("stoch_k") - 50) / 10,
+        "MFI (50 merkezli, trend-takip)": (g("mfi") - 50) / 10,
+        "Stochastic %K (50 merkezli, trend-takip)": (g("stoch_k") - 50) / 10,
         "SMA20'ye uzaklık": g("dist_sma20_pct"),
         "SMA50'ye uzaklık": g("dist_sma50_pct"),
         "VWAP'a uzaklık (yaklaşık)": g("vwap_dist_pct"),
