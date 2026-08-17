@@ -706,6 +706,53 @@ HESAP_TEST_FIELDS = ["test_tarihi", "ticker", "yon", "guven", "gerekce",
                       "ertesi_gun_getiri_pct", "dogru_mu"]
 
 
+def hesap_makinesi_debug(ticker: str, tarih_str: str) -> str:
+    """TEŞHİS ARACI - bir hissenin bir tarihteki TÜM gösterge değerlerini
+    VE hesapla_yon_kod_ile'nin her faktöre verdiği KATKIYI tek tek
+    gösterir. 9 Temmuz testinde piyasa %75.9 pozitifken sistemin %86.2
+    SHORT demesi RSI/MFI/Stochastic düzeltmesiyle açıklanamadı - bu
+    aracın amacı gerçek sebebi bulmak."""
+    import yfinance as yf
+    if not ticker.upper().endswith(".IS"):
+        ticker = ticker.upper() + ".IS"
+    hedef_tarih = pd.Timestamp(tarih_str)
+
+    try:
+        index_df = yf.Ticker("XU100.IS").history(period="2y", interval="1d")
+        index_pct = None
+        if index_df is not None and not index_df.empty:
+            index_df.index = pd.to_datetime(index_df.index).tz_localize(None)
+            index_pct = (index_df["Close"] - index_df["Close"].shift(1)) / index_df["Close"].shift(1) * 100
+
+        df = yf.Ticker(ticker).history(period="2y", interval="1d")
+        if df is None or df.empty:
+            return f"🔬 {ticker}: veri yok."
+        df = df.rename(columns={"Open": "open", "High": "high", "Low": "low",
+                                 "Close": "close", "Volume": "volume"})
+        df = df[["open", "high", "low", "close", "volume"]].copy()
+        df.index = pd.to_datetime(df.index).tz_localize(None)
+        df = compute_features(df, index_pct)
+    except Exception as e:
+        return f"🔬 {ticker}: veri hatası — {e}"
+
+    gostergeler = _gostergeleri_hesapla(df, hedef_tarih)
+    if gostergeler is None:
+        return f"🔬 {ticker}: {hedef_tarih.date()} tarihi verisi yok."
+
+    sonuc = hesapla_yon_kod_ile(gostergeler)
+    lines = [f"🔬 [TEŞHİS] {ticker} — {hedef_tarih.date()}", "", "Ham gösterge değerleri:"]
+    for k, v in gostergeler.items():
+        lines.append(f"  {k}: {v}")
+    lines.append("")
+    lines.append("Her faktörün skora katkısı:")
+    toplam = 0
+    for k, v in sonuc["detaylar"].items():
+        toplam += v
+        lines.append(f"  {k}: {v:+.3f}")
+    lines.append(f"\nTOPLAM SKOR: {sonuc['skor']:+.3f} → {sonuc['yon']}")
+    return "\n".join(lines)
+
+
 def hesap_makinesi_backtest(tarih_str: str) -> str:
     """Kullanıcının istediği DOĞRULAMA TESTİ: verilen tarihin (örn.
     '2026-07-04') kapanışındaki gösterge değerleriyle Gemini'den BIST
@@ -1472,6 +1519,18 @@ def poll_arge_commands():
                 send_telegram_message("Kullanım: /hesap_makinesi ASTOR (ya da THYAO, TUPRS gibi)")
             else:
                 send_telegram_message(build_hesap_makinesi(parcalar[1]))
+        elif text.startswith("/hesap_debug"):
+            parcalar = text.split()
+            if len(parcalar) < 3:
+                send_telegram_message("Kullanım: /hesap_debug ASELS 2026-07-09 "
+                                       "(bir hissenin bir tarihteki tam hesaplama dökümünü gösterir)")
+            else:
+                def _arka_plan_debug(ticker, tarih):
+                    try:
+                        send_telegram_message(hesap_makinesi_debug(ticker, tarih))
+                    except Exception as e:
+                        send_telegram_message(f"🔬 Teşhis hatası: {e}")
+                threading.Thread(target=_arka_plan_debug, args=(parcalar[1], parcalar[2]), daemon=True).start()
         elif text.startswith("/hesap_sonuclari"):
             send_telegram_message(build_hesap_sonuclari())
         elif text.startswith("/hesap_test"):
