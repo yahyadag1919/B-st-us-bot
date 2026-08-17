@@ -627,35 +627,41 @@ def hesapla_yon_kod_ile(gostergeler: dict) -> dict:
     (LONG ya da SHORT) üretilir. Her göstergenin katkısı ayrı ayrı
     dönüyor ki şeffaf olsun - 'kara kutu' değil, hangi göstergenin ne
     kadar katkı yaptığı görülebiliyor.
-    2026-08-17 DÜZELTME: RSI/MFI/Stochastic İLK SÜRÜMDE "ters" (mean-
-    reversion: aşırı alım=SHORT, aşırı satım=LONG) mantıkla kullanılıyordu
-    - ama diğer 9 gösterge TREND-TAKİP mantığıyla çalışıyordu. Bu 3 tanesi
-    birbirine ÇOK BENZER (hepsi aynı momentumu farklı şekillerde ölçüyor,
-    neredeyse aynı anda hareket ediyorlar) - yani aslında TEK bir görüşü
-    3 KERE sayıyordu ve o tek görüş diğer 9'una TERS yönde çalışıyordu.
-    Gerçek testte (8-9 Temmuz) bu, sistemi hemen hemen HER ZAMAN SHORT
-    demeye zorladı (%86-90 SHORT çağrısı) - sağlıklı yükselen hisselerde
-    bile, çünkü RSI/MFI/Stochastic sağlıklı trendlerde doğal olarak
-    50'nin üstünde durur. ŞİMDİ: tutarlılık için bu 3'ü de TREND-TAKİP
-    mantığına çevrildi (50 üstü = LONG lehine, diğer 9 gösterge ile
-    AYNI felsefe)."""
+    2026-08-17 İKİNCİ DÜZELTME (ilk RSI/MFI/Stochastic düzeltmesi
+    yetmedi - /hesap_debug ASELS 2026-07-09 ile bulundu): SMA20/SMA50
+    uzaklığı, VWAP uzaklığı, kapanış-zirve konumu, relative strength ve
+    günlük değişim - bunların 5'i de ASLINDA BAĞIMSIZ DEĞİL, hepsi
+    "bugün fiyat ne kadar hareket etti" gerçeğinin FARKLI matematiksel
+    yansımaları. Sert TEK GÜNLÜK bir hareket olduğunda (ör. ASELS'in
+    %-4.84 düştüğü gün) bu 5 gösterge AYNI OLAYI 5 KERE sayıp skoru
+    tek başına ele geçiriyor, RSI/MACD/CMF gibi gerçekten bağımsız
+    göstergeleri boğuyor - VE literatürde bilinen "sert tek günlük
+    hareketler ertesi gün kısmen tepki/geri döner" olgusunun tam tersi
+    yönde aşırı güvenli bir karar üretiyor. ÇÖZÜM: her faktörün katkısı
+    ±KATKI_SINIRI ile SINIRLANIYOR (clip) - tek bir olay artık skoru
+    tek başına domine edemiyor."""
+    KATKI_SINIRI = 3.0
+
     def g(ad):
         v = gostergeler.get(ad)
         return float(v) if v is not None else 0.0
 
+    def sinirla(deger):
+        return max(-KATKI_SINIRI, min(KATKI_SINIRI, deger))
+
     katkilar = {
-        "RSI (50 merkezli, trend-takip)": (g("rsi14") - 50) / 10,
-        "MACD histogram": g("macd_hist") * 2,
-        "CMF": g("cmf") * 10,
-        "MFI (50 merkezli, trend-takip)": (g("mfi") - 50) / 10,
-        "Stochastic %K (50 merkezli, trend-takip)": (g("stoch_k") - 50) / 10,
-        "SMA20'ye uzaklık": g("dist_sma20_pct"),
-        "SMA50'ye uzaklık": g("dist_sma50_pct"),
-        "VWAP'a uzaklık (yaklaşık)": g("vwap_dist_pct"),
-        "Kapanış-zirve konumu (50 merkezli)": (g("close_to_high_pct") - 50) / 10,
-        "Endekse göre relative strength": g("relative_strength"),
-        "Gap": g("gap_pct"),
-        "Günlük değişim (momentum)": g("pct_change"),
+        "RSI (50 merkezli, trend-takip)": sinirla((g("rsi14") - 50) / 10),
+        "MACD histogram": sinirla(g("macd_hist") * 2),
+        "CMF": sinirla(g("cmf") * 10),
+        "MFI (50 merkezli, trend-takip)": sinirla((g("mfi") - 50) / 10),
+        "Stochastic %K (50 merkezli, trend-takip)": sinirla((g("stoch_k") - 50) / 10),
+        "SMA20'ye uzaklık": sinirla(g("dist_sma20_pct")),
+        "SMA50'ye uzaklık": sinirla(g("dist_sma50_pct")),
+        "VWAP'a uzaklık (yaklaşık)": sinirla(g("vwap_dist_pct")),
+        "Kapanış-zirve konumu (50 merkezli)": sinirla((g("close_to_high_pct") - 50) / 10),
+        "Endekse göre relative strength": sinirla(g("relative_strength")),
+        "Gap": sinirla(g("gap_pct")),
+        "Günlük değişim (momentum)": sinirla(g("pct_change")),
     }
     # volume_factor yon vermez (buyukluk gostergesi), sadece MEVCUT
     # toplamin buyuklugunu carpanla guclendirir - hesaplamaya KATILIYOR,
