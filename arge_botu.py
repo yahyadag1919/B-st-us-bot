@@ -609,6 +609,58 @@ def _gostergeleri_hesapla(df: pd.DataFrame, tarih) -> dict:
     return {f: (round(float(satir[f]), 4) if pd.notna(satir[f]) else None) for f in BASE_FEATURE_LIBRARY}
 
 
+# =============================================================================
+# KOD-TABANLI HESAPLAMA (Gemini'siz) — 2026-08-16, kullanıcının düzeltmesiyle
+# =============================================================================
+# İLK SÜRÜM YANLIŞTI: her göstergeye "eşiği geçti mi geçmedi mi" diye BİNER
+# bir oy (+1/-1/0) veriyordu ve eşiği geçemeyen hisseleri NÖTR diye ATLIYORDU
+# - kullanıcı bunun "hesaplama değil filtreleme" olduğunu haklı olarak
+# belirtti. ŞİMDİ: her yönlü göstergenin HAM DEĞERİ (0 etrafında
+# merkezlenmiş/ölçeklenmiş) doğrudan toplama katılıyor - eşik/filtre YOK,
+# HİÇBİR HİSSE ATLANMIYOR. Toplamın işareti (pozitif/negatif) yönü
+# belirliyor - her hisse için MUTLAKA bir LONG ya da SHORT üretiliyor.
+
+
+def hesapla_yon_kod_ile(gostergeler: dict) -> dict:
+    """Gemini'ye HİÇ İHTİYAÇ DUYMADAN, ham gösterge değerlerinin AĞIRLIKLI
+    TOPLAMINI hesaplar - filtre/eşik YOK, her hisse için mutlaka bir yön
+    (LONG ya da SHORT) üretilir. Her göstergenin katkısı ayrı ayrı
+    dönüyor ki şeffaf olsun - 'kara kutu' değil, hangi göstergenin ne
+    kadar katkı yaptığı görülebiliyor.
+    RSI/MFI/Stochastic 0-100 arası, 50 ETRAFINDA MERKEZLENİYOR (50=nötr).
+    Bunlar KLASİK (mean-reversion) yorumla kullanılıyor: değer 50'nin
+    ALTINDAYSA (aşırı satıma yakınsa) LONG lehine, ÜSTÜNDEYSE SHORT
+    lehine - bu tersi (momentum) yorumla de yapılabilirdi, seçim bu."""
+    def g(ad):
+        v = gostergeler.get(ad)
+        return float(v) if v is not None else 0.0
+
+    katkilar = {
+        "RSI (50 merkezli, ters)": -(g("rsi14") - 50) / 10,
+        "MACD histogram": g("macd_hist") * 2,
+        "CMF": g("cmf") * 10,
+        "MFI (50 merkezli, ters)": -(g("mfi") - 50) / 10,
+        "Stochastic %K (50 merkezli, ters)": -(g("stoch_k") - 50) / 10,
+        "SMA20'ye uzaklık": g("dist_sma20_pct"),
+        "SMA50'ye uzaklık": g("dist_sma50_pct"),
+        "VWAP'a uzaklık (yaklaşık)": g("vwap_dist_pct"),
+        "Kapanış-zirve konumu (50 merkezli)": (g("close_to_high_pct") - 50) / 10,
+        "Endekse göre relative strength": g("relative_strength"),
+        "Gap": g("gap_pct"),
+        "Günlük değişim (momentum)": g("pct_change"),
+    }
+    # volume_factor yon vermez (buyukluk gostergesi), sadece MEVCUT
+    # toplamin buyuklugunu carpanla guclendirir - hesaplamaya KATILIYOR,
+    # ayri bir esik/filtre degil.
+    ham_toplam = sum(katkilar.values())
+    hacim_carpani = 1.0 + max(0.0, (g("volume_factor") - 1.0)) * 0.15
+    katkilar["Hacim çarpanı etkisi"] = round(ham_toplam * hacim_carpani - ham_toplam, 3)
+
+    skor = round(sum(katkilar.values()), 3)
+    yon = "LONG" if skor >= 0 else "SHORT"
+    return {"yon": yon, "skor": skor, "detaylar": {k: round(v, 3) for k, v in katkilar.items()}}
+
+
 def ask_gemini_for_verdicts_batch(ticker_gostergeleri: dict) -> dict:
     """TEK istekte BİRDEN FAZLA hisse için LONG/SHORT kararı ister - kota
     tasarrufu için (hipotez toplu-isteğiyle AYNI mantık). Dönen: {ticker:
@@ -698,10 +750,18 @@ def hesap_makinesi_backtest(tarih_str: str) -> str:
     if not ticker_gostergeleri:
         return f"{duzeltme_notu}🧮 {hedef_tarih.date()} için hiçbir hisseden veri alınamadı."
 
-    print(f"[ARGE] {len(ticker_gostergeleri)} hisse için Gemini'den toplu karar isteniyor...", flush=True)
-    kararlar = ask_gemini_for_verdicts_batch(ticker_gostergeleri)
-    if not kararlar:
-        return f"{duzeltme_notu}🧮 {hedef_tarih.date()}: Gemini'den geçerli karar alınamadı."
+    # 2026-08-16: Gemini'ye SORULMUYOR - karar TAMAMEN KOD İÇİNDE, ağırlıklı
+    # toplam hesabıyla üretiliyor. Eşik/filtre YOK - HER hisse için mutlaka
+    # bir yön (LONG/SHORT) üretilir, "nötr, atlandı" diye eleme yapılmaz.
+    kararlar = {}
+    for ticker, gostergeler in ticker_gostergeleri.items():
+        sonuc = hesapla_yon_kod_ile(gostergeler)
+        kararlar[ticker] = {
+            "yon": sonuc["yon"], "guven": min(100, abs(sonuc["skor"]) * 15),
+            "gerekce": ", ".join(sonuc["detaylar"].keys()), "skor": sonuc["skor"],
+        }
+    print(f"[ARGE] Kod-tabanlı karar: {len(kararlar)} hissenin hepsi için "
+          f"hesaplandı (filtre yok).", flush=True)
 
     sonuclar = []
     for ticker, karar in kararlar.items():
@@ -741,10 +801,10 @@ def hesap_makinesi_backtest(tarih_str: str) -> str:
     return (
         f"{duzeltme_notu}"
         f"🧮 [HESAP MAKİNESİ TESTİ] {hedef_tarih.date()} kapanışı → ertesi gün\n\n"
-        f"Sonuç: {dogru_n}/{n} doğru (%{dogru_n/n*100:.1f})\n\n"
-        f"{detay}\n\n"
-        f"⚠️ Bu, geçmişten 'öğrenmiş' bir model değil — Gemini'nin genel "
-        f"teknik analiz bilgisiyle her seferinde yeniden karar vermesi. "
+        f"Sonuç: {dogru_n}/{n} doğru (%{dogru_n/n*100:.1f})\n\n{detay}\n\n"
+        f"⚠️ Bu, geçmişten 'öğrenmiş' bir model DEĞİL — her göstergeye "
+        f"standart bir teknik analiz kuralı uygulanıp oylanıyor, TAMAMEN "
+        f"KOD İÇİNDE (Gemini'ye sorulmuyor, kotasız, deterministik). "
         f"Bu sonuç kalıcı geçmişe kaydedildi, /hesap_rapor ile birikimi "
         f"görebilirsin."
     )
@@ -1215,16 +1275,13 @@ def _append_hesap_log(row: dict):
 
 
 def build_hesap_makinesi(ticker: str) -> str:
-    """GERÇEK 'hesap makinesi' - istatistiksel model EĞİTMİYOR. Bir
-    hissenin TÜM güncel gösterge değerlerini (RSI, MACD, VWAP, hacim,
-    Bollinger, ATR, CMF, MFI, Stochastic, kapanış-penceresi proxy'leri,
-    vb.) hesaplayıp doğrudan Gemini'ye gösteriyor - bir insan analistin
-    ekrana bakıp yorum yapması gibi. Gemini LONG/SHORT + gerekçe veriyor.
-    ⚠️ BU İSTATİSTİKSEL OLARAK DOĞRULANMIŞ BİR TAHMİN DEĞİL - sadece
-    Gemini'nin sayılara bakarak ürettiği bir YORUM. Her çağrı kaydediliyor
-    ve ertesi gün gerçekte ne olduğu kontrol edilip (check_hesap_makinesi_sonuclari
-    ile) zamanla Gemini'nin bu yorumlarının gerçekten isabetli olup
-    olmadığı görülebilecek - kör güven yerine izlenebilir bir kayıt."""
+    """GERÇEK 'hesap makinesi' - istatistiksel model EĞİTMİYOR, Gemini'ye
+    de SORMUYOR (2026-08-16 güncelleme - backtest'teki aynı sebep: Gemini
+    hem güvenilmez çıktı hem kota sorunlarına açıktı). Bir hissenin TÜM
+    güncel gösterge değerlerini (RSI, MACD, VWAP, hacim, Bollinger, ATR,
+    CMF, MFI, Stochastic, vb.) hesaplayıp hesapla_yon_kod_ile() ile
+    TAMAMEN KOD İÇİNDE, deterministik bir LONG/SHORT/NÖTR kararı üretiyor
+    - backtest'te kullanılanla BİREBİR AYNI mantık."""
     import yfinance as yf
     if not ticker.upper().endswith(".IS"):
         ticker = ticker.upper() + ".IS"
@@ -1268,47 +1325,26 @@ def build_hesap_makinesi(ticker: str) -> str:
     ]:
         gosterge_satirlari.append(f"{ad}: {deger:.2f}" if pd.notna(deger) else f"{ad}: bilinmiyor")
 
-    prompt = f"""Sen bir teknik analiz uzmanısın. {ticker} hissesi için, bugünün
-kapanışına ({df.index[-1].date()}) ait şu göstergeler hesaplandı:
-
-{chr(10).join(gosterge_satirlari)}
-
-Bu göstergelere bakarak, ERTESİ GÜN piyasa açıldığında bu hissenin
-YÖNÜNÜ (LONG=yukarı, SHORT=aşağı) tahmin et. Kararını SADECE yukarıdaki
-sayılara dayandır, başka veri uydurma.
-
-SADECE şu JSON formatında cevap ver, başka hiçbir metin ekleme:
-{{"yon": "LONG veya SHORT", "guven": 0-100 arası bir sayı (ne kadar eminsin), "gerekce": "kısa açıklama, hangi göstergelere dayandın"}}"""
-
-    yanit = _call_gemini(prompt)
     lines = [f"🧮 [HESAP MAKİNESİ] {ticker} — {df.index[-1].date()} kapanışı", ""]
     lines.extend(f"  {s}" for s in gosterge_satirlari)
     lines.append("")
 
-    if not isinstance(yanit, dict) or "yon" not in yanit:
-        lines.append("⚠️ Gemini'den geçerli bir yorum alınamadı, sadece göstergeler yukarıda.")
-        return "\n".join(lines)
+    gostergeler = _gostergeleri_hesapla(df, df.index[-1])
+    sonuc = hesapla_yon_kod_ile(gostergeler)
 
-    yon = yanit.get("yon", "").upper()
-    if yon not in ("LONG", "SHORT"):
-        lines.append("⚠️ Gemini'den geçerli bir yön gelmedi, sadece göstergeler yukarıda.")
-        return "\n".join(lines)
-
-    guven = yanit.get("guven", "?")
-    gerekce = yanit.get("gerekce", "")
-    yon_ikon = "🟢 LONG" if yon == "LONG" else "🔴 SHORT"
-    lines.append(f"{yon_ikon} — Gemini'nin görüşü (güven: %{guven})")
-    lines.append(f"Gerekçe: {gerekce}")
+    yon_ikon = "🟢 LONG" if sonuc["yon"] == "LONG" else "🔴 SHORT"
+    lines.append(f"{yon_ikon} — kod-tabanlı skor: {sonuc['skor']:+.2f}")
+    lines.append(f"Gerekçe: {', '.join(sonuc['detaylar'].keys())}")
     lines.append("")
-    lines.append("⚠️ Bu İSTATİSTİKSEL OLARAK DOĞRULANMIŞ bir tahmin DEĞİL — sadece "
-                 "Gemini'nin sayılara bakarak ürettiği bir yorum. Kaydedildi, ertesi "
-                 "gün /hesap_sonuclari ile gerçekte ne olduğu görülüp zamanla isabet "
+    lines.append("⚠️ Bu İSTATİSTİKSEL OLARAK DOĞRULANMIŞ bir tahmin DEĞİL — standart "
+                 "teknik analiz kurallarının oylaması. Kaydedildi, ertesi gün "
+                 "/hesap_sonuclari ile gerçekte ne olduğu görülüp zamanla isabet "
                  "oranı takip edilebilecek.")
 
     _append_hesap_log({
-        "tarih": datetime.now(timezone.utc).isoformat(), "ticker": ticker, "yon": yon,
-        "guven": guven, "gerekce": gerekce, "entry_price": entry_price,
-        "checked_at": "", "sonuc": "PENDING", "gerceklesen_pct": "",
+        "tarih": datetime.now(timezone.utc).isoformat(), "ticker": ticker, "yon": sonuc["yon"],
+        "guven": min(100, abs(sonuc["skor"]) * 15), "gerekce": ", ".join(sonuc["detaylar"].keys()),
+        "entry_price": entry_price, "checked_at": "", "sonuc": "PENDING", "gerceklesen_pct": "",
     })
     return "\n".join(lines)
 
