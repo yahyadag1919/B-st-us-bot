@@ -49,7 +49,7 @@ import threading
 # mesajlarında görünür kılmak için (2026-08-17: 3 kez üst üste "aynı
 # sonuç geldi" şüphesi sonrası eklendi - deploy'un gerçekten güncel
 # olup olmadığını KANITLA göstermek için).
-ARGE_KOD_SURUMU = "v8-hacim-anomali-uyum-sayisi-2026-08-18"
+ARGE_KOD_SURUMU = "v9-gosterge-turnuvasi-2026-08-18"
 import warnings
 from datetime import datetime, timezone
 
@@ -905,6 +905,198 @@ def hesap_makinesi_tam_yil_testi(baslangic_str: str = "2026-01-01", bitis_str: s
     return dosya_yolu, ozet
 
 
+# =============================================================================
+# GÖSTERGE TURNUVASI — ABD swing turnuvasındaki gibi HER ÖZELLİĞİ TEK
+# BAŞINA (izole) test eder — 2026-08-18
+# =============================================================================
+# GEREKÇE: /hesap_tam_test iki turda da (v7, v8) gösterdi ki 13 göstergenin
+# ağırlıklı toplamı ne genel yönde ne uyum-sayısı bazında bir kenar
+# üretiyor. ABD tarafındaki KANITLANMIŞ kenarların (ATR kırılımı %69.6,
+# Hacim Z-Skor %63.0, RSI21 %69.9) hepsi TEK BAŞINA, gerçek eşikle test
+# edilmiş stratejiler — 13 göstergeyi harmanlayan bir toplam değil. Bu
+# turnuva, BIST'te de HERHANGİ BİR göstergenin izole bir kenarı var mı,
+# varsa hangisi, önce onu bulmak için.
+
+GOSTERGE_TURNUVASI_ESIK_YUZDE = 0.20  # üst/alt %20 - genel, sabit kural
+GOSTERGE_TURNUVASI_MIN_N = 30
+
+
+def _yonlu_ozellikler_listesi() -> list:
+    """BASE_FEATURE_LIBRARY'den, TEK BAŞINA yön iddiası taşımayan
+    (büyüklük/kategori göstergesi olan) özellikleri çıkarır."""
+    haric = {"day_of_week", "atr_pct", "volume_factor", "bb_bandwidth", "vol_zscore"}
+    return [f for f in BASE_FEATURE_LIBRARY if f not in haric]
+
+
+def _feature_strateji_matrisi(df_all: pd.DataFrame) -> pd.DataFrame:
+    """Her yönlü özellik için İKİ rakip hipotezi test eder: REVERSAL (aşırı
+    uç -> TERS yön bahsi, tükenme mantığı) ve MOMENTUM (aşırı uç -> AYNI
+    yön devam bahsi). Eşik: özelliğin kendi dağılımının üst/alt %20'si -
+    özelliğe özel elle seçilmiş sihirli sayı YOK. Eşiği aşmayan günler o
+    strateji için sinyal ÜRETMİYOR (hesap makinesindeki 'her hisseye
+    mutlaka yön üret' kuralından FARKLI - burada amaç, TEK TEK
+    stratejilerin izole kenarı var mı ölçmek, her hisseye zorla karar
+    verdirmek değil)."""
+    satirlar = []
+    for ozellik in _yonlu_ozellikler_listesi():
+        gecerli = df_all.dropna(subset=[ozellik, "sonraki_gun_getiri_pct"])
+        if len(gecerli) < 200:
+            continue
+        ust_esik = gecerli[ozellik].quantile(1 - GOSTERGE_TURNUVASI_ESIK_YUZDE)
+        alt_esik = gecerli[ozellik].quantile(GOSTERGE_TURNUVASI_ESIK_YUZDE)
+        maske_ust = gecerli[ozellik] >= ust_esik
+        maske_alt = gecerli[ozellik] <= alt_esik
+
+        for tip, ust_yon, alt_yon in (("reversal", "SHORT", "LONG"), ("momentum", "LONG", "SHORT")):
+            yon_serisi = pd.Series(np.nan, index=gecerli.index, dtype=object)
+            yon_serisi[maske_ust] = ust_yon
+            yon_serisi[maske_alt] = alt_yon
+            secim = yon_serisi.notna()
+            if secim.sum() < GOSTERGE_TURNUVASI_MIN_N:
+                continue
+            secilen = gecerli[secim]
+            yon_sel = yon_serisi[secim]
+            dogru = ((yon_sel == "LONG") & (secilen["sonraki_gun_getiri_pct"] > 0)) | \
+                    ((yon_sel == "SHORT") & (secilen["sonraki_gun_getiri_pct"] < 0))
+            isaretli_getiri = secilen["sonraki_gun_getiri_pct"] * np.where(yon_sel == "LONG", 1, -1)
+            satirlar.append({
+                "strateji": f"{ozellik} | {tip}", "n": int(secim.sum()),
+                "kazanma_orani_pct": round(dogru.mean() * 100, 2),
+                "ort_isaretli_getiri_pct": round(isaretli_getiri.mean(), 4),
+            })
+
+    # ABD'de KANITLANMIŞ 3 stratejinin BIST'e DOĞRUDAN transferi - aynı
+    # eşik/mantık, hiçbir uyarlama yok, "burada da işliyor mu" sorusu.
+    ozel_stratejiler = []
+    if {"vol_zscore", "pct_change"}.issubset(df_all.columns):
+        g = df_all.dropna(subset=["vol_zscore", "pct_change", "sonraki_gun_getiri_pct"])
+        secim = (g["vol_zscore"] >= 2.0) & (g["pct_change"] != 0)
+        if secim.sum() >= GOSTERGE_TURNUVASI_MIN_N:
+            gg = g[secim]
+            yon = np.where(gg["pct_change"] < 0, "LONG", "SHORT")
+            dogru = ((yon == "LONG") & (gg["sonraki_gun_getiri_pct"] > 0)) | \
+                    ((yon == "SHORT") & (gg["sonraki_gun_getiri_pct"] < 0))
+            isaretli = gg["sonraki_gun_getiri_pct"] * np.where(yon == "LONG", 1, -1)
+            ozel_stratejiler.append({
+                "strateji": "[ABD transfer] Hacim Z-Skor>=2.0 tükenme",
+                "n": int(secim.sum()), "kazanma_orani_pct": round(dogru.mean() * 100, 2),
+                "ort_isaretli_getiri_pct": round(isaretli.mean(), 4),
+            })
+    if {"pct_change", "atr_pct"}.issubset(df_all.columns):
+        g = df_all.dropna(subset=["pct_change", "atr_pct", "sonraki_gun_getiri_pct"])
+        secim = g["pct_change"].abs() >= 2.0 * g["atr_pct"]
+        if secim.sum() >= GOSTERGE_TURNUVASI_MIN_N:
+            gg = g[secim]
+            yon = np.where(gg["pct_change"] > 0, "LONG", "SHORT")
+            dogru = ((yon == "LONG") & (gg["sonraki_gun_getiri_pct"] > 0)) | \
+                    ((yon == "SHORT") & (gg["sonraki_gun_getiri_pct"] < 0))
+            isaretli = gg["sonraki_gun_getiri_pct"] * np.where(yon == "LONG", 1, -1)
+            ozel_stratejiler.append({
+                "strateji": "[ABD transfer] ATR kırılımı x2.0 momentum",
+                "n": int(secim.sum()), "kazanma_orani_pct": round(dogru.mean() * 100, 2),
+                "ort_isaretli_getiri_pct": round(isaretli.mean(), 4),
+            })
+    if "rsi14" in df_all.columns:
+        g = df_all.dropna(subset=["rsi14", "sonraki_gun_getiri_pct"])
+        secim = (g["rsi14"] <= 25) | (g["rsi14"] >= 75)
+        if secim.sum() >= GOSTERGE_TURNUVASI_MIN_N:
+            gg = g[secim]
+            yon = np.where(gg["rsi14"] <= 25, "LONG", "SHORT")
+            dogru = ((yon == "LONG") & (gg["sonraki_gun_getiri_pct"] > 0)) | \
+                    ((yon == "SHORT") & (gg["sonraki_gun_getiri_pct"] < 0))
+            isaretli = gg["sonraki_gun_getiri_pct"] * np.where(yon == "LONG", 1, -1)
+            ozel_stratejiler.append({
+                "strateji": "[ABD transfer, yaklaşık - RSI21 yerine RSI14] <=25/>=75 aşırı uç reversal",
+                "n": int(secim.sum()), "kazanma_orani_pct": round(dogru.mean() * 100, 2),
+                "ort_isaretli_getiri_pct": round(isaretli.mean(), 4),
+            })
+
+    sonuc = pd.DataFrame(satirlar + ozel_stratejiler)
+    if not sonuc.empty:
+        sonuc = sonuc.sort_values("kazanma_orani_pct", ascending=False).reset_index(drop=True)
+    return sonuc
+
+
+def gosterge_turnuvasi_calistir(baslangic_str: str = "2026-01-01", bitis_str: str = None) -> tuple:
+    """/hesap_tam_test'in AYNI veri çekme/gün döngüsü mantığını kullanır,
+    ama hesap makinesinin ağırlıklı toplamı yerine HER ÖZELLİĞİ TEK
+    BAŞINA test eder (ABD swing turnuvasındaki gibi izole). Döner:
+    (dosya_yolu, özet_dict) ya da (None, hata_mesajı)."""
+    import yfinance as yf
+    bitis_str = bitis_str or datetime.now(timezone.utc).date().isoformat()
+    baslangic, bitis = pd.Timestamp(baslangic_str), pd.Timestamp(bitis_str)
+
+    index_df = yf.Ticker("XU100.IS").history(period="2y", interval="1d")
+    if index_df is None or index_df.empty:
+        return None, "XU100 endeks verisi çekilemedi."
+    index_df.index = pd.to_datetime(index_df.index).tz_localize(None)
+    index_pct = (index_df["Close"] - index_df["Close"].shift(1)) / index_df["Close"].shift(1) * 100
+    islem_gunleri = index_df.index[(index_df.index >= baslangic) & (index_df.index <= bitis)]
+    if len(islem_gunleri) == 0:
+        return None, f"{baslangic_str} - {bitis_str} arasında işlem günü bulunamadı."
+
+    print(f"[ARGE] Gösterge turnuvası başlıyor: {len(islem_gunleri)} işlem günü × "
+          f"{len(BIST_TICKERS)} hisse", flush=True)
+
+    parcalar = []
+    for ticker in BIST_TICKERS:
+        try:
+            df = yf.Ticker(ticker).history(period="2y", interval="1d")
+            if df is None or df.empty or len(df) < 100:
+                continue
+            df = df.rename(columns={"Open": "open", "High": "high", "Low": "low",
+                                     "Close": "close", "Volume": "volume"})
+            df = df[["open", "high", "low", "close", "volume"]].copy()
+            df.index = pd.to_datetime(df.index).tz_localize(None)
+            df = compute_features(df, index_pct)
+
+            gunler = df.index[(df.index >= baslangic) & (df.index <= bitis)]
+            alt = df.loc[df.index.isin(gunler)].copy()
+            if alt.empty:
+                continue
+            alt["sonraki_gun_getiri_pct"] = np.nan
+            for tarih in alt.index:
+                idx = df.index.get_loc(tarih)
+                if idx + 1 >= len(df):
+                    continue
+                entry = df.iloc[idx]["close"]
+                cikis = df.iloc[idx + 1]["close"]
+                if entry == 0:
+                    continue
+                getiri = (cikis - entry) / entry * 100
+                if abs(getiri) < 0.001:
+                    continue  # BAYAT VERİ KORUMASI - /hesap_tam_test ile AYNI kural
+                alt.loc[tarih, "sonraki_gun_getiri_pct"] = getiri
+            parcalar.append(alt)
+        except Exception as e:
+            print(f"[ARGE] {ticker} turnuva verisi hatası: {e}", flush=True)
+        time.sleep(0.2)
+
+    if not parcalar:
+        return None, "Hiçbir hisse için veri üretilemedi."
+
+    df_all = pd.concat(parcalar, ignore_index=False)
+    df_all = df_all.dropna(subset=["sonraki_gun_getiri_pct"])
+    if df_all.empty:
+        return None, "Hiçbir geçerli (bayat olmayan) gün bulunamadı."
+
+    tablo = _feature_strateji_matrisi(df_all)
+    if tablo.empty:
+        return None, "Yeterli örneklem büyüklüğüne ulaşan strateji bulunamadı."
+
+    dosya_yolu = _data_path("gosterge_turnuvasi.csv")
+    tablo.to_csv(dosya_yolu, index=False, encoding="utf-8-sig")
+
+    ozet = {
+        "gun_sayisi": len(islem_gunleri), "hisse_sayisi": len(BIST_TICKERS),
+        "toplam_gozlem": len(df_all), "strateji_sayisi": len(tablo),
+        "en_iyi_strateji": tablo.iloc[0]["strateji"],
+        "en_iyi_kazanma_orani": tablo.iloc[0]["kazanma_orani_pct"],
+        "en_iyi_n": int(tablo.iloc[0]["n"]),
+    }
+    return dosya_yolu, ozet
+
+
 
     """Kullanıcının istediği DOĞRULAMA TESTİ: verilen tarihin (örn.
     '2026-07-04') kapanışındaki gösterge değerleriyle Gemini'den BIST
@@ -1465,7 +1657,10 @@ def send_startup_message():
         "DOSYASI olarak gönderir\n"
         "/hesap_debug TICKER TARİH — bir hissenin tam hesaplama dökümü\n"
         "/hesap_rapor — birikmiş toplam isabet oranı\n"
-        "/hesap_makinesi TICKER — anlık canlı hesaplama\n\n"
+        "/hesap_makinesi TICKER — anlık canlı hesaplama\n"
+        "/gosterge_turnuvasi [BAŞLANGIÇ] [BİTİŞ] — hesap makinesinin "
+        "ağırlıklı toplamı yerine her göstergeyi TEK BAŞINA (ABD swing "
+        "turnuvasındaki gibi izole) test edip lider tablosu üretir\n\n"
         "🔬 Hipotez araştırması komutları:\n"
         "/arge_rapor — şimdiye kadarki tüm denemelerin özeti\n"
         "/arge_test — hemen bir hipotez dener (test amaçlı)\n\n"
@@ -1797,6 +1992,36 @@ def poll_arge_commands():
                 except Exception as e:
                     send_telegram_message(f"🧮 Tam yıl testi hatası: {e}")
             threading.Thread(target=_arka_plan_tam_test, args=(baslangic, bitis), daemon=True).start()
+        elif text.startswith("/gosterge_turnuvasi"):
+            parcalar = text.split()
+            baslangic = parcalar[1] if len(parcalar) > 1 else "2026-01-01"
+            bitis = parcalar[2] if len(parcalar) > 2 else None
+            send_telegram_message(
+                f"🏆 GÖSTERGE TURNUVASI başlıyor: {baslangic} → {bitis or 'bugün'}.\n"
+                f"Hesap makinesinin ağırlıklı toplamı yerine, her göstergeyi TEK "
+                f"BAŞINA (ABD swing turnuvasındaki gibi izole) test ediyor — "
+                f"29 hisse × tüm işlem günleri. ARKA PLANDA çalışıyor, birkaç "
+                f"dakika sürebilir, bitince lider tablosunu CSV olarak göndereceğim."
+            )
+
+            def _arka_plan_turnuva(b, bt):
+                try:
+                    dosya_yolu, ozet = gosterge_turnuvasi_calistir(b, bt)
+                    if dosya_yolu is None:
+                        send_telegram_message(f"🏆 Gösterge turnuvası başarısız: {ozet}")
+                        return
+                    send_telegram_document(
+                        dosya_yolu,
+                        caption=(f"🏆 Gösterge Turnuvası Sonucu\n"
+                                 f"{ozet['gun_sayisi']} işlem günü × {ozet['hisse_sayisi']} hisse, "
+                                 f"{ozet['toplam_gozlem']} gözlem\n"
+                                 f"{ozet['strateji_sayisi']} strateji test edildi\n"
+                                 f"🥇 En iyi: {ozet['en_iyi_strateji']}\n"
+                                 f"   %{ozet['en_iyi_kazanma_orani']} isabet (n={ozet['en_iyi_n']})")
+                    )
+                except Exception as e:
+                    send_telegram_message(f"🏆 Gösterge turnuvası hatası: {e}")
+            threading.Thread(target=_arka_plan_turnuva, args=(baslangic, bitis), daemon=True).start()
         elif text.startswith("/arge_test"):
             send_telegram_message("🧪 Manuel test turu başlatılıyor (arka planda)...")
 
