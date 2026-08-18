@@ -49,7 +49,7 @@ import threading
 # mesajlarında görünür kılmak için (2026-08-17: 3 kez üst üste "aynı
 # sonuç geldi" şüphesi sonrası eklendi - deploy'un gerçekten güncel
 # olup olmadığını KANITLA göstermek için).
-ARGE_KOD_SURUMU = "v7-bayat-veri-korumasi-2026-08-17"
+ARGE_KOD_SURUMU = "v8-hacim-anomali-uyum-sayisi-2026-08-18"
 import warnings
 from datetime import datetime, timezone
 
@@ -284,6 +284,7 @@ BASE_FEATURE_LIBRARY = [
     "rsi14", "macd_hist", "bb_bandwidth", "atr_pct", "volume_factor", "cmf", "mfi",
     "stoch_k", "dist_sma20_pct", "dist_sma50_pct", "close_to_high_pct", "gap_pct",
     "pct_change", "day_of_week", "relative_strength", "vwap_dist_pct",
+    "vol_zscore",
 ]
 FEATURE_LIBRARY = BASE_FEATURE_LIBRARY + CLOSING_PROXY_FEATURES
 
@@ -306,6 +307,12 @@ def compute_features(df: pd.DataFrame, index_pct_change: pd.Series = None) -> pd
     df["atr_pct"] = _atr_pct(df["high"], df["low"], df["close"])
     df["vol_ma20"] = df["volume"].rolling(20).mean()
     df["volume_factor"] = df["volume"] / df["vol_ma20"].replace(0, np.nan)
+    # 2026-08-18: ABD swing turnuvasinda TEK basina karli cikan Hacim
+    # Z-Skor'un (bkz. stock_screener_bot.py check_us_volume_zscore) BIST
+    # hesap makinesine tasinan versiyonu - ayni formul (hacim, 20 gunluk
+    # ortalama/std'ye gore ne kadar anormal).
+    df["vol_std20"] = df["volume"].rolling(20).std()
+    df["vol_zscore"] = (df["volume"] - df["vol_ma20"]) / df["vol_std20"].replace(0, np.nan)
     df["cmf"] = _cmf(df["high"], df["low"], df["close"], df["volume"])
     df["mfi"] = _mfi(df["high"], df["low"], df["close"], df["volume"])
     df["stoch_k"] = _stoch_k(df["high"], df["low"], df["close"])
@@ -686,6 +693,14 @@ def hesapla_yon_kod_ile(gostergeler: dict) -> dict:
         "Endekse göre relative strength (artırılmış ağırlık)": sinirla(g("relative_strength") * 2, sinir=KATKI_SINIRI * 1.5),
         "Gap": sinirla(g("gap_pct")),
         "Günlük değişim (momentum, azaltılmış ağırlık)": sinirla(g("pct_change") * 0.5),
+        # 2026-08-18: ABD swing turnuvasinda TEK basina karli cikan Hacim
+        # Z-Skor stratejisinin mantigi (bkz. check_us_volume_zscore) - anormal
+        # yuksek hacimli GUNUN KENDI YONUNUN TERSINE bir tukenme/donus sinyali.
+        # Esik/filtre YOK (KATKI_SINIRI mantigina uydu): sadece pozitif
+        # z-skor (ortalamanin USTUNDE hacim) katkiya giriyor, negatif z-skor
+        # (dusuk hacim) noturdur - "hacim az" bir yon iddiasi degildir.
+        "Hacim anomalisi (tükenme/tersine dönüş)": sinirla(
+            -np.sign(g("pct_change")) * max(0.0, g("vol_zscore")) * 0.75),
     }
     # volume_factor yon vermez (buyukluk gostergesi), sadece MEVCUT
     # toplamin buyuklugunu carpanla guclendirir - hesaplamaya KATILIYOR,
@@ -696,7 +711,21 @@ def hesapla_yon_kod_ile(gostergeler: dict) -> dict:
 
     skor = round(sum(katkilar.values()), 3)
     yon = "LONG" if skor >= 0 else "SHORT"
-    return {"yon": yon, "skor": skor, "detaylar": {k: round(v, 3) for k, v in katkilar.items()}}
+
+    # 2026-08-18: SECICILIK ekleniyor ama FILTRE OLARAK DEGIL - hicbir hisse
+    # atlanmiyor, HER hisseye yine mutlaka bir yon uretiliyor (kullanicinin
+    # "hesaplama, filtreleme degil" kuralina sadik kalindi). Bunun yerine
+    # "kac gosterge skorun isaretiyle AYNI yonde" sayisi AYRI bir kolon
+    # olarak donuyor - test asamasinda "yuksek uyumlu kararlar daha mi
+    # isabetli" diye ANALIZ EDILEBILSIN diye. Sinyali uretmeyi degistirmiyor,
+    # sadece test/analiz icin ek bilgi tasiyor.
+    yonlu_katkilar = {k: v for k, v in katkilar.items() if k != "Hacim çarpanı etkisi"}
+    uyumlu_sayisi = sum(1 for v in yonlu_katkilar.values()
+                         if (v > 0 and skor >= 0) or (v < 0 and skor < 0))
+    toplam_yonlu = sum(1 for v in yonlu_katkilar.values() if v != 0)
+
+    return {"yon": yon, "skor": skor, "detaylar": {k: round(v, 3) for k, v in katkilar.items()},
+            "uyumlu_sayisi": uyumlu_sayisi, "toplam_yonlu_gosterge": toplam_yonlu}
 
 
 def ask_gemini_for_verdicts_batch(ticker_gostergeleri: dict) -> dict:
@@ -847,6 +876,8 @@ def hesap_makinesi_tam_yil_testi(baslangic_str: str = "2026-01-01", bitis_str: s
                     "tarih": tarih.date().isoformat(), "ticker": ticker, "yon": sonuc["yon"],
                     "skor": sonuc["skor"], "ertesi_gun_getiri_pct": round(getiri, 3),
                     "dogru_mu": 1 if dogru else 0,
+                    "uyumlu_sayisi": sonuc["uyumlu_sayisi"],
+                    "toplam_yonlu_gosterge": sonuc["toplam_yonlu_gosterge"],
                 })
         except Exception as e:
             print(f"[ARGE] {ticker} tam yıl testi hatası: {e}", flush=True)
@@ -858,7 +889,8 @@ def hesap_makinesi_tam_yil_testi(baslangic_str: str = "2026-01-01", bitis_str: s
     dosya_yolu = _data_path("tam_yil_hesap_makinesi_testi.csv")
     with open(dosya_yolu, "w", newline="", encoding="utf-8-sig") as f:
         w = csv.DictWriter(f, fieldnames=["tarih", "ticker", "yon", "skor",
-                                           "ertesi_gun_getiri_pct", "dogru_mu"])
+                                           "ertesi_gun_getiri_pct", "dogru_mu",
+                                           "uyumlu_sayisi", "toplam_yonlu_gosterge"])
         w.writeheader()
         w.writerows(tum_satirlar)
 
