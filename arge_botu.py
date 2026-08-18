@@ -49,12 +49,13 @@ import threading
 # mesajlarında görünür kılmak için (2026-08-17: 3 kez üst üste "aynı
 # sonuç geldi" şüphesi sonrası eklendi - deploy'un gerçekten güncel
 # olup olmadığını KANITLA göstermek için).
-ARGE_KOD_SURUMU = "v9-gosterge-turnuvasi-2026-08-18"
+ARGE_KOD_SURUMU = "v10-icgorusel-islem-testi-2026-08-18"
 import warnings
 from datetime import datetime, timezone
 
 import numpy as np
 import pandas as pd
+from scipy import stats as _stats
 import requests
 
 warnings.filterwarnings("ignore")
@@ -128,7 +129,9 @@ US_TICKERS = [
     "AVGO", "CRM", "ADBE", "COST", "PEP", "TMUS", "QCOM", "INTC", "CSCO",
     "JPM", "BAC", "XOM", "V", "MA", "DIS", "UBER",
 ]
-ALL_TICKERS = BIST_TICKERS  # 2026-08-15: Ar-Ge botu artık SADECE gece radarı için çalışıyor - o BIST-only, US listesi artık kullanılmıyor (kod kalsın, kaybolmasın)
+ALL_TICKERS = BIST_TICKERS  # 2026-08-15: Ar-Ge botu artık SADECE gece radarı için çalışıyor - o BIST-only.
+# 2026-08-18: US_TICKERS gece radarında hâlâ kullanılmıyor ama finra_kisa_pozisyon_testi
+# (aşağıda) için yeniden devreye girdi - kod kaybolmasın diye tutulmuştu, iyi ki tutulmuş.
 
 _last_run_time = None
 _ARGE_AVAILABLE = bool(TELEGRAM_TOKEN and TELEGRAM_CHAT_ID)
@@ -1097,6 +1100,127 @@ def gosterge_turnuvasi_calistir(baslangic_str: str = "2026-01-01", bitis_str: st
     return dosya_yolu, ozet
 
 
+# =============================================================================
+# İÇERİDEN İŞLEM (INSIDER TRADING) TESTİ — 2026-08-18
+# =============================================================================
+# GEREKÇE: Kullanıcıyla konuşurken çıkan fikir — RSI/MACD gibi HERKESİN aynı
+# formülle hesaplayabildiği göstergeler yerine, "kimsenin bakmadığı" bir veri
+# türü denemek. yfinance'in insider_transactions verisi (SEC Form 4 tabanlı,
+# ABD şirketlerinde yönetici/yönetim kurulu üyesi/büyük ortağın kendi hisse
+# alım-satımı) TAM bunu karşılıyor: sıfır API anahtarı, sıfır kayıt (zaten
+# kullanılan yfinance'in bir parçası), VE geçmişe dönük veri var - beklemeden
+# şimdi backtest edilebiliyor (opsiyon zincirinin aksine).
+# DÜRÜST SINIR: yfinance'in insider_transactions kolon adları sürüme göre
+# değişebilir - ilk canlı çalıştırmada beklenmeyen bir yapı görülürse
+# konsola yazdırılıp o hisse atlanıyor, sessizce yanlış yorumlanmıyor.
+
+US_INSIDER_TICKERS = [
+    "AAPL", "MSFT", "GOOGL", "AMZN", "NVDA", "META", "TSLA", "BRK-B", "JPM",
+    "V", "UNH", "MA", "HD", "PG", "COST", "XOM", "JNJ", "ABBV", "MRK",
+    "AVGO", "PEP", "KO", "BAC", "WMT", "CRM", "ADBE", "AMD", "NFLX", "DIS",
+    "CSCO", "ORCL", "INTC", "QCOM", "TXN", "PFE", "NKE", "MCD", "GS", "CAT",
+    "BA", "LLY", "TMO", "ABT", "DHR", "ACN", "LIN", "MDT", "NEE", "PM",
+    "UNP", "RTX", "HON", "SBUX", "LOW", "INTU", "AMGN", "IBM", "GE", "CVX",
+    "WFC", "MS", "SCHW", "BLK", "SPGI", "AXP", "C", "T", "VZ", "CMCSA",
+    "AMAT", "MU", "LRCX", "ADI", "KLAC", "SNPS", "CDNS", "PANW", "CRWD",
+    "NOW", "UBER", "ABNB", "PYPL", "XYZ", "SHOP", "COIN", "MRNA", "GILD",
+    "BMY", "CVS", "CI", "ELV", "HCA", "DE", "MMM", "LMT", "NOC", "GD",
+    "EOG", "SLB", "COP", "PSX", "MPC", "VLO", "NEM", "FCX", "DOW",
+]
+
+ICGORUSEL_ISLEM_MIN_N = 20
+ICGORUSEL_ISLEM_GUN_UFKU = 20  # islem sonrasi kac islem gunu getirisine bakilacak
+
+
+def _binom_p(dogru_n: int, toplam_n: int):
+    if toplam_n == 0:
+        return None
+    return round(_stats.binomtest(dogru_n, toplam_n, 0.5).pvalue, 5)
+
+
+def icgorusel_islem_testi_calistir(gun_ufku: int = ICGORUSEL_ISLEM_GUN_UFKU) -> tuple:
+    """yfinance Ticker.insider_transactions verisiyle: içeriden ALIM'den
+    sonra hisse gerçekten daha mı çok yükseliyor, içeriden SATIM'dan sonra
+    daha mı çok düşüyor - GUN_UFKU işlem günü sonraki getiriye bakarak
+    test eder. Döner: (dosya_yolu, özet_dict) ya da (None, hata_mesajı)."""
+    import yfinance as yf
+    kayitlar = []
+    for n_i, ticker in enumerate(US_INSIDER_TICKERS, 1):
+        try:
+            print(f"[İçeriden İşlem {n_i}/{len(US_INSIDER_TICKERS)}] {ticker}...", flush=True)
+            t = yf.Ticker(ticker)
+            islemler = t.insider_transactions
+            if islemler is None or islemler.empty:
+                continue
+
+            fiyat_df = t.history(period="2y", interval="1d")
+            if fiyat_df is None or fiyat_df.empty:
+                continue
+            fiyat_df = fiyat_df.rename(columns={"Close": "close"})
+            fiyat_df.index = pd.to_datetime(fiyat_df.index).tz_localize(None)
+
+            tarih_kolonu = next((k for k in ["Start Date", "StartDate", "Date"]
+                                  if k in islemler.columns), None)
+            islem_kolonu = next((k for k in ["Transaction", "Text"]
+                                  if k in islemler.columns), None)
+            if tarih_kolonu is None or islem_kolonu is None:
+                print(f"[İçeriden İşlem] {ticker}: beklenmeyen kolon yapısı: "
+                      f"{list(islemler.columns)}", flush=True)
+                continue
+
+            for _, row in islemler.iterrows():
+                try:
+                    islem_tarihi = pd.to_datetime(row[tarih_kolonu]).tz_localize(None)
+                except Exception:
+                    continue
+                metin = str(row[islem_kolonu])
+                if "Purchase" in metin:
+                    tur = "ALIM"
+                elif "Sale" in metin:
+                    tur = "SATIM"
+                else:
+                    continue
+
+                giris_konum = fiyat_df.index.get_indexer([islem_tarihi], method="nearest")[0]
+                if giris_konum < 0 or giris_konum + gun_ufku >= len(fiyat_df):
+                    continue
+                giris_fiyat = fiyat_df.iloc[giris_konum]["close"]
+                cikis_fiyat = fiyat_df.iloc[giris_konum + gun_ufku]["close"]
+                if giris_fiyat == 0 or pd.isna(giris_fiyat) or pd.isna(cikis_fiyat):
+                    continue
+                getiri = (cikis_fiyat - giris_fiyat) / giris_fiyat * 100
+                kayitlar.append({"ticker": ticker, "tarih": islem_tarihi.date().isoformat(),
+                                  "tur": tur, "getiri_pct": round(getiri, 3)})
+        except Exception as e:
+            print(f"[İçeriden İşlem] {ticker} hata: {e}", flush=True)
+        time.sleep(0.3)
+
+    if not kayitlar:
+        return None, "Hiçbir işlem kaydı üretilemedi (yfinance insider_transactions boş dönmüş olabilir)."
+
+    df = pd.DataFrame(kayitlar)
+    dosya_yolu = _data_path("icgorusel_islem_testi.csv")
+    df.to_csv(dosya_yolu, index=False, encoding="utf-8-sig")
+
+    ozet_satirlari = []
+    for tur, dogru_yon in [("ALIM", 1), ("SATIM", -1)]:
+        alt = df[df["tur"] == tur]
+        if len(alt) < ICGORUSEL_ISLEM_MIN_N:
+            continue
+        dogru_n = int((alt["getiri_pct"] * dogru_yon > 0).sum())
+        p = _binom_p(dogru_n, len(alt))
+        ozet_satirlari.append({
+            "tur": tur, "n": len(alt), "dogru_n": dogru_n,
+            "kazanma_orani_pct": round(dogru_n / len(alt) * 100, 2),
+            "binom_p": p, "ort_getiri_pct": round(alt["getiri_pct"].mean(), 4),
+        })
+
+    if not ozet_satirlari:
+        return None, f"Yeterli örneklem büyüklüğüne ({ICGORUSEL_ISLEM_MIN_N}) ulaşan ALIM/SATIM grubu bulunamadı."
+
+    return dosya_yolu, {"gun_ufku": gun_ufku, "toplam_islem": len(df), "gruplar": ozet_satirlari}
+
+
 
     """Kullanıcının istediği DOĞRULAMA TESTİ: verilen tarihin (örn.
     '2026-07-04') kapanışındaki gösterge değerleriyle Gemini'den BIST
@@ -1660,7 +1784,10 @@ def send_startup_message():
         "/hesap_makinesi TICKER — anlık canlı hesaplama\n"
         "/gosterge_turnuvasi [BAŞLANGIÇ] [BİTİŞ] — hesap makinesinin "
         "ağırlıklı toplamı yerine her göstergeyi TEK BAŞINA (ABD swing "
-        "turnuvasındaki gibi izole) test edip lider tablosu üretir\n\n"
+        "turnuvasındaki gibi izole) test edip lider tablosu üretir\n"
+        "/icgorusel_islem [GÜN_UFKU] — ABD hisselerinde içeriden (yönetici/"
+        "yönetim kurulu) alım-satımın sonraki getiriyle ilişkisini test eder "
+        "(varsayılan 20 işlem günü ufku)\n\n"
         "🔬 Hipotez araştırması komutları:\n"
         "/arge_rapor — şimdiye kadarki tüm denemelerin özeti\n"
         "/arge_test — hemen bir hipotez dener (test amaçlı)\n\n"
@@ -2022,6 +2149,32 @@ def poll_arge_commands():
                 except Exception as e:
                     send_telegram_message(f"🏆 Gösterge turnuvası hatası: {e}")
             threading.Thread(target=_arka_plan_turnuva, args=(baslangic, bitis), daemon=True).start()
+        elif text.startswith("/icgorusel_islem"):
+            parcalar = text.split()
+            gun_ufku = int(parcalar[1]) if len(parcalar) > 1 else ICGORUSEL_ISLEM_GUN_UFKU
+            send_telegram_message(
+                f"👤 İÇERİDEN İŞLEM TESTİ başlıyor: {len(US_INSIDER_TICKERS)} ABD hissesi, "
+                f"her işlemden {gun_ufku} işlem günü sonraki getiriye bakılacak. "
+                f"ARKA PLANDA çalışıyor, bitince CSV + özet göndereceğim."
+            )
+
+            def _arka_plan_icgorusel(gu):
+                try:
+                    dosya_yolu, ozet = icgorusel_islem_testi_calistir(gu)
+                    if dosya_yolu is None:
+                        send_telegram_message(f"👤 İçeriden işlem testi başarısız: {ozet}")
+                        return
+                    satirlar = [f"👤 İçeriden İşlem Testi Sonucu ({ozet['gun_ufku']} gün ufku)",
+                                f"Toplam işlem: {ozet['toplam_islem']}\n"]
+                    for g in ozet["gruplar"]:
+                        satirlar.append(
+                            f"{g['tur']}: n={g['n']}, %{g['kazanma_orani_pct']} doğru yönde "
+                            f"(binom p={g['binom_p']}), ort. getiri %{g['ort_getiri_pct']}"
+                        )
+                    send_telegram_document(dosya_yolu, caption="\n".join(satirlar))
+                except Exception as e:
+                    send_telegram_message(f"👤 İçeriden işlem testi hatası: {e}")
+            threading.Thread(target=_arka_plan_icgorusel, args=(gun_ufku,), daemon=True).start()
         elif text.startswith("/arge_test"):
             send_telegram_message("🧪 Manuel test turu başlatılıyor (arka planda)...")
 
