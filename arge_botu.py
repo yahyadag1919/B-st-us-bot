@@ -49,7 +49,7 @@ import threading
 # mesajlarında görünür kılmak için (2026-08-17: 3 kez üst üste "aynı
 # sonuç geldi" şüphesi sonrası eklendi - deploy'un gerçekten güncel
 # olup olmadığını KANITLA göstermek için).
-ARGE_KOD_SURUMU = "v6-tarih-teshis-2026-08-17"
+ARGE_KOD_SURUMU = "v7-bayat-veri-korumasi-2026-08-17"
 import warnings
 from datetime import datetime, timezone
 
@@ -150,6 +150,24 @@ def send_telegram_message(text: str):
             json={"chat_id": TELEGRAM_CHAT_ID, "text": text[:4000]}, timeout=20)
     except Exception as e:
         print(f"[ARGE] Telegram gönderilemedi: {e}", flush=True)
+
+
+def send_telegram_document(filepath: str, caption: str = ""):
+    """Bir dosyayı (CSV vb.) doğrudan Telegram belgesi olarak gönderir -
+    Gemini'ye HİÇ gerek yok, Telegram Bot API'sinin kendi sendDocument
+    uç noktası dosya yüklemeyi zaten destekliyor."""
+    if not TELEGRAM_TOKEN or not TELEGRAM_CHAT_ID:
+        print(f"[ARGE] Telegram ayarlı değil, dosya gönderilemedi: {filepath}", flush=True)
+        return
+    try:
+        with open(filepath, "rb") as f:
+            requests.post(
+                f"https://api.telegram.org/bot{TELEGRAM_TOKEN}/sendDocument",
+                data={"chat_id": TELEGRAM_CHAT_ID, "caption": caption[:1000]},
+                files={"document": f}, timeout=120)
+    except Exception as e:
+        print(f"[ARGE] Telegram dosya gönderilemedi: {e}", flush=True)
+        send_telegram_message(f"⚠️ Dosya gönderilemedi: {e}")
 
 
 def _read_history():
@@ -766,7 +784,96 @@ def hesap_makinesi_debug(ticker: str, tarih_str: str) -> str:
     return "\n".join(lines)
 
 
-def hesap_makinesi_backtest(tarih_str: str) -> str:
+def hesap_makinesi_tam_yil_testi(baslangic_str: str = "2026-01-01", bitis_str: str = None) -> tuple:
+    """Kullanıcının isteği: tek tek tarih yazmak yerine, baştan (2026-01-01)
+    BUGÜNE kadar HER işlem gününü otomatik test edip TEK BİR DOSYA (CSV)
+    halinde sonuç üretir. Verimlilik için: her hisse SADECE 1 KEZ çekilir,
+    sonra o hissenin TÜM günleri aynı veri üzerinde döngüyle test edilir -
+    /hesap_test'in her tarih için ayrı ayrı çekmesinden ÇOK daha hızlı.
+    Hafta sonu/resmi tatil AYRIMI GEREKMİYOR - hangi günlerin gerçek işlem
+    günü olduğu XU100 endeksinin KENDİ VERİSİNDEN (index_df.index) alınıyor,
+    bu doğal olarak sadece gerçek işlem günlerini içeriyor.
+    BAYAT VERİ KORUMASI: /hesap_test'teki AYNI mantık - giriş=çıkış olan
+    (Yahoo'nun bayat veri döndürdüğü) satırlar sessizce ATLANIYOR, sahte
+    '%0 getiri' olarak sayılmıyor.
+    Döner: (dosya_yolu, özet_dict) ya da (None, hata_mesajı)."""
+    import yfinance as yf
+    bitis_str = bitis_str or datetime.now(timezone.utc).date().isoformat()
+    baslangic, bitis = pd.Timestamp(baslangic_str), pd.Timestamp(bitis_str)
+
+    index_df = yf.Ticker("XU100.IS").history(period="2y", interval="1d")
+    if index_df is None or index_df.empty:
+        return None, "XU100 endeks verisi çekilemedi."
+    index_df.index = pd.to_datetime(index_df.index).tz_localize(None)
+    index_pct = (index_df["Close"] - index_df["Close"].shift(1)) / index_df["Close"].shift(1) * 100
+    islem_gunleri = index_df.index[(index_df.index >= baslangic) & (index_df.index <= bitis)]
+    if len(islem_gunleri) == 0:
+        return None, f"{baslangic_str} - {bitis_str} arasında işlem günü bulunamadı."
+
+    print(f"[ARGE] Tam yıl testi başlıyor: {len(islem_gunleri)} işlem günü × "
+          f"{len(BIST_TICKERS)} hisse", flush=True)
+
+    tum_satirlar = []
+    for ticker in BIST_TICKERS:
+        try:
+            df = yf.Ticker(ticker).history(period="2y", interval="1d")
+            if df is None or df.empty or len(df) < 100:
+                continue
+            df = df.rename(columns={"Open": "open", "High": "high", "Low": "low",
+                                     "Close": "close", "Volume": "volume"})
+            df = df[["open", "high", "low", "close", "volume"]].copy()
+            df.index = pd.to_datetime(df.index).tz_localize(None)
+            df = compute_features(df, index_pct)
+
+            for tarih in islem_gunleri:
+                if tarih not in df.index:
+                    continue
+                gostergeler = _gostergeleri_hesapla(df, tarih)
+                if gostergeler is None:
+                    continue
+                idx = df.index.get_loc(tarih)
+                if idx + 1 >= len(df):
+                    continue
+                entry = df.iloc[idx]["close"]
+                cikis = df.iloc[idx + 1]["close"]
+                if entry == 0:
+                    continue
+                getiri = (cikis - entry) / entry * 100
+                if abs(getiri) < 0.001:
+                    continue  # BAYAT VERI KORUMASI - Yahoo'nun tekrar eden verisi
+                sonuc = hesapla_yon_kod_ile(gostergeler)
+                dogru = (sonuc["yon"] == "LONG" and getiri > 0) or (sonuc["yon"] == "SHORT" and getiri < 0)
+                tum_satirlar.append({
+                    "tarih": tarih.date().isoformat(), "ticker": ticker, "yon": sonuc["yon"],
+                    "skor": sonuc["skor"], "ertesi_gun_getiri_pct": round(getiri, 3),
+                    "dogru_mu": 1 if dogru else 0,
+                })
+        except Exception as e:
+            print(f"[ARGE] {ticker} tam yıl testi hatası: {e}", flush=True)
+        time.sleep(0.2)
+
+    if not tum_satirlar:
+        return None, "Hiçbir sonuç üretilemedi."
+
+    dosya_yolu = _data_path("tam_yil_hesap_makinesi_testi.csv")
+    with open(dosya_yolu, "w", newline="", encoding="utf-8-sig") as f:
+        w = csv.DictWriter(f, fieldnames=["tarih", "ticker", "yon", "skor",
+                                           "ertesi_gun_getiri_pct", "dogru_mu"])
+        w.writeheader()
+        w.writerows(tum_satirlar)
+
+    n = len(tum_satirlar)
+    dogru_n = sum(r["dogru_mu"] for r in tum_satirlar)
+    uzun_n = sum(1 for r in tum_satirlar if r["yon"] == "LONG")
+    ozet = {
+        "n": n, "dogru_n": dogru_n, "dogruluk_pct": round(dogru_n / n * 100, 1),
+        "uzun_n": uzun_n, "kisa_n": n - uzun_n, "gun_sayisi": len(islem_gunleri),
+        "hisse_sayisi": len(BIST_TICKERS),
+    }
+    return dosya_yolu, ozet
+
+
+
     """Kullanıcının istediği DOĞRULAMA TESTİ: verilen tarihin (örn.
     '2026-07-04') kapanışındaki gösterge değerleriyle Gemini'den BIST
     hisseleri için LONG/SHORT kararı alır, ERTESİ GÜNÜN GERÇEK sonucuyla
@@ -878,6 +985,25 @@ def hesap_makinesi_backtest(tarih_str: str) -> str:
     if not sonuclar:
         return (f"{duzeltme_notu}🧮 {hedef_tarih.date()}: {len(kararlar)} karar alındı ama hiçbiri için "
                 f"ertesi günün gerçek verisi bulunamadı (tarih çok yeni olabilir).")
+
+    # BAYAT VERİ KORUMASI (2026-08-17): Yahoo Finance bazı tarihlerde bayat/
+    # tekrarlanan veri döndürebiliyor (giriş ve "ertesi gün" kapanışı BİREBİR
+    # AYNI) - bu gerçek bir piyasa sonucu DEĞİL, veri kaynağının sorunu.
+    # Böyle günler GERCEK sonuc gibi kaydedilirse /hesap_rapor'un istatistiği
+    # bozulur (sahte "hep yanlış" günler). Şüpheli oranda sıfır-getiri varsa
+    # (>%50) TÜM turu geçersiz say, HİÇBİR ŞEY kaydetme.
+    sifir_getiri_sayisi = sum(1 for s in sonuclar if abs(s["ertesi_gun_getiri_pct"]) < 0.001)
+    if sifir_getiri_sayisi / len(sonuclar) > 0.5:
+        return (
+            f"{duzeltme_notu}{ilk_ornek_notu}"
+            f"⚠️ [BAYAT VERİ ŞÜPHESİ] {hedef_tarih.date()}: {sifir_getiri_sayisi}/{len(sonuclar)} "
+            f"hissede giriş ve ertesi gün kapanışı BİREBİR AYNI çıktı — bu gerçek bir "
+            f"piyasa sonucu olamaz, Yahoo Finance'in bu tarih için bayat/tekrarlanan "
+            f"veri döndürdüğüne işaret ediyor. Bu tur GEÇERSİZ SAYILDI, hiçbir şey "
+            f"geçmişe kaydedilmedi.\n\n"
+            f"Öneri: bir gün öncesi ya da sonrasını dene (örn. {(hedef_tarih - pd.Timedelta(days=1)).date()} "
+            f"ya da {(hedef_tarih + pd.Timedelta(days=1)).date()})."
+        )
 
     exists = os.path.exists(HESAP_TEST_HISTORY_FILE)
     with open(HESAP_TEST_HISTORY_FILE, "a", newline="", encoding="utf-8") as f:
@@ -1302,6 +1428,9 @@ def send_startup_message():
         "/hesap_test TARİH — o günün kapanışıyla BIST hisseleri için "
         "toplu hesaplama yapıp ertesi günle karşılaştırır\n"
         "/hesap_test_seri TARİH1 TARİH2 ... — birden fazla tarihi art arda\n"
+        "/hesap_tam_test [BAŞLANGIÇ] [BİTİŞ] — 2026-01-01'den bugüne (ya da "
+        "verilen aralığa) kadar TÜM işlem günlerini test edip TEK BİR CSV "
+        "DOSYASI olarak gönderir\n"
         "/hesap_debug TICKER TARİH — bir hissenin tam hesaplama dökümü\n"
         "/hesap_rapor — birikmiş toplam isabet oranı\n"
         "/hesap_makinesi TICKER — anlık canlı hesaplama\n\n"
@@ -1607,6 +1736,35 @@ def poll_arge_commands():
                     except Exception as e:
                         send_telegram_message(f"🧮 Seri test hatası: {e}")
                 threading.Thread(target=_arka_plan_seri, args=(parcalar,), daemon=True).start()
+        elif text.startswith("/hesap_tam_test"):
+            parcalar = text.split()
+            baslangic = parcalar[1] if len(parcalar) > 1 else "2026-01-01"
+            bitis = parcalar[2] if len(parcalar) > 2 else None
+            send_telegram_message(
+                f"🧮 TAM YIL TESTİ başlıyor: {baslangic} → {bitis or 'bugün'}.\n"
+                f"29 BIST hissesi × tüm işlem günleri (hafta sonu/resmi tatiller "
+                f"otomatik atlanıyor) — ARKA PLANDA çalışıyor, ana botu "
+                f"bloklamıyor. Muhtemelen birkaç dakika sürecek, bitince "
+                f"sonuçları TEK BİR CSV DOSYASI olarak buraya göndereceğim."
+            )
+
+            def _arka_plan_tam_test(b, bt):
+                try:
+                    dosya_yolu, ozet = hesap_makinesi_tam_yil_testi(b, bt)
+                    if dosya_yolu is None:
+                        send_telegram_message(f"🧮 Tam yıl testi başarısız: {ozet}")
+                        return
+                    send_telegram_document(
+                        dosya_yolu,
+                        caption=(f"🧮 Tam Yıl Testi Sonucu\n"
+                                 f"{ozet['gun_sayisi']} işlem günü × {ozet['hisse_sayisi']} hisse\n"
+                                 f"Toplam karar: {ozet['n']} (bayat veri/eksik gün otomatik atlandı)\n"
+                                 f"Genel doğruluk: %{ozet['dogruluk_pct']} ({ozet['dogru_n']}/{ozet['n']})\n"
+                                 f"Dağılım: {ozet['uzun_n']} LONG / {ozet['kisa_n']} SHORT")
+                    )
+                except Exception as e:
+                    send_telegram_message(f"🧮 Tam yıl testi hatası: {e}")
+            threading.Thread(target=_arka_plan_tam_test, args=(baslangic, bitis), daemon=True).start()
         elif text.startswith("/arge_test"):
             send_telegram_message("🧪 Manuel test turu başlatılıyor (arka planda)...")
 
