@@ -49,7 +49,7 @@ import threading
 # mesajlarında görünür kılmak için (2026-08-17: 3 kez üst üste "aynı
 # sonuç geldi" şüphesi sonrası eklendi - deploy'un gerçekten güncel
 # olup olmadığını KANITLA göstermek için).
-ARGE_KOD_SURUMU = "v10-icgorusel-islem-testi-2026-08-18"
+ARGE_KOD_SURUMU = "v11-icgorusel-islem-rate-limit-duzeltmesi-2026-08-18"
 import warnings
 from datetime import datetime, timezone
 
@@ -1138,6 +1138,22 @@ def _binom_p(dogru_n: int, toplam_n: int):
     return round(_stats.binomtest(dogru_n, toplam_n, 0.5).pvalue, 5)
 
 
+def _yfinance_dene(fn, deneme=3, bekleme=5):
+    """Yahoo'nun 'Too Many Requests' hız sınırlamasına karşı basit yeniden
+    deneme - projede KOZAL.IS'te de gözlenen aynı sorun (bkz. AI Lab
+    logları). Her başarısız denemede bekleme süresi katlanarak artar."""
+    for deneme_no in range(deneme):
+        try:
+            return fn()
+        except Exception as e:
+            if deneme_no == deneme - 1:
+                raise
+            print(f"[İçeriden İşlem] hız sınırı/hata, {bekleme}sn sonra "
+                  f"yeniden denenecek ({deneme_no+1}/{deneme}): {e}", flush=True)
+            time.sleep(bekleme)
+            bekleme *= 2
+
+
 def icgorusel_islem_testi_calistir(gun_ufku: int = ICGORUSEL_ISLEM_GUN_UFKU) -> tuple:
     """yfinance Ticker.insider_transactions verisiyle: içeriden ALIM'den
     sonra hisse gerçekten daha mı çok yükseliyor, içeriden SATIM'dan sonra
@@ -1145,15 +1161,16 @@ def icgorusel_islem_testi_calistir(gun_ufku: int = ICGORUSEL_ISLEM_GUN_UFKU) -> 
     test eder. Döner: (dosya_yolu, özet_dict) ya da (None, hata_mesajı)."""
     import yfinance as yf
     kayitlar = []
+    atlanan_hata_sayisi = 0
     for n_i, ticker in enumerate(US_INSIDER_TICKERS, 1):
         try:
             print(f"[İçeriden İşlem {n_i}/{len(US_INSIDER_TICKERS)}] {ticker}...", flush=True)
             t = yf.Ticker(ticker)
-            islemler = t.insider_transactions
+            islemler = _yfinance_dene(lambda: t.insider_transactions)
             if islemler is None or islemler.empty:
                 continue
-
-            fiyat_df = t.history(period="2y", interval="1d")
+            time.sleep(1.0)
+            fiyat_df = _yfinance_dene(lambda: t.history(period="2y", interval="1d"))
             if fiyat_df is None or fiyat_df.empty:
                 continue
             fiyat_df = fiyat_df.rename(columns={"Close": "close"})
@@ -1192,11 +1209,14 @@ def icgorusel_islem_testi_calistir(gun_ufku: int = ICGORUSEL_ISLEM_GUN_UFKU) -> 
                 kayitlar.append({"ticker": ticker, "tarih": islem_tarihi.date().isoformat(),
                                   "tur": tur, "getiri_pct": round(getiri, 3)})
         except Exception as e:
-            print(f"[İçeriden İşlem] {ticker} hata: {e}", flush=True)
-        time.sleep(0.3)
+            atlanan_hata_sayisi += 1
+            print(f"[İçeriden İşlem] {ticker} hata (atlandı): {e}", flush=True)
+        time.sleep(1.5)
 
     if not kayitlar:
-        return None, "Hiçbir işlem kaydı üretilemedi (yfinance insider_transactions boş dönmüş olabilir)."
+        return None, (f"Hiçbir işlem kaydı üretilemedi ({atlanan_hata_sayisi}/"
+                       f"{len(US_INSIDER_TICKERS)} hisse hata verdi - muhtemelen "
+                       f"Yahoo Finance hız sınırlaması, Render loglarına bak).")
 
     df = pd.DataFrame(kayitlar)
     dosya_yolu = _data_path("icgorusel_islem_testi.csv")
