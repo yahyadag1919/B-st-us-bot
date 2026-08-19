@@ -49,7 +49,7 @@ import threading
 # mesajlarında görünür kılmak için (2026-08-17: 3 kez üst üste "aynı
 # sonuç geldi" şüphesi sonrası eklendi - deploy'un gerçekten güncel
 # olup olmadığını KANITLA göstermek için).
-ARGE_KOD_SURUMU = "v15-abd-ortusme-testi-2026-08-18"
+ARGE_KOD_SURUMU = "v16-kur-sektor-testi-2026-08-18"
 import warnings
 from datetime import datetime, timezone
 
@@ -1101,7 +1101,194 @@ def gosterge_turnuvasi_calistir(baslangic_str: str = "2026-01-01", bitis_str: st
 
 
 # =============================================================================
-# İÇERİDEN İŞLEM (INSIDER TRADING) TESTİ — 2026-08-18
+# KUR ARINDIRMA + SEKTÖR-GÖRECELİ TESTİ — 2026-08-18
+# =============================================================================
+# GEREKÇE: Kullanıcıyla birlikte teşhis ettiğimiz kök sorun (§7) - BIST
+# hisselerinin çoğu, kendi hikayesinden çok TL/kur/makro havasını birlikte
+# takip ediyor (v7'de bir günde hisselerin %83-96'sının aynı yöne gitmesi).
+# relative_strength (XU100'e göre) zaten izole test edildi, edge çıkmadı.
+# Bu test İKİ FARKLI arındırma denemesini AYNI ANDA test ediyor:
+#   1) KUR ARINDIRMA: hissenin TL getirisinden USDTRY hareketini çıkarıp
+#      "gerçek" (USD bazlı) getiriye bakıyor - belki sinyal kur gürültüsü
+#      altında kayboluyordur.
+#   2) SEKTÖR-GÖRECELİ: hisseyi piyasa geneline değil KENDİ SEKTÖRÜNE göre
+#      kıyaslıyor (8 sektör grubu, kendi hariç sektör ortalaması).
+# Her ikisi de HEDEFİ değiştiriyor (tahmin edilen şey), göstergeler
+# (RSI, MACD vb.) aynı kalıyor - "belki doğru şeyi tahmin etmiyorduk"
+# sorusuna cevap.
+
+BIST_SEKTORLER = {
+    "BANKA": ["GARAN.IS", "AKBNK.IS", "YKBNK.IS", "ISCTR.IS", "HALKB.IS", "VAKBN.IS"],
+    "HOLDING": ["KCHOL.IS", "SAHOL.IS", "ENKAI.IS"],
+    "SANAYI": ["SISE.IS", "EREGL.IS", "PETKM.IS", "SASA.IS", "ARCLK.IS"],
+    "ULASIM_HAVACILIK": ["THYAO.IS", "PGSUS.IS", "TAVHL.IS"],
+    "TUKETIM_PERAKENDE": ["BIMAS.IS", "MGROS.IS", "ULKER.IS", "VESTL.IS"],
+    "ENERJI_MADEN": ["TUPRS.IS", "AKSEN.IS", "KOZAL.IS", "OYAKC.IS"],
+    "TEKNOLOJI_TELEKOM": ["TCELL.IS", "TTKOM.IS", "ASELS.IS"],
+    "OTOMOTIV": ["FROTO.IS", "TOASO.IS"],
+}
+_TICKER_SEKTOR = {t: s for s, tks in BIST_SEKTORLER.items() for t in tks}
+
+
+def _hedef_matrisi_genel(df_all: pd.DataFrame, hedef_kolonu: str, etiket: str) -> pd.DataFrame:
+    """_feature_strateji_matrisi ile AYNI mantık ama hedef kolonu
+    parametrik - farklı hedef tanımlarını (kur-arındırılmış, sektör-
+    göreceli) aynı test çatısıyla karşılaştırabilmek için."""
+    satirlar = []
+    for ozellik in _yonlu_ozellikler_listesi():
+        gecerli = df_all.dropna(subset=[ozellik, hedef_kolonu])
+        if len(gecerli) < 200:
+            continue
+        ust_esik = gecerli[ozellik].quantile(1 - GOSTERGE_TURNUVASI_ESIK_YUZDE)
+        alt_esik = gecerli[ozellik].quantile(GOSTERGE_TURNUVASI_ESIK_YUZDE)
+        maske_ust = gecerli[ozellik] >= ust_esik
+        maske_alt = gecerli[ozellik] <= alt_esik
+
+        for tip, ust_yon, alt_yon in (("reversal", "SHORT", "LONG"), ("momentum", "LONG", "SHORT")):
+            yon_serisi = pd.Series(np.nan, index=gecerli.index, dtype=object)
+            yon_serisi[maske_ust] = ust_yon
+            yon_serisi[maske_alt] = alt_yon
+            secim = yon_serisi.notna()
+            if secim.sum() < GOSTERGE_TURNUVASI_MIN_N:
+                continue
+            secilen = gecerli[secim]
+            yon_sel = yon_serisi[secim]
+            dogru = ((yon_sel == "LONG") & (secilen[hedef_kolonu] > 0)) | \
+                    ((yon_sel == "SHORT") & (secilen[hedef_kolonu] < 0))
+            isaretli = secilen[hedef_kolonu] * np.where(yon_sel == "LONG", 1, -1)
+            dogru_n = int(dogru.sum())
+            p = _binom_p(dogru_n, int(secim.sum()))
+            satirlar.append({
+                "hedef": etiket, "strateji": f"{ozellik} | {tip}", "n": int(secim.sum()),
+                "kazanma_orani_pct": round(dogru.mean() * 100, 2),
+                "binom_p": p, "ort_isaretli_getiri_pct": round(isaretli.mean(), 4),
+            })
+    return pd.DataFrame(satirlar)
+
+
+def kur_sektor_testi_calistir(baslangic_str: str = "2026-01-01", bitis_str: str = None) -> tuple:
+    """gosterge_turnuvasi_calistir ile AYNI veri/döngü mantığı, ama HER
+    hisse için üç ayrı hedef hesaplıyor: ham getiri (kıyas için), kur-
+    arındırılmış getiri, sektör-göreceli getiri. Aynı 13 gösterge, üç
+    farklı hedefe karşı test ediliyor - hangisi (varsa) gerçek bir kenar
+    ortaya çıkarıyor. Döner: (dosya_yolu, özet_dict) ya da (None, hata)."""
+    import yfinance as yf
+    bitis_str = bitis_str or datetime.now(timezone.utc).date().isoformat()
+    baslangic, bitis = pd.Timestamp(baslangic_str), pd.Timestamp(bitis_str)
+
+    index_df = yf.Ticker("XU100.IS").history(period="2y", interval="1d")
+    if index_df is None or index_df.empty:
+        return None, "XU100 endeks verisi çekilemedi."
+    index_df.index = pd.to_datetime(index_df.index).tz_localize(None)
+    index_pct = (index_df["Close"] - index_df["Close"].shift(1)) / index_df["Close"].shift(1) * 100
+
+    kur_df = yf.Ticker("USDTRY=X").history(period="2y", interval="1d")
+    if kur_df is None or kur_df.empty:
+        return None, "USDTRY kur verisi çekilemedi."
+    kur_df.index = pd.to_datetime(kur_df.index).tz_localize(None)
+    kur_close = kur_df["Close"]
+
+    islem_gunleri = index_df.index[(index_df.index >= baslangic) & (index_df.index <= bitis)]
+    if len(islem_gunleri) == 0:
+        return None, f"{baslangic_str} - {bitis_str} arasında işlem günü bulunamadı."
+
+    print(f"[ARGE] Kur/Sektör testi başlıyor: {len(islem_gunleri)} işlem günü × "
+          f"{len(BIST_TICKERS)} hisse", flush=True)
+
+    # 1. AŞAMA: her hisse için ozellikler + HAM sonraki-gun getirisi (kur
+    # arindirmasi icin kur getirisini de topluyoruz, sektor icin ham
+    # getiriyi ayri bir kolonda tutup asama 2'de capraz-hisse ortalamasini
+    # alacagiz).
+    parcalar = []
+    for ticker in BIST_TICKERS:
+        try:
+            df = yf.Ticker(ticker).history(period="2y", interval="1d")
+            if df is None or df.empty or len(df) < 100:
+                continue
+            df = df.rename(columns={"Open": "open", "High": "high", "Low": "low",
+                                     "Close": "close", "Volume": "volume"})
+            df = df[["open", "high", "low", "close", "volume"]].copy()
+            df.index = pd.to_datetime(df.index).tz_localize(None)
+            df = compute_features(df, index_pct)
+
+            gunler = df.index[(df.index >= baslangic) & (df.index <= bitis)]
+            alt = df.loc[df.index.isin(gunler)].copy()
+            if alt.empty:
+                continue
+            alt["sonraki_gun_ham_getiri_pct"] = np.nan
+            alt["sonraki_gun_kur_arindirilmis_getiri_pct"] = np.nan
+            for tarih in alt.index:
+                idx = df.index.get_loc(tarih)
+                if idx + 1 >= len(df):
+                    continue
+                entry = df.iloc[idx]["close"]
+                cikis = df.iloc[idx + 1]["close"]
+                if entry == 0:
+                    continue
+                getiri = (cikis - entry) / entry * 100
+                if abs(getiri) < 0.001:
+                    continue  # BAYAT VERİ KORUMASI
+                alt.loc[tarih, "sonraki_gun_ham_getiri_pct"] = getiri
+
+                # kur arindirmasi: hissenin USD bazli getirisi
+                tarih_sonraki = df.index[idx + 1]
+                try:
+                    kur_entry = kur_close.reindex([tarih], method="nearest").iloc[0]
+                    kur_cikis = kur_close.reindex([tarih_sonraki], method="nearest").iloc[0]
+                    if kur_entry and kur_entry != 0:
+                        kur_getiri = (kur_cikis - kur_entry) / kur_entry * 100
+                        kur_arindirilmis = ((1 + getiri / 100) / (1 + kur_getiri / 100) - 1) * 100
+                        alt.loc[tarih, "sonraki_gun_kur_arindirilmis_getiri_pct"] = kur_arindirilmis
+                except Exception:
+                    pass
+            alt["ticker"] = ticker
+            alt["sektor"] = _TICKER_SEKTOR.get(ticker, "DIGER")
+            parcalar.append(alt)
+        except Exception as e:
+            print(f"[ARGE] {ticker} kur/sektör verisi hatası: {e}", flush=True)
+        time.sleep(0.2)
+
+    if not parcalar:
+        return None, "Hiçbir hisse için veri üretilemedi."
+
+    df_all = pd.concat(parcalar, ignore_index=False)
+    df_all = df_all.dropna(subset=["sonraki_gun_ham_getiri_pct"])
+    if df_all.empty:
+        return None, "Hiçbir geçerli (bayat olmayan) gün bulunamadı."
+
+    # 2. AŞAMA: sektör-göreceli getiri - her (tarih, sektör) grubu için
+    # KENDİ HARİÇ sektör ortalaması çıkarılıyor (çapraz-hisse işlem,
+    # bu yüzden tüm hisseler birleştirildikten SONRA yapılıyor).
+    df_all["_tarih"] = df_all.index
+    grup = df_all.groupby(["_tarih", "sektor"])["sonraki_gun_ham_getiri_pct"]
+    toplam = grup.transform("sum")
+    sayi = grup.transform("count")
+    # kendi haric ortalama = (toplam - kendisi) / (sayi - 1), sayi<2 ise NaN
+    kendi_haric_ort = np.where(sayi > 1, (toplam - df_all["sonraki_gun_ham_getiri_pct"]) / (sayi - 1), np.nan)
+    df_all["sonraki_gun_sektor_relatif_getiri_pct"] = df_all["sonraki_gun_ham_getiri_pct"] - kendi_haric_ort
+    df_all = df_all.drop(columns=["_tarih"])
+
+    # 3. AŞAMA: üç hedefe karşı ayrı ayrı test
+    tablo_ham = _hedef_matrisi_genel(df_all, "sonraki_gun_ham_getiri_pct", "HAM (kıyas)")
+    tablo_kur = _hedef_matrisi_genel(df_all, "sonraki_gun_kur_arindirilmis_getiri_pct", "KUR ARINDIRILMIŞ")
+    tablo_sektor = _hedef_matrisi_genel(df_all, "sonraki_gun_sektor_relatif_getiri_pct", "SEKTÖR-GÖRECELİ")
+
+    tablo = pd.concat([tablo_ham, tablo_kur, tablo_sektor], ignore_index=True)
+    if tablo.empty:
+        return None, "Yeterli örneklem büyüklüğüne ulaşan strateji bulunamadı."
+    tablo = tablo.sort_values("kazanma_orani_pct", ascending=False).reset_index(drop=True)
+
+    dosya_yolu = _data_path("kur_sektor_testi.csv")
+    tablo.to_csv(dosya_yolu, index=False, encoding="utf-8-sig")
+
+    ozet = {
+        "gun_sayisi": len(islem_gunleri), "hisse_sayisi": len(BIST_TICKERS),
+        "toplam_gozlem": len(df_all), "strateji_sayisi": len(tablo),
+        "en_iyi_strateji": tablo.iloc[0]["strateji"], "en_iyi_hedef": tablo.iloc[0]["hedef"],
+        "en_iyi_kazanma_orani": tablo.iloc[0]["kazanma_orani_pct"],
+        "en_iyi_p": tablo.iloc[0]["binom_p"], "en_iyi_n": int(tablo.iloc[0]["n"]),
+    }
+    return dosya_yolu, ozet
 # =============================================================================
 # GEREKÇE: Kullanıcıyla konuşurken çıkan fikir — RSI/MACD gibi HERKESİN aynı
 # formülle hesaplayabildiği göstergeler yerine, "kimsenin bakmadığı" bir veri
@@ -2159,6 +2346,9 @@ def send_startup_message():
         "/gosterge_turnuvasi [BAŞLANGIÇ] [BİTİŞ] — hesap makinesinin "
         "ağırlıklı toplamı yerine her göstergeyi TEK BAŞINA (ABD swing "
         "turnuvasındaki gibi izole) test edip lider tablosu üretir\n"
+        "/kur_sektor_testi [BAŞLANGIÇ] [BİTİŞ] — göstergeleri ham getiri, "
+        "USDTRY-arındırılmış getiri ve sektör-göreceli getiri olmak üzere "
+        "3 farklı hedefe karşı test eder\n"
         "/icgorusel_islem [GÜN_UFKU] — ABD hisselerinde içeriden (yönetici/"
         "yönetim kurulu) alım-satımın sonraki getiriyle ilişkisini test eder "
         "(varsayılan 20 işlem günü ufku)\n"
@@ -2530,6 +2720,37 @@ def poll_arge_commands():
                 except Exception as e:
                     send_telegram_message(f"🏆 Gösterge turnuvası hatası: {e}")
             threading.Thread(target=_arka_plan_turnuva, args=(baslangic, bitis), daemon=True).start()
+        elif text.startswith("/kur_sektor_testi"):
+            parcalar = text.split()
+            baslangic = parcalar[1] if len(parcalar) > 1 else "2026-01-01"
+            bitis = parcalar[2] if len(parcalar) > 2 else None
+            send_telegram_message(
+                f"💱 KUR/SEKTÖR TESTİ başlıyor: {baslangic} → {bitis or 'bugün'}.\n"
+                f"Aynı 13 göstergeyi 3 farklı hedefe karşı test ediyor: ham "
+                f"getiri (kıyas), USDTRY arındırılmış getiri, sektör-göreceli "
+                f"getiri (8 sektör grubu). ARKA PLANDA çalışıyor, birkaç "
+                f"dakika sürebilir, bitince CSV + özet göndereceğim."
+            )
+
+            def _arka_plan_kur_sektor(b, bt):
+                try:
+                    dosya_yolu, ozet = kur_sektor_testi_calistir(b, bt)
+                    if dosya_yolu is None:
+                        send_telegram_message(f"💱 Kur/Sektör testi başarısız: {ozet}")
+                        return
+                    send_telegram_document(
+                        dosya_yolu,
+                        caption=(f"💱 Kur/Sektör Testi Sonucu\n"
+                                 f"{ozet['gun_sayisi']} işlem günü × {ozet['hisse_sayisi']} hisse, "
+                                 f"{ozet['toplam_gozlem']} gözlem\n"
+                                 f"{ozet['strateji_sayisi']} satır (3 hedef × göstergeler)\n"
+                                 f"🥇 En iyi: [{ozet['en_iyi_hedef']}] {ozet['en_iyi_strateji']}\n"
+                                 f"   %{ozet['en_iyi_kazanma_orani']} isabet (n={ozet['en_iyi_n']}, "
+                                 f"p={ozet['en_iyi_p']})")
+                    )
+                except Exception as e:
+                    send_telegram_message(f"💱 Kur/Sektör testi hatası: {e}")
+            threading.Thread(target=_arka_plan_kur_sektor, args=(baslangic, bitis), daemon=True).start()
         elif text.startswith("/icgorusel_islem"):
             parcalar = text.split()
             gun_ufku = int(parcalar[1]) if len(parcalar) > 1 else ICGORUSEL_ISLEM_GUN_UFKU
