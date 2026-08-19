@@ -49,7 +49,7 @@ import threading
 # mesajlarında görünür kılmak için (2026-08-17: 3 kez üst üste "aynı
 # sonuç geldi" şüphesi sonrası eklendi - deploy'un gerçekten güncel
 # olup olmadığını KANITLA göstermek için).
-ARGE_KOD_SURUMU = "v12-kanit-dogrulama-2026-08-18"
+ARGE_KOD_SURUMU = "v13-kanit-dogrulama-gercek-cikis-mantigi-2026-08-18"
 import warnings
 from datetime import datetime, timezone
 
@@ -1267,8 +1267,11 @@ KANIT_VOLUME_MULTIPLIER = 1.5
 KANIT_INVALIDATION_ATR_BUFFER = 1.0
 KANIT_US_ZSCORE_THRESHOLD = 2.0
 KANIT_US_ATR_MULT = 2.0
-KANIT_RR_HEDEF_ORANI = 2.0
-KANIT_MAX_BEKLEME_GUNU = 15
+KANIT_RR_HEDEF_ORANI = 2.0  # eski basit simulasyon (v12) - artik kullanilmiyor, v13 staged mantik kullaniyor
+KANIT_PARTIAL_TP_R_MULT = 1.5   # stock_screener_bot.py PARTIAL_TP_R_MULT ile birebin ayni
+KANIT_TRAIL_ATR_MULT = 2.0      # TRAIL_ATR_MULT ile birebin ayni
+KANIT_TRAIL_MIN_MOVE_PCT = 1.0  # TRAIL_MIN_MOVE_PCT ile birebin ayni
+KANIT_MAX_BEKLEME_GUNU = 40
 KANIT_US_CHECKPOINTS = [(1, "1g", 1.0), (3, "3g", 2.0), (5, "5g", 3.0), (10, "10g", 5.0)]
 KANIT_MIN_N = 20
 
@@ -1340,8 +1343,13 @@ def _kanit_check_us_atr_breakout(row, prev_close) -> str:
 
 
 def _kanit_bist_rr_sonuc(df: pd.DataFrame, idx: int, direction: str):
-    """ATR-stop + sabit 1:2 R:R walk-forward - proje konvansiyonu (aynı
-    barda hem TP hem stop tutarsa KAYIP sayılır)."""
+    """2026-08-18 DÜZELTME: canlı sistemin GERÇEK check_exit_alerts()
+    mantığıyla birebir aynı üç aşamalı çıkış - ilk sürüm sabit 1:2 R:R
+    hard target/stop kullanıyordu, bu YANLIŞTI ve BIST sonuçlarını
+    yapay olarak çok kötü gösterdi. Gerçek sistem: 1.5R'de PARSİYEL
+    (yarısı kilitlenir, stop breakeven'e çekilir), sonra ATR ile
+    TRAILING STOP. Ayrıca canlı sistem SADECE KAPANIŞ fiyatını kontrol
+    ediyor (gün içi high/low DEĞİL) - bu da birebir taklit edildi."""
     row = df.iloc[idx]
     entry = row["close"]
     atr = row["atr14"] if pd.notna(row["atr14"]) else 0
@@ -1349,30 +1357,52 @@ def _kanit_bist_rr_sonuc(df: pd.DataFrame, idx: int, direction: str):
     if direction == "LONG":
         stop = row["low"] - buffer
         stop_dist = entry - stop
-        if stop_dist <= 0:
-            return None
-        hedef = entry + stop_dist * KANIT_RR_HEDEF_ORANI
     else:
         stop = row["high"] + buffer
         stop_dist = stop - entry
-        if stop_dist <= 0:
-            return None
-        hedef = entry - stop_dist * KANIT_RR_HEDEF_ORANI
+    if stop_dist <= 0:
+        return None
+    tp = entry + stop_dist * KANIT_PARTIAL_TP_R_MULT if direction == "LONG" \
+        else entry - stop_dist * KANIT_PARTIAL_TP_R_MULT
 
+    partial_done = False
+    trail_stop = None
     for i in range(idx + 1, min(idx + 1 + KANIT_MAX_BEKLEME_GUNU, len(df))):
         gun = df.iloc[i]
-        if direction == "LONG":
-            hedef_vuruldu = gun["high"] >= hedef
-            stop_vuruldu = gun["low"] <= stop
-        else:
-            hedef_vuruldu = gun["low"] <= hedef
-            stop_vuruldu = gun["high"] >= stop
-        if hedef_vuruldu and stop_vuruldu:
-            return "LOSS", -1.0
-        if stop_vuruldu:
-            return "LOSS", -1.0
-        if hedef_vuruldu:
-            return "WIN", KANIT_RR_HEDEF_ORANI
+        close_i = gun["close"]
+        atr_i = gun["atr14"] if pd.notna(gun["atr14"]) else None
+
+        effective_stop = trail_stop if trail_stop is not None else stop
+        stopped = (close_i <= effective_stop) if direction == "LONG" else (close_i >= effective_stop)
+        if stopped:
+            if trail_stop is None:
+                return "LOSS", -1.0
+            r_kazanilan = ((close_i - entry) / stop_dist) if direction == "LONG" \
+                else ((entry - close_i) / stop_dist)
+            # yarisi 1.5R'de kilitlendi, yarisi trail/breakeven seviyesinde kapandi
+            blend_r = 0.5 * KANIT_PARTIAL_TP_R_MULT + 0.5 * r_kazanilan
+            return ("WIN" if blend_r > 0 else "LOSS"), round(blend_r, 4)
+
+        if not partial_done:
+            tp_hit = (close_i >= tp) if direction == "LONG" else (close_i <= tp)
+            if tp_hit:
+                partial_done = True
+                trail_stop = entry  # breakeven'e cekildi
+                continue
+
+        if partial_done and atr_i:
+            if direction == "LONG":
+                candidate = close_i - atr_i * KANIT_TRAIL_ATR_MULT
+                improved = trail_stop is None or candidate > trail_stop * (1 + KANIT_TRAIL_MIN_MOVE_PCT / 100)
+            else:
+                candidate = close_i + atr_i * KANIT_TRAIL_ATR_MULT
+                improved = trail_stop is None or candidate < trail_stop * (1 - KANIT_TRAIL_MIN_MOVE_PCT / 100)
+            if improved:
+                trail_stop = candidate
+
+    if partial_done:
+        # pencere kapandi, hala acikti - parsiyel kilitli kar en azindan gercek
+        return "WIN", round(0.5 * KANIT_PARTIAL_TP_R_MULT, 4)
     return "TIMEOUT", None
 
 
