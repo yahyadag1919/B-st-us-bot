@@ -49,7 +49,7 @@ import threading
 # mesajlarında görünür kılmak için (2026-08-17: 3 kez üst üste "aynı
 # sonuç geldi" şüphesi sonrası eklendi - deploy'un gerçekten güncel
 # olup olmadığını KANITLA göstermek için).
-ARGE_KOD_SURUMU = "v11-icgorusel-islem-rate-limit-duzeltmesi-2026-08-18"
+ARGE_KOD_SURUMU = "v12-kanit-dogrulama-2026-08-18"
 import warnings
 from datetime import datetime, timezone
 
@@ -1241,6 +1241,257 @@ def icgorusel_islem_testi_calistir(gun_ufku: int = ICGORUSEL_ISLEM_GUN_UFKU) -> 
     return dosya_yolu, {"gun_ufku": gun_ufku, "toplam_islem": len(df), "gruplar": ozet_satirlari}
 
 
+# =============================================================================
+# KANIT DOĞRULAMA — canlı sistemin "kanıtlanmış" stratejilerini taze veriyle
+# yeniden test eder — 2026-08-18
+# =============================================================================
+# GEREKÇE: Kullanıcı, tüm bu yeni-kenar aramalarını (hesap makinesi, izole
+# turnuva, içeriden işlem, emir defteri) bir kenara bırakıp önce ELİMİZDEKİ
+# kanıtlanmış sistemleri (Fitil+RSI+Hacim, Sadece RSI, ATR Kırılımı, Hacim
+# Z-Skor) aynı titizlikle (istatistiksel anlamlılık dahil) tazeden doğrulamak
+# istedi. Bu, daha önce `kanit_dogrulama.py` adıyla STANDALONE bir script
+# olarak yazılmıştı (Start Command değişimi gerektiriyordu) - kullanıcı bunu
+# istemedi. Aynı mantık şimdi buraya, normal bir komut olarak taşındı.
+# DÜRÜST SINIR: Orijinal 87-stratejili mega turnuva scripti elimizde yok, bu
+# yüzden o turnuvanın birebir kopyası değil. Giriş koşulları
+# (check_exhaustion, check_rsi_only, check_us_atr_breakout,
+# check_us_volume_zscore) stock_screener_bot.py'den DEĞİŞTİRİLMEDEN alındı;
+# çıkış tanımı canlı sistemin gerçekten kullandığı iki yöntemi taklit ediyor:
+# BIST'te ATR-stop + sabit 1:2 R:R, ABD'de US_SWING_CHECKPOINTS ile birebin
+# aynı (1g/%1, 3g/%2, 5g/%3, 10g/%5). Rejim/trend filtreleri kasıtlı DAHIL
+# EDİLMEDİ - "78.2%" gibi rakamlar sadece çekirdek giriş kapısını ölçüyordu.
+
+KANIT_RSI_OVERSOLD, KANIT_RSI_OVERBOUGHT = 30, 70
+KANIT_WICK_RATIO_THRESHOLD = 0.35
+KANIT_VOLUME_MULTIPLIER = 1.5
+KANIT_INVALIDATION_ATR_BUFFER = 1.0
+KANIT_US_ZSCORE_THRESHOLD = 2.0
+KANIT_US_ATR_MULT = 2.0
+KANIT_RR_HEDEF_ORANI = 2.0
+KANIT_MAX_BEKLEME_GUNU = 15
+KANIT_US_CHECKPOINTS = [(1, "1g", 1.0), (3, "3g", 2.0), (5, "5g", 3.0), (10, "10g", 5.0)]
+KANIT_MIN_N = 20
+
+
+def _kanit_compute_indicators(df: pd.DataFrame) -> pd.DataFrame:
+    """stock_screener_bot.py compute_indicators() ile BİREBİN AYNI formüller."""
+    df["vol_sma20"] = df["volume"].rolling(20).mean()
+    df["vol_std20"] = df["volume"].rolling(20).std()
+    df["vol_zscore"] = (df["volume"] - df["vol_sma20"]) / df["vol_std20"].replace(0, np.nan)
+
+    high_low = df["high"] - df["low"]
+    high_close = (df["high"] - df["close"].shift()).abs()
+    low_close = (df["low"] - df["close"].shift()).abs()
+    tr = pd.concat([high_low, high_close, low_close], axis=1).max(axis=1)
+    df["atr14"] = tr.rolling(14).mean()
+
+    delta = df["close"].diff()
+    gain = delta.clip(lower=0)
+    loss = -delta.clip(upper=0)
+    avg_gain = gain.ewm(alpha=1 / 14, adjust=False).mean()
+    avg_loss = loss.ewm(alpha=1 / 14, adjust=False).mean()
+    rs = avg_gain / avg_loss.replace(0, np.nan)
+    df["rsi"] = (100 - (100 / (1 + rs))).fillna(50)
+
+    candle_range = (df["high"] - df["low"]).replace(0, np.nan)
+    df["lower_wick_ratio"] = ((df[["open", "close"]].min(axis=1) - df["low"]) / candle_range).fillna(0)
+    df["upper_wick_ratio"] = ((df["high"] - df[["open", "close"]].max(axis=1)) / candle_range).fillna(0)
+    return df
+
+
+def _kanit_check_exhaustion(row) -> str:
+    volume_ratio = row["volume"] / row["vol_sma20"] if row["vol_sma20"] else 0
+    if pd.isna(volume_ratio) or volume_ratio < KANIT_VOLUME_MULTIPLIER:
+        return None
+    if row["lower_wick_ratio"] >= KANIT_WICK_RATIO_THRESHOLD and row["rsi"] <= KANIT_RSI_OVERSOLD:
+        return "LONG"
+    if row["upper_wick_ratio"] >= KANIT_WICK_RATIO_THRESHOLD and row["rsi"] >= KANIT_RSI_OVERBOUGHT:
+        return "SHORT"
+    return None
+
+
+def _kanit_check_rsi_only(row) -> str:
+    if row["rsi"] <= KANIT_RSI_OVERSOLD:
+        return "LONG"
+    if row["rsi"] >= KANIT_RSI_OVERBOUGHT:
+        return "SHORT"
+    return None
+
+
+def _kanit_check_us_volume_zscore(row) -> str:
+    if pd.isna(row.get("vol_zscore")) or row["vol_zscore"] < KANIT_US_ZSCORE_THRESHOLD:
+        return None
+    if row["close"] < row["open"]:
+        return "LONG"
+    if row["close"] > row["open"]:
+        return "SHORT"
+    return None
+
+
+def _kanit_check_us_atr_breakout(row, prev_close) -> str:
+    if pd.isna(row.get("atr14")) or row["atr14"] == 0:
+        return None
+    move = row["close"] - prev_close
+    if move >= KANIT_US_ATR_MULT * row["atr14"]:
+        return "LONG"
+    if move <= -KANIT_US_ATR_MULT * row["atr14"]:
+        return "SHORT"
+    return None
+
+
+def _kanit_bist_rr_sonuc(df: pd.DataFrame, idx: int, direction: str):
+    """ATR-stop + sabit 1:2 R:R walk-forward - proje konvansiyonu (aynı
+    barda hem TP hem stop tutarsa KAYIP sayılır)."""
+    row = df.iloc[idx]
+    entry = row["close"]
+    atr = row["atr14"] if pd.notna(row["atr14"]) else 0
+    buffer = atr * KANIT_INVALIDATION_ATR_BUFFER
+    if direction == "LONG":
+        stop = row["low"] - buffer
+        stop_dist = entry - stop
+        if stop_dist <= 0:
+            return None
+        hedef = entry + stop_dist * KANIT_RR_HEDEF_ORANI
+    else:
+        stop = row["high"] + buffer
+        stop_dist = stop - entry
+        if stop_dist <= 0:
+            return None
+        hedef = entry - stop_dist * KANIT_RR_HEDEF_ORANI
+
+    for i in range(idx + 1, min(idx + 1 + KANIT_MAX_BEKLEME_GUNU, len(df))):
+        gun = df.iloc[i]
+        if direction == "LONG":
+            hedef_vuruldu = gun["high"] >= hedef
+            stop_vuruldu = gun["low"] <= stop
+        else:
+            hedef_vuruldu = gun["low"] <= hedef
+            stop_vuruldu = gun["high"] >= stop
+        if hedef_vuruldu and stop_vuruldu:
+            return "LOSS", -1.0
+        if stop_vuruldu:
+            return "LOSS", -1.0
+        if hedef_vuruldu:
+            return "WIN", KANIT_RR_HEDEF_ORANI
+    return "TIMEOUT", None
+
+
+def _kanit_us_checkpoint_sonuc(df: pd.DataFrame, idx: int, direction: str):
+    """US_SWING_CHECKPOINTS ile BİREBİN AYNI - herhangi bir checkpoint
+    tutarsa isabet, 10 günde hiçbiri tutmazsa kayıp sayılır."""
+    entry = df.iloc[idx]["close"]
+    for gun_sayisi, etiket, hedef_pct in KANIT_US_CHECKPOINTS:
+        i = idx + gun_sayisi
+        if i >= len(df):
+            return "TIMEOUT", None
+        gun = df.iloc[i]
+        if direction == "LONG":
+            hedef_fiyat = entry * (1 + hedef_pct / 100)
+            if gun["high"] >= hedef_fiyat:
+                return "WIN", hedef_pct
+        else:
+            hedef_fiyat = entry * (1 - hedef_pct / 100)
+            if gun["low"] <= hedef_fiyat:
+                return "WIN", hedef_pct
+    return "LOSS", -1.0
+
+
+def kanit_dogrula_bist() -> dict:
+    import yfinance as yf
+    tum_sonuclar = {"Fitil+RSI+Hacim": [], "Sadece RSI": []}
+    for n_i, ticker in enumerate(BIST_TICKERS, 1):
+        try:
+            print(f"[Kanıt Doğrulama BIST {n_i}/{len(BIST_TICKERS)}] {ticker}...", flush=True)
+            df = yf.Ticker(ticker).history(period="2y", interval="1d")
+            if df is None or df.empty or len(df) < 60:
+                continue
+            df = df.rename(columns={"Open": "open", "High": "high", "Low": "low",
+                                     "Close": "close", "Volume": "volume"})
+            df = df[["open", "high", "low", "close", "volume"]].copy().reset_index(drop=True)
+            df = _kanit_compute_indicators(df)
+
+            for idx in range(25, len(df) - 1):
+                row = df.iloc[idx]
+                for isim, fn in [("Fitil+RSI+Hacim", _kanit_check_exhaustion),
+                                  ("Sadece RSI", _kanit_check_rsi_only)]:
+                    yon = fn(row)
+                    if yon is None:
+                        continue
+                    sonuc = _kanit_bist_rr_sonuc(df, idx, yon)
+                    if sonuc is None:
+                        continue
+                    durum, r = sonuc
+                    tum_sonuclar[isim].append((durum, r))
+        except Exception as e:
+            print(f"[Kanıt Doğrulama BIST] {ticker} hata: {e}", flush=True)
+        time.sleep(1.0)
+    return tum_sonuclar
+
+
+def kanit_dogrula_us() -> dict:
+    import yfinance as yf
+    tum_sonuclar = {"ATR Kırılımı x2.0": [], "Hacim Z-Skor": []}
+    for n_i, ticker in enumerate(US_INSIDER_TICKERS, 1):
+        try:
+            print(f"[Kanıt Doğrulama US {n_i}/{len(US_INSIDER_TICKERS)}] {ticker}...", flush=True)
+            df = yf.Ticker(ticker).history(period="2y", interval="1d")
+            if df is None or df.empty or len(df) < 60:
+                continue
+            df = df.rename(columns={"Open": "open", "High": "high", "Low": "low",
+                                     "Close": "close", "Volume": "volume"})
+            df = df[["open", "high", "low", "close", "volume"]].copy().reset_index(drop=True)
+            df = _kanit_compute_indicators(df)
+
+            for idx in range(25, len(df) - 11):
+                row = df.iloc[idx]
+                prev_close = df.iloc[idx - 1]["close"]
+                for isim, fn_sonuc in [
+                    ("ATR Kırılımı x2.0", lambda: _kanit_check_us_atr_breakout(row, prev_close)),
+                    ("Hacim Z-Skor", lambda: _kanit_check_us_volume_zscore(row)),
+                ]:
+                    yon = fn_sonuc()
+                    if yon is None:
+                        continue
+                    durum, r = _kanit_us_checkpoint_sonuc(df, idx, yon)
+                    tum_sonuclar[isim].append((durum, r))
+        except Exception as e:
+            print(f"[Kanıt Doğrulama US] {ticker} hata: {e}", flush=True)
+        time.sleep(1.0)
+    return tum_sonuclar
+
+
+def kanit_dogrulama_calistir() -> tuple:
+    """Tüm akışı çalıştırır: BIST + ABD doğrulaması, özet tabloyu CSV'ye
+    yazar. Döner: (dosya_yolu, özet_dict) ya da (None, hata_mesajı)."""
+    bist_sonuc = kanit_dogrula_bist()
+    us_sonuc = kanit_dogrula_us()
+    tumu = {**bist_sonuc, **us_sonuc}
+
+    satirlar = []
+    for strateji, kayitlar in tumu.items():
+        win = sum(1 for d, _ in kayitlar if d == "WIN")
+        loss = sum(1 for d, _ in kayitlar if d == "LOSS")
+        timeout = sum(1 for d, _ in kayitlar if d == "TIMEOUT")
+        karar_verilen = win + loss
+        kazanma_orani = round(win / karar_verilen * 100, 2) if karar_verilen else None
+        p = _binom_p(win, karar_verilen) if karar_verilen >= KANIT_MIN_N else None
+        r_degerleri = [r for d, r in kayitlar if r is not None]
+        ort_r = round(float(np.mean(r_degerleri)), 4) if r_degerleri else None
+        satirlar.append({
+            "strateji": strateji, "toplam_sinyal": len(kayitlar),
+            "win": win, "loss": loss, "timeout": timeout,
+            "kazanma_orani_pct": kazanma_orani, "binom_p": p, "ort_R": ort_r,
+        })
+
+    if not satirlar:
+        return None, "Hiçbir strateji için veri üretilemedi."
+
+    tablo = pd.DataFrame(satirlar)
+    dosya_yolu = _data_path("kanit_dogrulama_sonucu.csv")
+    tablo.to_csv(dosya_yolu, index=False, encoding="utf-8-sig")
+    return dosya_yolu, {"satirlar": satirlar}
+
+
 
     """Kullanıcının istediği DOĞRULAMA TESTİ: verilen tarihin (örn.
     '2026-07-04') kapanışındaki gösterge değerleriyle Gemini'den BIST
@@ -1807,7 +2058,11 @@ def send_startup_message():
         "turnuvasındaki gibi izole) test edip lider tablosu üretir\n"
         "/icgorusel_islem [GÜN_UFKU] — ABD hisselerinde içeriden (yönetici/"
         "yönetim kurulu) alım-satımın sonraki getiriyle ilişkisini test eder "
-        "(varsayılan 20 işlem günü ufku)\n\n"
+        "(varsayılan 20 işlem günü ufku)\n"
+        "/kanit_dogrulama — canlı sistemin kanıtlanmış 4 stratejisini "
+        "(Fitil+RSI+Hacim, Sadece RSI, ATR Kırılımı, Hacim Z-Skor) taze "
+        "2 yıllık veriyle, gerçek çıkış mantığıyla ve anlamlılık testiyle "
+        "yeniden doğrular\n\n"
         "🔬 Hipotez araştırması komutları:\n"
         "/arge_rapor — şimdiye kadarki tüm denemelerin özeti\n"
         "/arge_test — hemen bir hipotez dener (test amaçlı)\n\n"
@@ -2195,6 +2450,34 @@ def poll_arge_commands():
                 except Exception as e:
                     send_telegram_message(f"👤 İçeriden işlem testi hatası: {e}")
             threading.Thread(target=_arka_plan_icgorusel, args=(gun_ufku,), daemon=True).start()
+        elif text.startswith("/kanit_dogrulama"):
+            send_telegram_message(
+                f"✅ KANIT DOĞRULAMA başlıyor: canlı sistemin kanıtlanmış 4 "
+                f"stratejisini ({len(BIST_TICKERS)} BIST + {len(US_INSIDER_TICKERS)} "
+                f"ABD hissesi) taze 2 yıllık veriyle, gerçek çıkış mantığıyla "
+                f"yeniden test ediyor. Uzun sürebilir (~10-15 dakika), ARKA "
+                f"PLANDA çalışıyor, bitince CSV + özet göndereceğim."
+            )
+
+            def _arka_plan_kanit():
+                try:
+                    dosya_yolu, ozet = kanit_dogrulama_calistir()
+                    if dosya_yolu is None:
+                        send_telegram_message(f"✅ Kanıt doğrulama başarısız: {ozet}")
+                        return
+                    satirlar = ["✅ Kanıt Doğrulama Sonucu\n"]
+                    for s in ozet["satirlar"]:
+                        p_str = f", p={s['binom_p']}" if s["binom_p"] is not None else ""
+                        satirlar.append(
+                            f"{s['strateji']}: {s['toplam_sinyal']} sinyal "
+                            f"({s['win']}W/{s['loss']}L/{s['timeout']}T), "
+                            f"%{s['kazanma_orani_pct']} isabet{p_str}, "
+                            f"ort R={s['ort_R']}"
+                        )
+                    send_telegram_document(dosya_yolu, caption="\n".join(satirlar))
+                except Exception as e:
+                    send_telegram_message(f"✅ Kanıt doğrulama hatası: {e}")
+            threading.Thread(target=_arka_plan_kanit, daemon=True).start()
         elif text.startswith("/arge_test"):
             send_telegram_message("🧪 Manuel test turu başlatılıyor (arka planda)...")
 
