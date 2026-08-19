@@ -49,7 +49,7 @@ import threading
 # mesajlarında görünür kılmak için (2026-08-17: 3 kez üst üste "aynı
 # sonuç geldi" şüphesi sonrası eklendi - deploy'un gerçekten güncel
 # olup olmadığını KANITLA göstermek için).
-ARGE_KOD_SURUMU = "v14-abd-bist-transfer-testi-2026-08-18"
+ARGE_KOD_SURUMU = "v15-abd-ortusme-testi-2026-08-18"
 import warnings
 from datetime import datetime, timezone
 
@@ -1459,8 +1459,16 @@ def kanit_dogrula_bist() -> dict:
 
 
 def kanit_dogrula_us() -> dict:
+    """2026-08-18 GÜNCELLEME: artık ATR Kırılımı ve Hacim Z-Skor'un AYNI
+    GÜN AYNI YÖNDE birlikte tetiklendiği durumları da AYRI bir kategori
+    olarak izliyor ("Örtüşme/Confluence") - iki bağımsız kanıtlanmış
+    sinyal aynı anda aynı yönü işaret ediyorsa, tek başına birinden daha
+    güçlü mü, o soruya cevap için."""
     import yfinance as yf
-    tum_sonuclar = {"ATR Kırılımı x2.0": [], "Hacim Z-Skor": []}
+    tum_sonuclar = {
+        "ATR Kırılımı x2.0": [], "Hacim Z-Skor": [],
+        "[Örtüşme] ATR + Hacim Z-Skor (aynı yön)": [],
+    }
     for n_i, ticker in enumerate(US_INSIDER_TICKERS, 1):
         try:
             print(f"[Kanıt Doğrulama US {n_i}/{len(US_INSIDER_TICKERS)}] {ticker}...", flush=True)
@@ -1475,15 +1483,18 @@ def kanit_dogrula_us() -> dict:
             for idx in range(25, len(df) - 11):
                 row = df.iloc[idx]
                 prev_close = df.iloc[idx - 1]["close"]
-                for isim, fn_sonuc in [
-                    ("ATR Kırılımı x2.0", lambda: _kanit_check_us_atr_breakout(row, prev_close)),
-                    ("Hacim Z-Skor", lambda: _kanit_check_us_volume_zscore(row)),
-                ]:
-                    yon = fn_sonuc()
+                yon_atr = _kanit_check_us_atr_breakout(row, prev_close)
+                yon_hacim = _kanit_check_us_volume_zscore(row)
+
+                for isim, yon in [("ATR Kırılımı x2.0", yon_atr), ("Hacim Z-Skor", yon_hacim)]:
                     if yon is None:
                         continue
                     durum, r = _kanit_us_checkpoint_sonuc(df, idx, yon)
                     tum_sonuclar[isim].append((durum, r))
+
+                if yon_atr is not None and yon_atr == yon_hacim:
+                    durum, r = _kanit_us_checkpoint_sonuc(df, idx, yon_atr)
+                    tum_sonuclar["[Örtüşme] ATR + Hacim Z-Skor (aynı yön)"].append((durum, r))
         except Exception as e:
             print(f"[Kanıt Doğrulama US] {ticker} hata: {e}", flush=True)
         time.sleep(1.0)
