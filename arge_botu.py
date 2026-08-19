@@ -49,7 +49,7 @@ import threading
 # mesajlarında görünür kılmak için (2026-08-17: 3 kez üst üste "aynı
 # sonuç geldi" şüphesi sonrası eklendi - deploy'un gerçekten güncel
 # olup olmadığını KANITLA göstermek için).
-ARGE_KOD_SURUMU = "v13-kanit-dogrulama-gercek-cikis-mantigi-2026-08-18"
+ARGE_KOD_SURUMU = "v14-abd-bist-transfer-testi-2026-08-18"
 import warnings
 from datetime import datetime, timezone
 
@@ -1490,13 +1490,7 @@ def kanit_dogrula_us() -> dict:
     return tum_sonuclar
 
 
-def kanit_dogrulama_calistir() -> tuple:
-    """Tüm akışı çalıştırır: BIST + ABD doğrulaması, özet tabloyu CSV'ye
-    yazar. Döner: (dosya_yolu, özet_dict) ya da (None, hata_mesajı)."""
-    bist_sonuc = kanit_dogrula_bist()
-    us_sonuc = kanit_dogrula_us()
-    tumu = {**bist_sonuc, **us_sonuc}
-
+def _kanit_ozet_tablosu(tumu: dict) -> list:
     satirlar = []
     for strateji, kayitlar in tumu.items():
         win = sum(1 for d, _ in kayitlar if d == "WIN")
@@ -1512,12 +1506,80 @@ def kanit_dogrulama_calistir() -> tuple:
             "win": win, "loss": loss, "timeout": timeout,
             "kazanma_orani_pct": kazanma_orani, "binom_p": p, "ort_R": ort_r,
         })
+    return satirlar
+
+
+def kanit_dogrulama_calistir() -> tuple:
+    """Tüm akışı çalıştırır: BIST + ABD doğrulaması, özet tabloyu CSV'ye
+    yazar. Döner: (dosya_yolu, özet_dict) ya da (None, hata_mesajı)."""
+    bist_sonuc = kanit_dogrula_bist()
+    us_sonuc = kanit_dogrula_us()
+    tumu = {**bist_sonuc, **us_sonuc}
+    satirlar = _kanit_ozet_tablosu(tumu)
 
     if not satirlar:
         return None, "Hiçbir strateji için veri üretilemedi."
 
     tablo = pd.DataFrame(satirlar)
     dosya_yolu = _data_path("kanit_dogrulama_sonucu.csv")
+    tablo.to_csv(dosya_yolu, index=False, encoding="utf-8-sig")
+    return dosya_yolu, {"satirlar": satirlar}
+
+
+# =============================================================================
+# ABD → BIST TRANSFER TESTİ — 2026-08-18
+# =============================================================================
+# GEREKÇE: v9'daki (gösterge turnuvası) ABD-transfer testi basit "ertesi
+# gün yönü tuttu mu" yöntemiyle yapılmıştı - kaba bir ölçüm. v13'te BIST
+# için canlı sistemin GERÇEK çıkış mantığını (1.5R kısmi TP + breakeven +
+# ATR trailing) doğru şekilde inşa ettik. Bu, aynı testi doğru yöntemle
+# tekrarlıyor: ABD'de kanıtlanmış giriş koşulları (ATR Kırılımı x2.0,
+# Hacim Z-Skor), BIST hisselerinde tetiklenip BIST'in gerçek çıkışıyla
+# sonuçlandırılıyor - "bu ABD sinyalini BIST'e taşısak ne olurdu" sorusuna
+# en dürüst cevap.
+
+def kanit_dogrula_abd_stratejileri_bistte() -> dict:
+    import yfinance as yf
+    tum_sonuclar = {"[ABD→BIST] ATR Kırılımı x2.0": [], "[ABD→BIST] Hacim Z-Skor": []}
+    for n_i, ticker in enumerate(BIST_TICKERS, 1):
+        try:
+            print(f"[ABD→BIST Transfer {n_i}/{len(BIST_TICKERS)}] {ticker}...", flush=True)
+            df = yf.Ticker(ticker).history(period="2y", interval="1d")
+            if df is None or df.empty or len(df) < 60:
+                continue
+            df = df.rename(columns={"Open": "open", "High": "high", "Low": "low",
+                                     "Close": "close", "Volume": "volume"})
+            df = df[["open", "high", "low", "close", "volume"]].copy().reset_index(drop=True)
+            df = _kanit_compute_indicators(df)
+
+            for idx in range(25, len(df) - 1):
+                row = df.iloc[idx]
+                prev_close = df.iloc[idx - 1]["close"]
+                for isim, fn_sonuc in [
+                    ("[ABD→BIST] ATR Kırılımı x2.0", lambda: _kanit_check_us_atr_breakout(row, prev_close)),
+                    ("[ABD→BIST] Hacim Z-Skor", lambda: _kanit_check_us_volume_zscore(row)),
+                ]:
+                    yon = fn_sonuc()
+                    if yon is None:
+                        continue
+                    sonuc = _kanit_bist_rr_sonuc(df, idx, yon)
+                    if sonuc is None:
+                        continue
+                    durum, r = sonuc
+                    tum_sonuclar[isim].append((durum, r))
+        except Exception as e:
+            print(f"[ABD→BIST Transfer] {ticker} hata: {e}", flush=True)
+        time.sleep(1.0)
+    return tum_sonuclar
+
+
+def kanit_dogrulama_transfer_calistir() -> tuple:
+    tumu = kanit_dogrula_abd_stratejileri_bistte()
+    satirlar = _kanit_ozet_tablosu(tumu)
+    if not satirlar:
+        return None, "Hiçbir strateji için veri üretilemedi."
+    tablo = pd.DataFrame(satirlar)
+    dosya_yolu = _data_path("kanit_dogrulama_transfer_sonucu.csv")
     tablo.to_csv(dosya_yolu, index=False, encoding="utf-8-sig")
     return dosya_yolu, {"satirlar": satirlar}
 
@@ -2092,7 +2154,10 @@ def send_startup_message():
         "/kanit_dogrulama — canlı sistemin kanıtlanmış 4 stratejisini "
         "(Fitil+RSI+Hacim, Sadece RSI, ATR Kırılımı, Hacim Z-Skor) taze "
         "2 yıllık veriyle, gerçek çıkış mantığıyla ve anlamlılık testiyle "
-        "yeniden doğrular\n\n"
+        "yeniden doğrular\n"
+        "/kanit_dogrulama_transfer — ABD'nin kanıtlanmış giriş koşullarını "
+        "(ATR Kırılımı, Hacim Z-Skor) BIST hisselerinde, BIST'in gerçek "
+        "çıkış mantığıyla test eder\n\n"
         "🔬 Hipotez araştırması komutları:\n"
         "/arge_rapor — şimdiye kadarki tüm denemelerin özeti\n"
         "/arge_test — hemen bir hipotez dener (test amaçlı)\n\n"
@@ -2480,6 +2545,34 @@ def poll_arge_commands():
                 except Exception as e:
                     send_telegram_message(f"👤 İçeriden işlem testi hatası: {e}")
             threading.Thread(target=_arka_plan_icgorusel, args=(gun_ufku,), daemon=True).start()
+        elif text.startswith("/kanit_dogrulama_transfer"):
+            send_telegram_message(
+                f"🔀 ABD→BIST TRANSFER TESTİ başlıyor: ABD'de kanıtlanmış giriş "
+                f"koşullarını (ATR Kırılımı x2.0, Hacim Z-Skor) {len(BIST_TICKERS)} "
+                f"BIST hissesinde tetikletip, BIST'in gerçek çıkış mantığıyla "
+                f"(1.5R kısmi TP + trailing) sonuçlandırıyor. ARKA PLANDA "
+                f"çalışıyor, bitince CSV + özet göndereceğim."
+            )
+
+            def _arka_plan_kanit_transfer():
+                try:
+                    dosya_yolu, ozet = kanit_dogrulama_transfer_calistir()
+                    if dosya_yolu is None:
+                        send_telegram_message(f"🔀 ABD→BIST transfer testi başarısız: {ozet}")
+                        return
+                    satirlar = ["🔀 ABD→BIST Transfer Testi Sonucu\n"]
+                    for s in ozet["satirlar"]:
+                        p_str = f", p={s['binom_p']}" if s["binom_p"] is not None else ""
+                        satirlar.append(
+                            f"{s['strateji']}: {s['toplam_sinyal']} sinyal "
+                            f"({s['win']}W/{s['loss']}L/{s['timeout']}T), "
+                            f"%{s['kazanma_orani_pct']} isabet{p_str}, "
+                            f"ort R={s['ort_R']}"
+                        )
+                    send_telegram_document(dosya_yolu, caption="\n".join(satirlar))
+                except Exception as e:
+                    send_telegram_message(f"🔀 ABD→BIST transfer testi hatası: {e}")
+            threading.Thread(target=_arka_plan_kanit_transfer, daemon=True).start()
         elif text.startswith("/kanit_dogrulama"):
             send_telegram_message(
                 f"✅ KANIT DOĞRULAMA başlıyor: canlı sistemin kanıtlanmış 4 "
