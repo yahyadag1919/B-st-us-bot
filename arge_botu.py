@@ -49,7 +49,7 @@ import threading
 # mesajlarında görünür kılmak için (2026-08-17: 3 kez üst üste "aynı
 # sonuç geldi" şüphesi sonrası eklendi - deploy'un gerçekten güncel
 # olup olmadığını KANITLA göstermek için).
-ARGE_KOD_SURUMU = "v17-edgar-ters-islem-2026-08-18"
+ARGE_KOD_SURUMU = "v18-edgar-tam-kapsam-tekillestirme-2026-08-19"
 import warnings
 from datetime import datetime, timezone
 
@@ -1523,19 +1523,23 @@ def _edgar_form4_detay(cik: str, accession: str) -> list:
 
 
 def icgorusel_islem_testi_edgar_calistir(gun_ufku: int = ICGORUSEL_ISLEM_GUN_UFKU,
-                                          max_hisse: int = 40) -> tuple:
-    """yfinance yerine SEC EDGAR'ı kullanan versiyon. DÜRÜST SINIR:
-    EDGAR'ın hız sınırı (10 istek/sn) ve her hissenin çok sayıda Form 4
-    dosyalaması olabileceği için, süre/istek sayısını makul tutmak adına
-    varsayılan olarak sadece ilk max_hisse hisseye bakıyor - tam 106
-    hisse çok uzun sürer (binlerce istek)."""
+                                          max_hisse: int = None) -> tuple:
+    """yfinance yerine SEC EDGAR'ı kullanan versiyon. max_hisse=None ise
+    TÜM US_INSIDER_TICKERS (106 hisse) taranır - varsayılan artık tam
+    kapsamlı, önceki 40'lık sınır sadece hızlı ön-test içindi.
+    2026-08-19 DÜZELTME: bir Form 4 dosyasında/aynı günde birden fazla
+    işlem satırı olabiliyor (ör. bir yönetici aynı gün farklı lotlarda
+    satış yapınca) - bu, örneklemi YAPAY şişiriyordu (AAPL'de aynı gün
+    aynı getiri 8 kez tekrarlanmıştı). Artık istatistik HESAPLANMADAN
+    ÖNCE (ticker, tarih, tür) bazında tekilleştiriliyor - CSV'ye ham hali
+    yazılıyor (şeffaflık için) ama özet/anlamlılık TEKİL veriden."""
     import yfinance as yf
     cik_haritasi = _edgar_cik_haritasi()
     if not cik_haritasi:
         return None, "SEC CIK haritası çekilemedi."
 
     kayitlar = []
-    hisseler = US_INSIDER_TICKERS[:max_hisse]
+    hisseler = US_INSIDER_TICKERS if max_hisse is None else US_INSIDER_TICKERS[:max_hisse]
     for n_i, ticker in enumerate(hisseler, 1):
         cik = cik_haritasi.get(ticker)
         if not cik:
@@ -1577,6 +1581,8 @@ def icgorusel_islem_testi_edgar_calistir(gun_ufku: int = ICGORUSEL_ISLEM_GUN_UFK
     df = pd.DataFrame(kayitlar)
     dosya_yolu = _data_path("icgorusel_islem_edgar.csv")
     df.to_csv(dosya_yolu, index=False, encoding="utf-8-sig")
+    # istatistik icin TEKILLESTIRILMIS veri kullan - ham veri sadece CSV'de saklaniyor
+    df = df.drop_duplicates(subset=["ticker", "tarih", "tur"])
 
     ozet_satirlari = []
     for tur, dogru_yon in [("ALIM", 1), ("SATIM", -1)]:
@@ -2983,19 +2989,22 @@ def poll_arge_commands():
             gun_ufku = int(parcalar[1]) if len(parcalar) > 1 else ICGORUSEL_ISLEM_GUN_UFKU
             send_telegram_message(
                 f"👤 EDGAR İÇERİDEN İŞLEM TESTİ başlıyor: SEC EDGAR'dan (yfinance "
-                f"yerine) çekiliyor, hız sınırına takılmamak için ilk 40 hisseyle "
-                f"sınırlı. Bu YAVAŞ olabilir (her hisse için onlarca Form 4 dosyası "
-                f"indiriliyor). ARKA PLANDA çalışıyor, bitince CSV + özet göndereceğim."
+                f"yerine) çekiliyor, TÜM {len(US_INSIDER_TICKERS)} hisse taranacak. "
+                f"Bu OLDUKÇA YAVAŞ olabilir (her hisse için onlarca Form 4 dosyası "
+                f"indiriliyor, muhtemelen 20-30+ dakika). ARKA PLANDA çalışıyor, "
+                f"bitince CSV + özet göndereceğim. İstatistik artık aynı gün/aynı "
+                f"türdeki tekrar eden işlem satırları için TEKİLLEŞTİRİLMİŞ veriden "
+                f"hesaplanıyor (önceki şişme sorunu düzeltildi)."
             )
 
             def _arka_plan_icgorusel_edgar(gu):
                 try:
-                    dosya_yolu, ozet = icgorusel_islem_testi_edgar_calistir(gu)
+                    dosya_yolu, ozet = icgorusel_islem_testi_edgar_calistir(gu, max_hisse=None)
                     if dosya_yolu is None:
                         send_telegram_message(f"👤 EDGAR içeriden işlem testi başarısız: {ozet}")
                         return
-                    satirlar = [f"👤 EDGAR İçeriden İşlem Testi Sonucu ({ozet['gun_ufku']} gün ufku)",
-                                f"{ozet['hisse_sayisi']} hisse, toplam işlem: {ozet['toplam_islem']}\n"]
+                    satirlar = [f"👤 EDGAR İçeriden İşlem Testi Sonucu ({ozet['gun_ufku']} gün ufku, tekilleştirilmiş)",
+                                f"{ozet['hisse_sayisi']} hisse, toplam benzersiz işlem: {ozet['toplam_islem']}\n"]
                     for g in ozet["gruplar"]:
                         satirlar.append(
                             f"{g['tur']}: n={g['n']}, %{g['kazanma_orani_pct']} doğru yönde "
