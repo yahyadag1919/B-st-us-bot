@@ -49,7 +49,7 @@ import threading
 # mesajlarında görünür kılmak için (2026-08-17: 3 kez üst üste "aynı
 # sonuç geldi" şüphesi sonrası eklendi - deploy'un gerçekten güncel
 # olup olmadığını KANITLA göstermek için).
-ARGE_KOD_SURUMU = "v22-wikipedia-eksisozluk-2026-08-19"
+ARGE_KOD_SURUMU = "v23-wikipedia-coklu-ufuk-2026-08-19"
 import warnings
 from datetime import datetime, timezone
 
@@ -2840,11 +2840,76 @@ def _wiki_gunluk_izlenme(makale: str, gun_sayisi: int = 730) -> pd.DataFrame:
     return df.set_index("tarih")[["views"]].rename(columns={"views": "izlenme"})
 
 
+WIKI_UFUKLAR = [(1, "1 gün"), (3, "3 gün"), (5, "1 hafta"), (10, "2 hafta")]
+
+
+def _wiki_hedef_matrisi(df_all: pd.DataFrame, hedef_kolonu: str, ufuk_etiketi: str) -> list:
+    """Tek bir ufuk için kör temel çizgi + alt-grup + REVERSAL/MOMENTUM
+    testlerini üretir - _feature_strateji_matrisi ile aynı desen, tek
+    fark hedef kolonu parametrik ve etiket her satıra ekleniyor."""
+    satirlar = []
+    kor_pozitif_oran = (df_all[hedef_kolonu] > 0).mean()
+    kor_dogru_n = int((df_all[hedef_kolonu] > 0).sum())
+    satirlar.append({
+        "ufuk": ufuk_etiketi, "hipotez": "[KÖR TEMEL ÇİZGİ] Her zaman LONG",
+        "n": len(df_all), "dogru_n": kor_dogru_n,
+        "kazanma_orani_pct": round(kor_pozitif_oran * 100, 2),
+        "binom_p": _binom_p(kor_dogru_n, len(df_all)),
+        "ort_isaretli_getiri_pct": round(df_all[hedef_kolonu].mean(), 4),
+    })
+
+    ust_esik = df_all["izlenme_orani"].quantile(1 - WIKI_ESIK_YUZDE)
+    alt_esik = df_all["izlenme_orani"].quantile(WIKI_ESIK_YUZDE)
+    maske_ust = df_all["izlenme_orani"] >= ust_esik
+    maske_alt = df_all["izlenme_orani"] <= alt_esik
+
+    for grup_adi, maske, yon in (
+        ("[MOMENTUM alt-grup] Yüksek izlenme -> LONG", maske_ust, "LONG"),
+        ("[MOMENTUM alt-grup] Düşük izlenme -> SHORT", maske_alt, "SHORT"),
+    ):
+        secilen = df_all[maske]
+        if len(secilen) < WIKI_MIN_N:
+            continue
+        dogru = (secilen[hedef_kolonu] > 0) if yon == "LONG" else (secilen[hedef_kolonu] < 0)
+        isaretli = secilen[hedef_kolonu] if yon == "LONG" else -secilen[hedef_kolonu]
+        dogru_n = int(dogru.sum())
+        satirlar.append({
+            "ufuk": ufuk_etiketi, "hipotez": grup_adi, "n": len(secilen), "dogru_n": dogru_n,
+            "kazanma_orani_pct": round(dogru.mean() * 100, 2),
+            "binom_p": _binom_p(dogru_n, len(secilen)),
+            "ort_isaretli_getiri_pct": round(isaretli.mean(), 4),
+        })
+
+    for tip, ust_yon, alt_yon in (("REVERSAL (tersine dön)", "SHORT", "LONG"),
+                                   ("MOMENTUM (devam et)", "LONG", "SHORT")):
+        yon_serisi = pd.Series(np.nan, index=df_all.index, dtype=object)
+        yon_serisi[maske_ust] = ust_yon
+        yon_serisi[maske_alt] = alt_yon
+        secim = yon_serisi.notna()
+        if secim.sum() < WIKI_MIN_N:
+            continue
+        secilen = df_all[secim]
+        yon_sel = yon_serisi[secim]
+        dogru = ((yon_sel == "LONG") & (secilen[hedef_kolonu] > 0)) | \
+                ((yon_sel == "SHORT") & (secilen[hedef_kolonu] < 0))
+        dogru_n = int(dogru.sum())
+        isaretli = secilen[hedef_kolonu] * np.where(yon_sel == "LONG", 1, -1)
+        satirlar.append({
+            "ufuk": ufuk_etiketi, "hipotez": tip, "n": int(secim.sum()), "dogru_n": dogru_n,
+            "kazanma_orani_pct": round(dogru.mean() * 100, 2),
+            "binom_p": _binom_p(dogru_n, int(secim.sum())),
+            "ort_isaretli_getiri_pct": round(isaretli.mean(), 4),
+        })
+    return satirlar
+
+
 def wiki_testi_calistir() -> tuple:
     """Her hisse için Wikipedia sayfa görüntülenmesi (günlük) çekiyor,
     30 günlük hareketli ortalamaya göre anormal artışları (izlenme_orani)
-    MOMENTUM/REVERSAL hipotezleriyle ertesi gün getirisine karşı test
-    ediyor. Döner: (dosya_yolu, özet_dict) ya da (None, hata_mesajı)."""
+    DÖRT AYRI UFUKTA (1 gün, 3 gün, 1 hafta, 2 hafta) MOMENTUM/REVERSAL
+    hipotezleriyle test ediyor - 2026-08-19: tek ufuk yerine çoklu ufuk,
+    kullanıcının "belki sinyal daha geç ortaya çıkıyor" fikrini test
+    etmek için. Döner: (dosya_yolu, özet_dict) ya da (None, hata_mesajı)."""
     import yfinance as yf
     parcalar = []
     for n_i, (ticker, makale) in enumerate(BIST_WIKI_MAKALE.items(), 1):
@@ -2867,19 +2932,26 @@ def wiki_testi_calistir() -> tuple:
 
             for tarih in wiki_df.index:
                 giris_konum = fiyat_df.index.get_indexer([tarih], method="nearest")[0]
-                if giris_konum < 0 or giris_konum + 1 >= len(fiyat_df):
+                if giris_konum < 0:
                     continue
                 giris_fiyat = fiyat_df.iloc[giris_konum]["close"]
-                cikis_fiyat = fiyat_df.iloc[giris_konum + 1]["close"]
-                if giris_fiyat == 0 or pd.isna(giris_fiyat) or pd.isna(cikis_fiyat):
-                    continue
                 oran = wiki_df.loc[tarih, "izlenme_orani"]
-                if pd.isna(oran):
+                if giris_fiyat == 0 or pd.isna(giris_fiyat) or pd.isna(oran):
                     continue
-                getiri = (cikis_fiyat - giris_fiyat) / giris_fiyat * 100
-                parcalar.append({"ticker": ticker, "tarih": tarih.date().isoformat(),
-                                  "izlenme_orani": oran,
-                                  "sonraki_gun_getiri_pct": round(getiri, 3)})
+                satir = {"ticker": ticker, "tarih": tarih.date().isoformat(), "izlenme_orani": oran}
+                gecerli_satir = False
+                for gun, etiket in WIKI_UFUKLAR:
+                    cikis_konum = giris_konum + gun
+                    if cikis_konum >= len(fiyat_df):
+                        continue
+                    cikis_fiyat = fiyat_df.iloc[cikis_konum]["close"]
+                    if pd.isna(cikis_fiyat):
+                        continue
+                    getiri = (cikis_fiyat - giris_fiyat) / giris_fiyat * 100
+                    satir[f"getiri_{gun}g"] = round(getiri, 3)
+                    gecerli_satir = True
+                if gecerli_satir:
+                    parcalar.append(satir)
         except Exception as e:
             print(f"[Wikipedia] {ticker} hata: {e}", flush=True)
         time.sleep(0.5)
@@ -2887,67 +2959,28 @@ def wiki_testi_calistir() -> tuple:
     if not parcalar:
         return None, "Wikipedia'dan hiçbir veri üretilemedi (makale eşleşmeleri yanlış olabilir)."
 
-    df_all = pd.DataFrame(parcalar).dropna(subset=["izlenme_orani", "sonraki_gun_getiri_pct"])
+    df_all = pd.DataFrame(parcalar)
     if len(df_all) < 200:
         return None, f"Yeterli veri toplanamadı (sadece {len(df_all)} satır)."
 
-    kor_pozitif_oran = (df_all["sonraki_gun_getiri_pct"] > 0).mean()
-    ust_esik = df_all["izlenme_orani"].quantile(1 - WIKI_ESIK_YUZDE)
-    alt_esik = df_all["izlenme_orani"].quantile(WIKI_ESIK_YUZDE)
-    maske_ust = df_all["izlenme_orani"] >= ust_esik
-    maske_alt = df_all["izlenme_orani"] <= alt_esik
-
-    satirlar = [{
-        "hipotez": "[KÖR TEMEL ÇİZGİ] Her zaman LONG (piyasa geneli drift)",
-        "n": len(df_all), "dogru_n": int((df_all["sonraki_gun_getiri_pct"] > 0).sum()),
-        "kazanma_orani_pct": round(kor_pozitif_oran * 100, 2),
-        "binom_p": _binom_p(int((df_all["sonraki_gun_getiri_pct"] > 0).sum()), len(df_all)),
-        "ort_isaretli_getiri_pct": round(df_all["sonraki_gun_getiri_pct"].mean(), 4),
-    }]
-
-    for grup_adi, maske, yon in (
-        ("[MOMENTUM alt-grup] Yüksek izlenme -> LONG bahsi", maske_ust, "LONG"),
-        ("[MOMENTUM alt-grup] Düşük izlenme -> SHORT bahsi", maske_alt, "SHORT"),
-    ):
-        secilen = df_all[maske]
-        if len(secilen) < WIKI_MIN_N:
+    tum_satirlar = []
+    for gun, etiket in WIKI_UFUKLAR:
+        kolon = f"getiri_{gun}g"
+        if kolon not in df_all.columns:
             continue
-        dogru = (secilen["sonraki_gun_getiri_pct"] > 0) if yon == "LONG" else (secilen["sonraki_gun_getiri_pct"] < 0)
-        isaretli = secilen["sonraki_gun_getiri_pct"] if yon == "LONG" else -secilen["sonraki_gun_getiri_pct"]
-        dogru_n = int(dogru.sum())
-        satirlar.append({
-            "hipotez": grup_adi, "n": len(secilen), "dogru_n": dogru_n,
-            "kazanma_orani_pct": round(dogru.mean() * 100, 2),
-            "binom_p": _binom_p(dogru_n, len(secilen)),
-            "ort_isaretli_getiri_pct": round(isaretli.mean(), 4),
-        })
-
-    for tip, ust_yon, alt_yon in (("REVERSAL (izlenme patlaması -> tersine dön)", "SHORT", "LONG"),
-                                   ("MOMENTUM (izlenme patlaması -> devam et)", "LONG", "SHORT")):
-        yon_serisi = pd.Series(np.nan, index=df_all.index, dtype=object)
-        yon_serisi[maske_ust] = ust_yon
-        yon_serisi[maske_alt] = alt_yon
-        secim = yon_serisi.notna()
-        if secim.sum() < WIKI_MIN_N:
+        alt_df = df_all.dropna(subset=["izlenme_orani", kolon])
+        if len(alt_df) < 200:
             continue
-        secilen = df_all[secim]
-        yon_sel = yon_serisi[secim]
-        dogru = ((yon_sel == "LONG") & (secilen["sonraki_gun_getiri_pct"] > 0)) | \
-                ((yon_sel == "SHORT") & (secilen["sonraki_gun_getiri_pct"] < 0))
-        dogru_n = int(dogru.sum())
-        isaretli = secilen["sonraki_gun_getiri_pct"] * np.where(yon_sel == "LONG", 1, -1)
-        satirlar.append({
-            "hipotez": tip, "n": int(secim.sum()), "dogru_n": dogru_n,
-            "kazanma_orani_pct": round(dogru.mean() * 100, 2),
-            "binom_p": _binom_p(dogru_n, int(secim.sum())),
-            "ort_isaretli_getiri_pct": round(isaretli.mean(), 4),
-        })
+        tum_satirlar.extend(_wiki_hedef_matrisi(alt_df, kolon, etiket))
 
-    tablo = pd.DataFrame(satirlar)
+    if not tum_satirlar:
+        return None, "Hiçbir ufuk için yeterli veri/örneklem bulunamadı."
+
+    tablo = pd.DataFrame(tum_satirlar)
     dosya_yolu = _data_path("wiki_testi.csv")
     tablo.to_csv(dosya_yolu, index=False, encoding="utf-8-sig")
     return dosya_yolu, {"hisse_sayisi": len(BIST_WIKI_MAKALE), "toplam_gozlem": len(df_all),
-                         "satirlar": satirlar}
+                         "satirlar": tum_satirlar}
 
 
 # =============================================================================
@@ -3515,14 +3548,18 @@ def poll_arge_commands():
                     if dosya_yolu is None:
                         send_telegram_message(f"📖 Wikipedia testi başarısız: {ozet}")
                         return
-                    satirlar = [f"📖 Wikipedia Testi Sonucu",
+                    satirlar = [f"📖 Wikipedia Testi Sonucu (4 ufuk: 1g/3g/1hf/2hf)",
                                 f"{ozet['hisse_sayisi']} hisse denendi, "
-                                f"{ozet['toplam_gozlem']} gözlem\n"]
+                                f"{ozet['toplam_gozlem']} gözlem\n"
+                                f"Detaylı tablo CSV'de - burada sadece MOMENTUM/"
+                                f"REVERSAL toplamları:\n"]
                     for s in ozet["satirlar"]:
+                        if "MOMENTUM (devam" not in s["hipotez"] and "REVERSAL (tersine" not in s["hipotez"]:
+                            continue
                         p_str = f", p={s['binom_p']}" if s["binom_p"] is not None else ""
                         satirlar.append(
-                            f"{s['hipotez']}: n={s['n']}, %{s['kazanma_orani_pct']} "
-                            f"isabet{p_str}, ort. getiri %{s['ort_isaretli_getiri_pct']}"
+                            f"[{s['ufuk']}] {s['hipotez']}: n={s['n']}, "
+                            f"%{s['kazanma_orani_pct']} isabet{p_str}"
                         )
                     send_telegram_document(dosya_yolu, caption="\n".join(satirlar))
                 except Exception as e:
