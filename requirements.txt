@@ -32,3 +32,9 @@ google-genai>=0.3.0
 # DÜRÜST NOT: bu kütüphane en son Aralık 2022'de güncellenmiş, KAP'ın arka
 # planı o zamandan beri değişmiş olabilir. /pykap_test komutu bunu doğrular.
 pykap
+
+# Perakende yatırımcı ilgisi (Google Trends) testi (2026-08-19) — resmi
+# olmayan/ters mühendislik API, Google zaman zaman hız sınırlıyor - bu da
+# yfinance'te yaşadığımız sorunun bir benzeri, /trend_testi komutu
+# çalışmazsa bu kütüphanenin engellenmiş olması muhtemel sebep.
+pytrends>=4.9
