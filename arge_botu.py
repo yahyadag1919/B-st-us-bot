@@ -49,7 +49,7 @@ import threading
 # mesajlarında görünür kılmak için (2026-08-17: 3 kez üst üste "aynı
 # sonuç geldi" şüphesi sonrası eklendi - deploy'un gerçekten güncel
 # olup olmadığını KANITLA göstermek için).
-ARGE_KOD_SURUMU = "v23-wikipedia-coklu-ufuk-2026-08-19"
+ARGE_KOD_SURUMU = "v24-wiki-izole-rr-dogrulama-2026-08-19"
 import warnings
 from datetime import datetime, timezone
 
@@ -2984,10 +2984,193 @@ def wiki_testi_calistir() -> tuple:
 
 
 # =============================================================================
+# WIKIPEDIA SİNYALİ — İZOLE R:R DOĞRULAMA — 2026-08-19
+# =============================================================================
+# GEREKÇE: /wiki_testi'nin 2 haftalık ufukta bulduğu şey (yüksek izlenme
+# -> LONG, piyasa driftinin BİLE üstünde %53.23, p=0.00014) gerçek mi
+# yoksa 4 ufuk x birkaç hipotez taramasının ürünü mü, netleştirmek için
+# İZOLE, TEK hipotezli, GERÇEK R:R çıkışlı (kanıt doğrulamada kullanılan
+# aynı 1.5R kısmi TP + trailing mantığı, _kanit_bist_rr_sonuc'u yeniden
+# kullanıyor) bir doğrulama. Sadece LONG (SHORT tarafı zaten işe
+# yaramamıştı, dahil edilmedi).
+
+def wiki_dogrulama_calistir() -> tuple:
+    """Yüksek Wikipedia izlenmesi olan günlerde (üst %20) LONG açıp
+    gerçek R:R çıkışıyla sonuçlandırır, kalan TÜM günlerin kör LONG
+    temel çizgisiyle karşılaştırır. Döner: (dosya_yolu, özet_dict)."""
+    import yfinance as yf
+    ticker_data = {}
+    tum_izlenme = []
+    for n_i, (ticker, makale) in enumerate(BIST_WIKI_MAKALE.items(), 1):
+        try:
+            print(f"[Wiki Doğrulama {n_i}/{len(BIST_WIKI_MAKALE)}] {ticker}...", flush=True)
+            df = yf.Ticker(ticker).history(period="2y", interval="1d")
+            if df is None or df.empty or len(df) < 60:
+                time.sleep(0.5)
+                continue
+            df = df.rename(columns={"Open": "open", "High": "high", "Low": "low",
+                                     "Close": "close", "Volume": "volume"})
+            df = df[["open", "high", "low", "close", "volume"]].copy()
+            df.index = pd.to_datetime(df.index).tz_localize(None)
+            orijinal_tarihler = df.index
+            df = df.reset_index(drop=True)
+            df = _kanit_compute_indicators(df)
+            df["tarih"] = orijinal_tarihler.values
+
+            wiki_df = _wiki_gunluk_izlenme(makale)
+            if wiki_df.empty:
+                time.sleep(0.5)
+                continue
+            wiki_df["izlenme_ort30"] = wiki_df["izlenme"].rolling(30, min_periods=15).mean()
+            wiki_df["izlenme_orani"] = wiki_df["izlenme"] / wiki_df["izlenme_ort30"].replace(0, np.nan)
+
+            df["izlenme_orani"] = np.nan
+            df = df.set_index("tarih")
+            for tarih in wiki_df.index:
+                if tarih < df.index.min() or tarih > df.index.max():
+                    continue
+                konum = df.index.get_indexer([tarih], method="nearest")[0]
+                if konum < 0:
+                    continue
+                eslesen_tarih = df.index[konum]
+                if abs((eslesen_tarih - tarih).days) > 3:
+                    continue
+                df.iloc[konum, df.columns.get_loc("izlenme_orani")] = wiki_df.loc[tarih, "izlenme_orani"]
+            df = df.reset_index(drop=True)
+
+            ticker_data[ticker] = df
+            tum_izlenme.extend(df["izlenme_orani"].dropna().tolist())
+        except Exception as e:
+            print(f"[Wiki Doğrulama] {ticker} hata: {e}", flush=True)
+        time.sleep(0.5)
+
+    if not tum_izlenme or len(tum_izlenme) < 200:
+        return None, "Yeterli izlenme verisi toplanamadı."
+
+    esik = float(np.quantile(tum_izlenme, 1 - WIKI_ESIK_YUZDE))
+    print(f"[Wiki Doğrulama] Üst %20 eşiği: izlenme_orani >= {esik:.3f}", flush=True)
+
+    tum_sonuclar = {"[Wiki] Yüksek izlenme -> LONG (gerçek R:R)": [],
+                     "[KÖR] Diğer tüm günler -> LONG (gerçek R:R)": []}
+    for ticker, df in ticker_data.items():
+        for idx in range(25, len(df) - 1):
+            row = df.iloc[idx]
+            sonuc = _kanit_bist_rr_sonuc(df, idx, "LONG")
+            if sonuc is None:
+                continue
+            durum, r = sonuc
+            if pd.notna(row.get("izlenme_orani")) and row["izlenme_orani"] >= esik:
+                tum_sonuclar["[Wiki] Yüksek izlenme -> LONG (gerçek R:R)"].append((durum, r))
+            else:
+                tum_sonuclar["[KÖR] Diğer tüm günler -> LONG (gerçek R:R)"].append((durum, r))
+
+    satirlar = _kanit_ozet_tablosu(tum_sonuclar)
+    if not satirlar:
+        return None, "Yeterli sinyal üretilemedi."
+
+    tablo = pd.DataFrame(satirlar)
+    dosya_yolu = _data_path("wiki_dogrulama.csv")
+    tablo.to_csv(dosya_yolu, index=False, encoding="utf-8-sig")
+    return dosya_yolu, {"esik": round(esik, 3), "satirlar": satirlar}
+
+
+# =============================================================================
+# WIKI SİNYALİ — GERÇEK ÇIKIŞ MANTIĞIYLA İZOLE DOĞRULAMA — 2026-08-19
+# =============================================================================
+# GEREKÇE: wiki_testi_calistir 4 ufuk taradı, en güçlü sonuç "yüksek
+# izlenme -> 2 hafta LONG" oldu (kör piyasa driftinin bile üstünde,
+# p=0.00014). Bu, o TEK bulguyu izole edip GERÇEK BIST çıkış mantığıyla
+# (1.5R kısmi TP + breakeven + ATR trailing - _kanit_bist_rr_sonuc,
+# kanit_dogrulama'da doğrulanan aynı mekanik) yeniden test ediyor.
+# KONTROL GRUBU: aynı mekanikle "her gün LONG açsak ne olurdu" - piyasa
+# driftini mi yakalıyoruz yoksa gerçek ek değer mi var, ayırt etmek için.
+
+def wiki_kanit_dogrulama_calistir() -> tuple:
+    """Yüksek Wikipedia izlenmesi günlerinde LONG'u, BIST'in gerçek çıkış
+    mantığıyla test eder; kontrol grubu olarak koşulsuz (her gün) LONG'u
+    aynı mekanikle test eder. Döner: (dosya_yolu, özet_dict) ya da
+    (None, hata_mesajı)."""
+    import yfinance as yf
+
+    # 1. AŞAMA: tüm hisseler için wiki izlenme_orani topla, global eşiği
+    # wiki_testi_calistir ile TUTARLI şekilde hesapla (üst %20).
+    ticker_wiki = {}
+    tum_oranlar = []
+    for n_i, (ticker, makale) in enumerate(BIST_WIKI_MAKALE.items(), 1):
+        try:
+            print(f"[Wiki Kanıt 1/2 - {n_i}/{len(BIST_WIKI_MAKALE)}] {ticker}...", flush=True)
+            wiki_df = _wiki_gunluk_izlenme(makale)
+            if wiki_df.empty or len(wiki_df) < 60:
+                continue
+            wiki_df["izlenme_ort30"] = wiki_df["izlenme"].rolling(30, min_periods=15).mean()
+            wiki_df["izlenme_orani"] = wiki_df["izlenme"] / wiki_df["izlenme_ort30"].replace(0, np.nan)
+            ticker_wiki[ticker] = wiki_df
+            tum_oranlar.extend(wiki_df["izlenme_orani"].dropna().tolist())
+        except Exception as e:
+            print(f"[Wiki Kanıt] {ticker} wiki hatası: {e}", flush=True)
+        time.sleep(0.5)
+
+    if not tum_oranlar:
+        return None, "Wikipedia verisi toplanamadı."
+    esik = float(np.quantile(tum_oranlar, 1 - WIKI_ESIK_YUZDE))
+    print(f"[Wiki Kanıt] Global eşik (üst %20): {esik:.3f}", flush=True)
+
+    # 2. AŞAMA: her hisse için fiyat+ATR verisi çek, GERÇEK çıkış
+    # mantığıyla hem WIKI-sinyalli hem KONTROL (koşulsuz) LONG'u test et.
+    tum_sonuclar = {"[WIKI sinyalli] Yüksek izlenme -> LONG": [],
+                     "[KONTROL] Koşulsuz her gün LONG": []}
+    for n_i, (ticker, wiki_df) in enumerate(ticker_wiki.items(), 1):
+        try:
+            print(f"[Wiki Kanıt 2/2 - {n_i}/{len(ticker_wiki)}] {ticker}...", flush=True)
+            raw = yf.Ticker(ticker).history(period="2y", interval="1d")
+            if raw is None or raw.empty or len(raw) < 60:
+                continue
+            raw = raw.rename(columns={"Open": "open", "High": "high", "Low": "low",
+                                       "Close": "close", "Volume": "volume"})
+            raw = raw[["open", "high", "low", "close", "volume"]].copy()
+            raw.index = pd.to_datetime(raw.index).tz_localize(None)
+            tarihler = raw.index
+            df = raw.reset_index(drop=True)
+            df = _kanit_compute_indicators(df)
+
+            for idx in range(25, len(df) - 1):
+                tarih = tarihler[idx]
+                kontrol_sonuc = _kanit_bist_rr_sonuc(df, idx, "LONG")
+                if kontrol_sonuc is not None:
+                    tum_sonuclar["[KONTROL] Koşulsuz her gün LONG"].append(kontrol_sonuc)
+
+                oran = np.nan
+                if tarih in wiki_df.index:
+                    oran = wiki_df.loc[tarih, "izlenme_orani"]
+                else:
+                    konum = wiki_df.index.get_indexer([tarih], method="nearest")[0]
+                    if konum >= 0:
+                        aday_tarih = wiki_df.index[konum]
+                        if abs((aday_tarih - tarih).days) <= 2:
+                            oran = wiki_df.iloc[konum]["izlenme_orani"]
+                if pd.notna(oran) and oran >= esik:
+                    wiki_sonuc = _kanit_bist_rr_sonuc(df, idx, "LONG")
+                    if wiki_sonuc is not None:
+                        tum_sonuclar["[WIKI sinyalli] Yüksek izlenme -> LONG"].append(wiki_sonuc)
+        except Exception as e:
+            print(f"[Wiki Kanıt] {ticker} fiyat hatası: {e}", flush=True)
+        time.sleep(1.0)
+
+    satirlar = _kanit_ozet_tablosu(tum_sonuclar)
+    if not satirlar:
+        return None, "Hiçbir grup için yeterli veri üretilemedi."
+    tablo = pd.DataFrame(satirlar)
+    dosya_yolu = _data_path("wiki_kanit_dogrulama.csv")
+    tablo.to_csv(dosya_yolu, index=False, encoding="utf-8-sig")
+    return dosya_yolu, {"esik": round(esik, 3), "satirlar": satirlar}
+
+
+# =============================================================================
 # EKŞİ SÖZLÜK BAĞLANTI TESTİ — 2026-08-19
 # =============================================================================
 # GEREKÇE: Ekşi Sözlük'ün resmi bir API'si yok - sadece web sayfası
 # kazıma (scraping) ile erişilebilir, yapısını hiç bilmiyorum. pykap'ta
+
 # yaptığımız gibi ÖNCE küçük bir bağlantı testiyle gerçekten çalışıp
 # çalışmadığını doğruluyoruz - büyük bir backtest kurmadan önce.
 
@@ -3064,6 +3247,11 @@ def send_startup_message():
         "/wiki_testi — Wikipedia sayfa görüntülenmesi (resmi API, günlük) "
         "ile aynı kamu-ilgisi hipotezini daha güvenilir bir kaynakla "
         "test eder\n"
+        "/wiki_kanit_dogrulama — wiki_testi'nin en güçlü bulgusunu (yüksek "
+        "izlenme -> LONG) BIST'in gerçek çıkış mantığıyla, koşulsuz LONG "
+        "kontrol grubuna karşı izole doğrular\n"
+        "/wiki_dogrulama — /wiki_testi'nin bulgusunu (yüksek izlenme -> "
+        "LONG) izole, gerçek R:R çıkışıyla yeniden doğrular\n"
         "/eksisozluk_test [BAŞLIK] — Ekşi Sözlük'ten veri çekilebiliyor "
         "mu diye bağlantı testi yapar (henüz backtest değil)\n"
         "/kanit_dogrulama — canlı sistemin kanıtlanmış 4 stratejisini "
@@ -3565,6 +3753,61 @@ def poll_arge_commands():
                 except Exception as e:
                     send_telegram_message(f"📖 Wikipedia testi hatası: {e}")
             threading.Thread(target=_arka_plan_wiki_testi, daemon=True).start()
+        elif text.startswith("/wiki_dogrulama"):
+            send_telegram_message(
+                f"✅ WIKI DOĞRULAMA başlıyor: /wiki_testi'nin 2 haftalık bulgusunu "
+                f"(yüksek izlenme -> LONG) İZOLE olarak, gerçek R:R çıkışıyla "
+                f"(1.5R kısmi TP + trailing) yeniden test ediyor, kör temel çizgiyle "
+                f"karşılaştırıyor. ARKA PLANDA çalışıyor, bitince CSV + özet "
+                f"göndereceğim."
+            )
+
+            def _arka_plan_wiki_dogrulama():
+                try:
+                    dosya_yolu, ozet = wiki_dogrulama_calistir()
+                    if dosya_yolu is None:
+                        send_telegram_message(f"✅ Wiki doğrulama başarısız: {ozet}")
+                        return
+                    satirlar = [f"✅ Wiki Doğrulama Sonucu (eşik: izlenme_orani>={ozet['esik']})\n"]
+                    for s in ozet["satirlar"]:
+                        p_str = f", p={s['binom_p']}" if s["binom_p"] is not None else ""
+                        satirlar.append(
+                            f"{s['strateji']}: {s['toplam_sinyal']} sinyal "
+                            f"({s['win']}W/{s['loss']}L/{s['timeout']}T), "
+                            f"%{s['kazanma_orani_pct']} isabet{p_str}, ort R={s['ort_R']}"
+                        )
+                    send_telegram_document(dosya_yolu, caption="\n".join(satirlar))
+                except Exception as e:
+                    send_telegram_message(f"✅ Wiki doğrulama hatası: {e}")
+            threading.Thread(target=_arka_plan_wiki_dogrulama, daemon=True).start()
+        elif text.startswith("/wiki_kanit_dogrulama"):
+            send_telegram_message(
+                f"📖✅ WIKI SİNYALİ İZOLE DOĞRULAMA başlıyor: yüksek Wikipedia "
+                f"izlenmesi olan günlerde LONG'u, BIST'in gerçek çıkış "
+                f"mantığıyla (1.5R kısmi TP + trailing) test ediyor, kontrol "
+                f"grubuyla (koşulsuz her gün LONG) karşılaştırıyor. ARKA "
+                f"PLANDA çalışıyor, bitince CSV + özet göndereceğim."
+            )
+
+            def _arka_plan_wiki_kanit():
+                try:
+                    dosya_yolu, ozet = wiki_kanit_dogrulama_calistir()
+                    if dosya_yolu is None:
+                        send_telegram_message(f"📖✅ Wiki kanıt doğrulama başarısız: {ozet}")
+                        return
+                    satirlar = [f"📖✅ Wiki Sinyali İzole Doğrulama Sonucu",
+                                f"Global eşik (üst %20 izlenme oranı): {ozet['esik']}\n"]
+                    for s in ozet["satirlar"]:
+                        p_str = f", p={s['binom_p']}" if s["binom_p"] is not None else ""
+                        satirlar.append(
+                            f"{s['strateji']}: {s['toplam_sinyal']} sinyal "
+                            f"({s['win']}W/{s['loss']}L/{s['timeout']}T), "
+                            f"%{s['kazanma_orani_pct']} isabet{p_str}, ort R={s['ort_R']}"
+                        )
+                    send_telegram_document(dosya_yolu, caption="\n".join(satirlar))
+                except Exception as e:
+                    send_telegram_message(f"📖✅ Wiki kanıt doğrulama hatası: {e}")
+            threading.Thread(target=_arka_plan_wiki_kanit, daemon=True).start()
         elif text.startswith("/eksisozluk_test"):
             parcalar = text.split()
             baslik = parcalar[1] if len(parcalar) > 1 else "thyao"
