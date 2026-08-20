@@ -49,7 +49,7 @@ import threading
 # mesajlarında görünür kılmak için (2026-08-17: 3 kez üst üste "aynı
 # sonuç geldi" şüphesi sonrası eklendi - deploy'un gerçekten güncel
 # olup olmadığını KANITLA göstermek için).
-ARGE_KOD_SURUMU = "v21-google-trends-alt-grup-analizi-2026-08-19"
+ARGE_KOD_SURUMU = "v22-wikipedia-eksisozluk-2026-08-19"
 import warnings
 from datetime import datetime, timezone
 
@@ -2787,6 +2787,208 @@ def google_trends_testi_calistir() -> tuple:
     }
 
 
+# =============================================================================
+# WIKIPEDIA SAYFA GÖRÜNTÜLENMELERİ — KAMU İLGİSİ TESTİ #2 — 2026-08-19
+# =============================================================================
+# GEREKÇE: Google Trends (pytrends) iki ayrı çalıştırmada TUTARSIZ sonuç
+# verdi - güvenilmez. Wikimedia'nın (Wikipedia'nın sahibi vakıf) RESMİ,
+# belgelenmiş, ücretsiz Pageviews API'si aynı "kamu ilgisi" hipotezini
+# çok daha KARARLI bir altyapı üzerinde test ediyor - ham sayım, göreceli
+# normalize edilmiş bir skor değil, o yüzden çalıştırmalar arası tutarsız
+# olma riski çok daha düşük. GÜNLÜK çözünürlük var (Google Trends'in
+# aksine haftalığa düşmüyor) - "ertesi gün" testi mümkün.
+
+BIST_WIKI_MAKALE = {
+    "THYAO.IS": "Türk Hava Yolları", "ASELS.IS": "Aselsan", "SISE.IS": "Şişecam",
+    "KCHOL.IS": "Koç Holding", "GARAN.IS": "Garanti BBVA", "AKBNK.IS": "Akbank",
+    "EREGL.IS": "Ereğli Demir ve Çelik Fabrikaları", "BIMAS.IS": "BİM",
+    "TUPRS.IS": "Tüpraş", "SAHOL.IS": "Sabancı Holding", "PETKM.IS": "Petkim",
+    "FROTO.IS": "Ford Otosan", "TOASO.IS": "Tofaş", "TCELL.IS": "Turkcell",
+    "YKBNK.IS": "Yapı Kredi", "ISCTR.IS": "Türkiye İş Bankası",
+    "PGSUS.IS": "Pegasus Hava Yolları", "TAVHL.IS": "TAV Havalimanları",
+    "VESTL.IS": "Vestel", "SASA.IS": "Sasa Polyester",
+    "KOZAL.IS": "Koza Altın İşletmeleri", "ENKAI.IS": "Enka İnşaat",
+    "MGROS.IS": "Migros", "ARCLK.IS": "Arçelik", "AKSEN.IS": "Aksa Enerji",
+    "TTKOM.IS": "Türk Telekom", "ULKER.IS": "Ülker", "OYAKC.IS": "Oyak Çimento",
+    "HALKB.IS": "Halkbank", "VAKBN.IS": "VakıfBank",
+}
+WIKI_HEADERS = {"User-Agent": "arge-botu-arastirma contact@example.com"}
+WIKI_ESIK_YUZDE = 0.20
+WIKI_MIN_N = 20
+
+
+def _wiki_gunluk_izlenme(makale: str, gun_sayisi: int = 730) -> pd.DataFrame:
+    """Wikimedia Pageviews REST API - resmi, ücretsiz, kayıtsız. DÜRÜST
+    NOT: Türkçe makale başlıkları tahmin edildi (BIST_WIKI_MAKALE) -
+    tam eşleşmeyebilir, o hisse için 404/boş dönerse atlanır."""
+    from datetime import date, timedelta
+    from urllib.parse import quote
+    bugun = date.today()
+    baslangic = bugun - timedelta(days=gun_sayisi)
+    makale_url = makale.replace(" ", "_")
+    url = (f"https://wikimedia.org/api/rest_v1/metrics/pageviews/per-article/"
+           f"tr.wikipedia.org/all-access/all-agents/{quote(makale_url, safe='_')}/daily/"
+           f"{baslangic.strftime('%Y%m%d')}/{bugun.strftime('%Y%m%d')}")
+    resp = requests.get(url, headers=WIKI_HEADERS, timeout=15)
+    if resp.status_code != 200:
+        return pd.DataFrame()
+    items = resp.json().get("items", [])
+    if not items:
+        return pd.DataFrame()
+    df = pd.DataFrame(items)
+    df["tarih"] = pd.to_datetime(df["timestamp"], format="%Y%m%d%H")
+    return df.set_index("tarih")[["views"]].rename(columns={"views": "izlenme"})
+
+
+def wiki_testi_calistir() -> tuple:
+    """Her hisse için Wikipedia sayfa görüntülenmesi (günlük) çekiyor,
+    30 günlük hareketli ortalamaya göre anormal artışları (izlenme_orani)
+    MOMENTUM/REVERSAL hipotezleriyle ertesi gün getirisine karşı test
+    ediyor. Döner: (dosya_yolu, özet_dict) ya da (None, hata_mesajı)."""
+    import yfinance as yf
+    parcalar = []
+    for n_i, (ticker, makale) in enumerate(BIST_WIKI_MAKALE.items(), 1):
+        try:
+            print(f"[Wikipedia {n_i}/{len(BIST_WIKI_MAKALE)}] {ticker} ({makale})...", flush=True)
+            wiki_df = _wiki_gunluk_izlenme(makale)
+            if wiki_df.empty or len(wiki_df) < 60:
+                print(f"[Wikipedia] {ticker}: veri yok/az, atlanıyor.", flush=True)
+                time.sleep(0.5)
+                continue
+            wiki_df["izlenme_ort30"] = wiki_df["izlenme"].rolling(30, min_periods=15).mean()
+            wiki_df["izlenme_orani"] = wiki_df["izlenme"] / wiki_df["izlenme_ort30"].replace(0, np.nan)
+
+            fiyat_df = yf.Ticker(ticker).history(period="2y", interval="1d")
+            if fiyat_df is None or fiyat_df.empty:
+                time.sleep(0.5)
+                continue
+            fiyat_df = fiyat_df.rename(columns={"Close": "close"})
+            fiyat_df.index = pd.to_datetime(fiyat_df.index).tz_localize(None)
+
+            for tarih in wiki_df.index:
+                giris_konum = fiyat_df.index.get_indexer([tarih], method="nearest")[0]
+                if giris_konum < 0 or giris_konum + 1 >= len(fiyat_df):
+                    continue
+                giris_fiyat = fiyat_df.iloc[giris_konum]["close"]
+                cikis_fiyat = fiyat_df.iloc[giris_konum + 1]["close"]
+                if giris_fiyat == 0 or pd.isna(giris_fiyat) or pd.isna(cikis_fiyat):
+                    continue
+                oran = wiki_df.loc[tarih, "izlenme_orani"]
+                if pd.isna(oran):
+                    continue
+                getiri = (cikis_fiyat - giris_fiyat) / giris_fiyat * 100
+                parcalar.append({"ticker": ticker, "tarih": tarih.date().isoformat(),
+                                  "izlenme_orani": oran,
+                                  "sonraki_gun_getiri_pct": round(getiri, 3)})
+        except Exception as e:
+            print(f"[Wikipedia] {ticker} hata: {e}", flush=True)
+        time.sleep(0.5)
+
+    if not parcalar:
+        return None, "Wikipedia'dan hiçbir veri üretilemedi (makale eşleşmeleri yanlış olabilir)."
+
+    df_all = pd.DataFrame(parcalar).dropna(subset=["izlenme_orani", "sonraki_gun_getiri_pct"])
+    if len(df_all) < 200:
+        return None, f"Yeterli veri toplanamadı (sadece {len(df_all)} satır)."
+
+    kor_pozitif_oran = (df_all["sonraki_gun_getiri_pct"] > 0).mean()
+    ust_esik = df_all["izlenme_orani"].quantile(1 - WIKI_ESIK_YUZDE)
+    alt_esik = df_all["izlenme_orani"].quantile(WIKI_ESIK_YUZDE)
+    maske_ust = df_all["izlenme_orani"] >= ust_esik
+    maske_alt = df_all["izlenme_orani"] <= alt_esik
+
+    satirlar = [{
+        "hipotez": "[KÖR TEMEL ÇİZGİ] Her zaman LONG (piyasa geneli drift)",
+        "n": len(df_all), "dogru_n": int((df_all["sonraki_gun_getiri_pct"] > 0).sum()),
+        "kazanma_orani_pct": round(kor_pozitif_oran * 100, 2),
+        "binom_p": _binom_p(int((df_all["sonraki_gun_getiri_pct"] > 0).sum()), len(df_all)),
+        "ort_isaretli_getiri_pct": round(df_all["sonraki_gun_getiri_pct"].mean(), 4),
+    }]
+
+    for grup_adi, maske, yon in (
+        ("[MOMENTUM alt-grup] Yüksek izlenme -> LONG bahsi", maske_ust, "LONG"),
+        ("[MOMENTUM alt-grup] Düşük izlenme -> SHORT bahsi", maske_alt, "SHORT"),
+    ):
+        secilen = df_all[maske]
+        if len(secilen) < WIKI_MIN_N:
+            continue
+        dogru = (secilen["sonraki_gun_getiri_pct"] > 0) if yon == "LONG" else (secilen["sonraki_gun_getiri_pct"] < 0)
+        isaretli = secilen["sonraki_gun_getiri_pct"] if yon == "LONG" else -secilen["sonraki_gun_getiri_pct"]
+        dogru_n = int(dogru.sum())
+        satirlar.append({
+            "hipotez": grup_adi, "n": len(secilen), "dogru_n": dogru_n,
+            "kazanma_orani_pct": round(dogru.mean() * 100, 2),
+            "binom_p": _binom_p(dogru_n, len(secilen)),
+            "ort_isaretli_getiri_pct": round(isaretli.mean(), 4),
+        })
+
+    for tip, ust_yon, alt_yon in (("REVERSAL (izlenme patlaması -> tersine dön)", "SHORT", "LONG"),
+                                   ("MOMENTUM (izlenme patlaması -> devam et)", "LONG", "SHORT")):
+        yon_serisi = pd.Series(np.nan, index=df_all.index, dtype=object)
+        yon_serisi[maske_ust] = ust_yon
+        yon_serisi[maske_alt] = alt_yon
+        secim = yon_serisi.notna()
+        if secim.sum() < WIKI_MIN_N:
+            continue
+        secilen = df_all[secim]
+        yon_sel = yon_serisi[secim]
+        dogru = ((yon_sel == "LONG") & (secilen["sonraki_gun_getiri_pct"] > 0)) | \
+                ((yon_sel == "SHORT") & (secilen["sonraki_gun_getiri_pct"] < 0))
+        dogru_n = int(dogru.sum())
+        isaretli = secilen["sonraki_gun_getiri_pct"] * np.where(yon_sel == "LONG", 1, -1)
+        satirlar.append({
+            "hipotez": tip, "n": int(secim.sum()), "dogru_n": dogru_n,
+            "kazanma_orani_pct": round(dogru.mean() * 100, 2),
+            "binom_p": _binom_p(dogru_n, int(secim.sum())),
+            "ort_isaretli_getiri_pct": round(isaretli.mean(), 4),
+        })
+
+    tablo = pd.DataFrame(satirlar)
+    dosya_yolu = _data_path("wiki_testi.csv")
+    tablo.to_csv(dosya_yolu, index=False, encoding="utf-8-sig")
+    return dosya_yolu, {"hisse_sayisi": len(BIST_WIKI_MAKALE), "toplam_gozlem": len(df_all),
+                         "satirlar": satirlar}
+
+
+# =============================================================================
+# EKŞİ SÖZLÜK BAĞLANTI TESTİ — 2026-08-19
+# =============================================================================
+# GEREKÇE: Ekşi Sözlük'ün resmi bir API'si yok - sadece web sayfası
+# kazıma (scraping) ile erişilebilir, yapısını hiç bilmiyorum. pykap'ta
+# yaptığımız gibi ÖNCE küçük bir bağlantı testiyle gerçekten çalışıp
+# çalışmadığını doğruluyoruz - büyük bir backtest kurmadan önce.
+
+def eksisozluk_baglanti_testi(baslik: str = "thyao") -> str:
+    """Bir başlık (topic) sayfasını çekmeyi dener, kaç giriş (entry)
+    bulunduğunu ve ilk birkaçının tarihini raporlar. Metin raporu döner."""
+    satirlar = []
+    headers = {"User-Agent": "Mozilla/5.0 (research bot; arge-botu)"}
+    url = f"https://eksisozluk.com/{baslik}"
+    try:
+        resp = requests.get(url, headers=headers, timeout=15)
+        satirlar.append(f"URL: {url}")
+        satirlar.append(f"HTTP durum kodu: {resp.status_code}")
+        if resp.status_code != 200:
+            satirlar.append("❌ Sayfa çekilemedi (403/404 engellenmiş/bulunamamış olabilir).")
+            return "\n".join(satirlar)
+        html = resp.text
+        satirlar.append(f"✅ Sayfa çekildi, {len(html)} karakter.")
+
+        import re
+        giris_sayisi = len(re.findall(r'class="content"', html))
+        satirlar.append(f"Tahmini giriş (entry) sayısı bu sayfada: {giris_sayisi}")
+
+        tarihler = re.findall(r'<a[^>]*class="[^"]*entry-date[^"]*"[^>]*>([^<]+)</a>', html)
+        if tarihler:
+            satirlar.append(f"✅ {len(tarihler)} tarih etiketi bulundu. İlk 5: {tarihler[:5]}")
+        else:
+            satirlar.append("⚠️ Tarih etiketi bulunamadı - HTML yapısı beklenenden farklı "
+                             "olabilir, kod güncellenmesi gerekebilir.")
+    except Exception as e:
+        satirlar.append(f"❌ Hata: {e}")
+    return "\n".join(satirlar)
+
+
 def send_startup_message():
     send_telegram_message(
         f"🔬 Ar-Ge Botu (aynı deploy içinde, izole) başlatıldı.\n"
@@ -2826,6 +3028,11 @@ def send_startup_message():
         "/trend_testi — BIST hisselerine olan Google arama ilgisinin "
         "(haftalık) ertesi hafta getirisiyle ilişkisini MOMENTUM ve "
         "REVERSAL hipotezleriyle test eder\n"
+        "/wiki_testi — Wikipedia sayfa görüntülenmesi (resmi API, günlük) "
+        "ile aynı kamu-ilgisi hipotezini daha güvenilir bir kaynakla "
+        "test eder\n"
+        "/eksisozluk_test [BAŞLIK] — Ekşi Sözlük'ten veri çekilebiliyor "
+        "mu diye bağlantı testi yapar (henüz backtest değil)\n"
         "/kanit_dogrulama — canlı sistemin kanıtlanmış 4 stratejisini "
         "(Fitil+RSI+Hacim, Sadece RSI, ATR Kırılımı, Hacim Z-Skor) taze "
         "2 yıllık veriyle, gerçek çıkış mantığıyla ve anlamlılık testiyle "
@@ -3294,6 +3501,45 @@ def poll_arge_commands():
                 except Exception as e:
                     send_telegram_message(f"📈 Google Trends testi hatası: {e}")
             threading.Thread(target=_arka_plan_trend_testi, daemon=True).start()
+        elif text.startswith("/wiki_testi"):
+            send_telegram_message(
+                f"📖 WIKIPEDIA TESTİ başlıyor: {len(BIST_WIKI_MAKALE)} hisse için "
+                f"Wikipedia sayfa görüntülenmesi (günlük, resmi API) çekilecek, "
+                f"MOMENTUM/REVERSAL hipotezleri ertesi gün getirisine karşı test "
+                f"edilecek. ARKA PLANDA çalışıyor, bitince CSV + özet göndereceğim."
+            )
+
+            def _arka_plan_wiki_testi():
+                try:
+                    dosya_yolu, ozet = wiki_testi_calistir()
+                    if dosya_yolu is None:
+                        send_telegram_message(f"📖 Wikipedia testi başarısız: {ozet}")
+                        return
+                    satirlar = [f"📖 Wikipedia Testi Sonucu",
+                                f"{ozet['hisse_sayisi']} hisse denendi, "
+                                f"{ozet['toplam_gozlem']} gözlem\n"]
+                    for s in ozet["satirlar"]:
+                        p_str = f", p={s['binom_p']}" if s["binom_p"] is not None else ""
+                        satirlar.append(
+                            f"{s['hipotez']}: n={s['n']}, %{s['kazanma_orani_pct']} "
+                            f"isabet{p_str}, ort. getiri %{s['ort_isaretli_getiri_pct']}"
+                        )
+                    send_telegram_document(dosya_yolu, caption="\n".join(satirlar))
+                except Exception as e:
+                    send_telegram_message(f"📖 Wikipedia testi hatası: {e}")
+            threading.Thread(target=_arka_plan_wiki_testi, daemon=True).start()
+        elif text.startswith("/eksisozluk_test"):
+            parcalar = text.split()
+            baslik = parcalar[1] if len(parcalar) > 1 else "thyao"
+            send_telegram_message(f"📚 Ekşi Sözlük bağlantı testi başlıyor ('{baslik}')...")
+
+            def _arka_plan_eksi_test(b):
+                try:
+                    sonuc = eksisozluk_baglanti_testi(b)
+                    send_telegram_message(f"📚 Ekşi Sözlük Test Sonucu:\n\n{sonuc}")
+                except Exception as e:
+                    send_telegram_message(f"📚 Ekşi Sözlük testi hatası: {e}")
+            threading.Thread(target=_arka_plan_eksi_test, args=(baslik,), daemon=True).start()
         elif text.startswith("/kanit_ters_islem"):
             send_telegram_message(
                 f"🔄 TERS İŞLEM TESTİ başlıyor: Fitil+RSI+Hacim ve Sadece RSI'ın "
