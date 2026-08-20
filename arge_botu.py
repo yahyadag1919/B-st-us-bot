@@ -49,7 +49,7 @@ import threading
 # mesajlarında görünür kılmak için (2026-08-17: 3 kez üst üste "aynı
 # sonuç geldi" şüphesi sonrası eklendi - deploy'un gerçekten güncel
 # olup olmadığını KANITLA göstermek için).
-ARGE_KOD_SURUMU = "v20-google-trends-testi-2026-08-19"
+ARGE_KOD_SURUMU = "v21-google-trends-alt-grup-analizi-2026-08-19"
 import warnings
 from datetime import datetime, timezone
 
@@ -2715,7 +2715,44 @@ def google_trends_testi_calistir() -> tuple:
     maske_ust = df_all["ilgi"] >= ust_esik
     maske_alt = df_all["ilgi"] <= alt_esik
 
+    # 2026-08-19 EKLENDİ: piyasa-geneli drift tuzağını ayırt etmek için
+    # (v7'de ve sektör testinde defalarca gördüğümüz aynı sorun) - genel
+    # kör "her zaman LONG" temel çizgisi + YÜKSEK-ilgi ve DÜŞÜK-ilgi
+    # gruplarının kendi isabetleri AYRI AYRI raporlanıyor. İkisi de
+    # kör temel çizgiden anlamlı şekilde ayrılıyorsa gerçek bir sinyal;
+    # sadece biri ayrılıyorsa muhtemelen piyasa geneli trend.
+    kor_pozitif_oran = (df_all["sonraki_hafta_getiri_pct"] > 0).mean()
+
     satirlar = []
+    satirlar.append({
+        "hipotez": "[KÖR TEMEL ÇİZGİ] Her zaman LONG (piyasa geneli drift)",
+        "n": len(df_all), "dogru_n": int((df_all["sonraki_hafta_getiri_pct"] > 0).sum()),
+        "kazanma_orani_pct": round(kor_pozitif_oran * 100, 2),
+        "binom_p": _binom_p(int((df_all["sonraki_hafta_getiri_pct"] > 0).sum()), len(df_all)),
+        "ort_isaretli_getiri_pct": round(df_all["sonraki_hafta_getiri_pct"].mean(), 4),
+    })
+
+    for grup_adi, maske, yon in (
+        ("[MOMENTUM alt-grup] Yüksek ilgi -> LONG bahsi", maske_ust, "LONG"),
+        ("[MOMENTUM alt-grup] Düşük ilgi -> SHORT bahsi", maske_alt, "SHORT"),
+    ):
+        secilen = df_all[maske]
+        if len(secilen) < TREND_MIN_N:
+            continue
+        if yon == "LONG":
+            dogru = secilen["sonraki_hafta_getiri_pct"] > 0
+            isaretli = secilen["sonraki_hafta_getiri_pct"]
+        else:
+            dogru = secilen["sonraki_hafta_getiri_pct"] < 0
+            isaretli = -secilen["sonraki_hafta_getiri_pct"]
+        dogru_n = int(dogru.sum())
+        satirlar.append({
+            "hipotez": grup_adi, "n": len(secilen), "dogru_n": dogru_n,
+            "kazanma_orani_pct": round(dogru.mean() * 100, 2),
+            "binom_p": _binom_p(dogru_n, len(secilen)),
+            "ort_isaretli_getiri_pct": round(isaretli.mean(), 4),
+        })
+
     for tip, ust_yon, alt_yon in (("REVERSAL (ilgi patlaması -> tersine dön)", "SHORT", "LONG"),
                                    ("MOMENTUM (ilgi patlaması -> devam et)", "LONG", "SHORT")):
         yon_serisi = pd.Series(np.nan, index=df_all.index, dtype=object)
@@ -2740,7 +2777,7 @@ def google_trends_testi_calistir() -> tuple:
     if not satirlar:
         return None, f"Yeterli örneklem büyüklüğüne ({TREND_MIN_N}) ulaşan hipotez bulunamadı."
 
-    tablo = pd.DataFrame(satirlar).sort_values("kazanma_orani_pct", ascending=False)
+    tablo = pd.DataFrame(satirlar)
     dosya_yolu = _data_path("google_trends_testi.csv")
     tablo.to_csv(dosya_yolu, index=False, encoding="utf-8-sig")
 
