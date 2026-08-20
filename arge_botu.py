@@ -49,7 +49,7 @@ import threading
 # mesajlarında görünür kılmak için (2026-08-17: 3 kez üst üste "aynı
 # sonuç geldi" şüphesi sonrası eklendi - deploy'un gerçekten güncel
 # olup olmadığını KANITLA göstermek için).
-ARGE_KOD_SURUMU = "v18-edgar-tam-kapsam-tekillestirme-2026-08-19"
+ARGE_KOD_SURUMU = "v19-pykap-baglanti-testi-2026-08-19"
 import warnings
 from datetime import datetime, timezone
 
@@ -2552,6 +2552,74 @@ def maybe_run_research():
         print(f"[ARGE] Döngü hatası: {e}", flush=True)
 
 
+# =============================================================================
+# PYKAP BAĞLANTI TESTİ — 2026-08-19
+# =============================================================================
+# GEREKÇE: KAP'ın (Kamuyu Aydınlatma Platformu) "Pay Alım Satım Bildirimi"
+# (SEC Form 4'ün BIST karşılığı - içeriden alım/satım) geçmişe dönük,
+# ücretsiz, konu-filtreli arşivi olduğu doğrulandı. `pykap` adlı açık
+# kaynak (MIT) kütüphane tam bunu sağlıyor GİBİ görünüyor - AMA en son
+# Aralık 2022'de güncellenmiş, KAP'ın arka planı o zamandan beri
+# değişmiş olabilir. Büyük bir backtest kurmadan ÖNCE, küçük bir
+# bağlantı testiyle gerçekten çalışıp çalışmadığını doğruluyoruz.
+# NOT: pykap requirements.txt'e EKLENMELİ (kullanıcı tarafından) - burada
+# sadece import edilmeye çalışılıyor, yoksa net bir hata mesajı dönüyor.
+
+def pykap_baglanti_testi() -> str:
+    """pykap kütüphanesinin hâlâ çalışıp çalışmadığını, 'Pay Alım Satım
+    Bildirimi' konusunu bulup bulamadığını ve örnek bir hisse için
+    geçmişe dönük bildirim çekip çekemediğini test eder. Metin raporu
+    döner (CSV değil, bu sadece bir teşhis testi)."""
+    satirlar = []
+    try:
+        import pykap
+    except ImportError:
+        return ("❌ pykap kurulu değil. requirements.txt'e 'pykap' satırını "
+                "ekleyip yeniden deploy etmen lazım.")
+    satirlar.append("✅ pykap import edildi.")
+
+    try:
+        subjects = pykap.get_disclosure_subjects("ODA")
+        satirlar.append(f"✅ 'ODA' (Özel Durum Açıklaması) konu listesi çekildi: "
+                         f"{len(subjects)} konu bulundu.")
+        pay_konulari = [s for s in subjects
+                         if "pay alım" in s.get("subject", "").lower()
+                         or "pay satım" in s.get("subject", "").lower()
+                         or "alım satım" in s.get("subject", "").lower()]
+        if pay_konulari:
+            satirlar.append(f"✅ 'Pay Alım Satım' ile eşleşen {len(pay_konulari)} "
+                             f"konu bulundu:")
+            for k in pay_konulari[:5]:
+                satirlar.append(f"   - {k.get('subject')} (oid={k.get('subjectOid')})")
+        else:
+            satirlar.append("⚠️ 'Pay Alım Satım' ile eşleşen konu bulunamadı - "
+                             "konu isimleri farklı formatlanmış olabilir. "
+                             "İlk 15 konu adı:")
+            for k in subjects[:15]:
+                satirlar.append(f"   - {k.get('subject')}")
+    except Exception as e:
+        satirlar.append(f"❌ Konu listesi çekilirken hata: {e}")
+        return "\n".join(satirlar)
+
+    try:
+        from datetime import date, timedelta
+        comp = pykap.BISTCompany("THYAO")
+        bugun = date.today()
+        gecmis = bugun - timedelta(days=90)
+        kwargs = {"fromdate": gecmis, "todate": bugun, "disclosure_type": "ODA"}
+        if pay_konulari:
+            kwargs["subject"] = pay_konulari[0].get("subjectOid")
+        sonuc = comp.get_historical_disclosure_list(**kwargs)
+        satirlar.append(f"✅ THYAO için son 90 gün bildirimi çekildi: "
+                         f"{len(sonuc) if sonuc else 0} kayıt bulundu.")
+        if sonuc:
+            satirlar.append(f"   Örnek kayıt: {sonuc[0]}")
+    except Exception as e:
+        satirlar.append(f"❌ THYAO geçmiş bildirimi çekilirken hata: {e}")
+
+    return "\n".join(satirlar)
+
+
 def send_startup_message():
     send_telegram_message(
         f"🔬 Ar-Ge Botu (aynı deploy içinde, izole) başlatıldı.\n"
@@ -2585,6 +2653,9 @@ def send_startup_message():
         "sınırına takılmıyor\n"
         "/kanit_ters_islem — Fitil+RSI+Hacim ve Sadece RSI'ın yönünü ters "
         "çevirip (doğru stop/hedef ile sıfırdan) test eder\n"
+        "/pykap_test — BIST için KAP'ın 'Pay Alım Satım Bildirimi' arşivine "
+        "pykap kütüphanesiyle erişilebiliyor mu diye küçük bir bağlantı "
+        "testi yapar (henüz backtest değil, sadece keşif)\n"
         "/kanit_dogrulama — canlı sistemin kanıtlanmış 4 stratejisini "
         "(Fitil+RSI+Hacim, Sadece RSI, ATR Kırılımı, Hacim Z-Skor) taze "
         "2 yıllık veriyle, gerçek çıkış mantığıyla ve anlamlılık testiyle "
@@ -3014,6 +3085,16 @@ def poll_arge_commands():
                 except Exception as e:
                     send_telegram_message(f"👤 EDGAR içeriden işlem testi hatası: {e}")
             threading.Thread(target=_arka_plan_icgorusel_edgar, args=(gun_ufku,), daemon=True).start()
+        elif text.startswith("/pykap_test"):
+            send_telegram_message("🔍 pykap bağlantı testi başlıyor...")
+
+            def _arka_plan_pykap_test():
+                try:
+                    sonuc = pykap_baglanti_testi()
+                    send_telegram_message(f"🔍 pykap Test Sonucu:\n\n{sonuc}")
+                except Exception as e:
+                    send_telegram_message(f"🔍 pykap testi hatası: {e}")
+            threading.Thread(target=_arka_plan_pykap_test, daemon=True).start()
         elif text.startswith("/kanit_ters_islem"):
             send_telegram_message(
                 f"🔄 TERS İŞLEM TESTİ başlıyor: Fitil+RSI+Hacim ve Sadece RSI'ın "
