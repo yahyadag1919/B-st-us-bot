@@ -49,7 +49,7 @@ import threading
 # mesajlarında görünür kılmak için (2026-08-17: 3 kez üst üste "aynı
 # sonuç geldi" şüphesi sonrası eklendi - deploy'un gerçekten güncel
 # olup olmadığını KANITLA göstermek için).
-ARGE_KOD_SURUMU = "v16-kur-sektor-testi-2026-08-18"
+ARGE_KOD_SURUMU = "v17-edgar-ters-islem-2026-08-18"
 import warnings
 from datetime import datetime, timezone
 
@@ -1429,7 +1429,229 @@ def icgorusel_islem_testi_calistir(gun_ufku: int = ICGORUSEL_ISLEM_GUN_UFKU) -> 
 
 
 # =============================================================================
-# KANIT DOĞRULAMA — canlı sistemin "kanıtlanmış" stratejilerini taze veriyle
+# SEC EDGAR TABANLI İÇERİDEN İŞLEM TESTİ — 2026-08-18
+# =============================================================================
+# GEREKÇE: yfinance.insider_transactions bugün 106 hisseden 74'ünde hata
+# verdi (muhtemelen Yahoo hız sınırlaması) - kullanıcının kendi önerisiyle
+# (DeepSeek analizi de aynısını önerdi) doğrudan SEC EDGAR'a geçiliyor.
+# EDGAR resmi, ücretsiz, kayıtsız bir devlet kaynağı - SADECE User-Agent
+# header'ı istiyor (kimlik bilgisi değil, sadece "kim olduğunu söyle").
+
+EDGAR_HEADERS = {"User-Agent": "arge-botu-arastirma contact@example.com"}
+EDGAR_MIN_N = 20
+
+
+def _edgar_cik_haritasi() -> dict:
+    """SEC'in ticker->CIK haritasını çeker (tek seferlik, ~10.000 şirket,
+    ücretsiz, kayıtsız). Döner: {"AAPL": "0000320193", ...}"""
+    try:
+        resp = requests.get("https://www.sec.gov/files/company_tickers.json",
+                             headers=EDGAR_HEADERS, timeout=15)
+        resp.raise_for_status()
+        veri = resp.json()
+        return {v["ticker"]: str(v["cik_str"]).zfill(10) for v in veri.values()}
+    except Exception as e:
+        print(f"[EDGAR] CIK haritası çekilemedi: {e}", flush=True)
+        return {}
+
+
+def _edgar_form4_listesi(cik: str, ticker: str) -> list:
+    """Bir şirketin Form 4 (içeriden işlem bildirimi) dosyalama listesini
+    çeker - tarih ve accession number döner, işlem detayı DEĞİL (o ayrı
+    bir XML çağrısı gerektiriyor, sonraki fonksiyonda)."""
+    try:
+        resp = requests.get(f"https://data.sec.gov/submissions/CIK{cik}.json",
+                             headers=EDGAR_HEADERS, timeout=15)
+        resp.raise_for_status()
+        veri = resp.json()
+        recent = veri.get("filings", {}).get("recent", {})
+        formlar = recent.get("form", [])
+        tarihler = recent.get("filingDate", [])
+        accessionlar = recent.get("accessionNumber", [])
+        sonuc = []
+        for form, tarih, acc in zip(formlar, tarihler, accessionlar):
+            if form == "4":
+                sonuc.append({"tarih": tarih, "accession": acc})
+        return sonuc
+    except Exception as e:
+        print(f"[EDGAR] {ticker} Form 4 listesi hatası: {e}", flush=True)
+        return []
+
+
+def _edgar_form4_detay(cik: str, accession: str) -> list:
+    """Bir Form 4 dosyasının XML'ini indirip ALIM/SATIM işlemlerini
+    ayıklar (transactionCode P=Purchase, S=Sale)."""
+    acc_no_dash = accession.replace("-", "")
+    try:
+        idx_resp = requests.get(
+            f"https://www.sec.gov/Archives/edgar/data/{int(cik)}/{acc_no_dash}/{accession}-index.htm",
+            headers=EDGAR_HEADERS, timeout=15)
+        # XML dosyasını bulmak icin index.json daha guvenilir
+        idx_json = requests.get(
+            f"https://www.sec.gov/Archives/edgar/data/{int(cik)}/{acc_no_dash}/index.json",
+            headers=EDGAR_HEADERS, timeout=15).json()
+        xml_dosya = None
+        for item in idx_json.get("directory", {}).get("item", []):
+            ad = item.get("name", "")
+            if ad.endswith(".xml") and "form4" not in ad.lower() and ad != "primary_doc.xml":
+                continue
+            if ad.endswith(".xml"):
+                xml_dosya = ad
+                break
+        if xml_dosya is None:
+            return []
+        xml_resp = requests.get(
+            f"https://www.sec.gov/Archives/edgar/data/{int(cik)}/{acc_no_dash}/{xml_dosya}",
+            headers=EDGAR_HEADERS, timeout=15)
+        import xml.etree.ElementTree as ET
+        root = ET.fromstring(xml_resp.content)
+        sonuc = []
+        for islem in root.iter("nonDerivativeTransaction"):
+            kod_el = islem.find(".//transactionCode")
+            tarih_el = islem.find(".//transactionDate/value")
+            if kod_el is None or tarih_el is None:
+                continue
+            kod = kod_el.text
+            if kod == "P":
+                sonuc.append({"tarih": tarih_el.text, "tur": "ALIM"})
+            elif kod == "S":
+                sonuc.append({"tarih": tarih_el.text, "tur": "SATIM"})
+        return sonuc
+    except Exception as e:
+        print(f"[EDGAR] {accession} detay hatası: {e}", flush=True)
+        return []
+
+
+def icgorusel_islem_testi_edgar_calistir(gun_ufku: int = ICGORUSEL_ISLEM_GUN_UFKU,
+                                          max_hisse: int = 40) -> tuple:
+    """yfinance yerine SEC EDGAR'ı kullanan versiyon. DÜRÜST SINIR:
+    EDGAR'ın hız sınırı (10 istek/sn) ve her hissenin çok sayıda Form 4
+    dosyalaması olabileceği için, süre/istek sayısını makul tutmak adına
+    varsayılan olarak sadece ilk max_hisse hisseye bakıyor - tam 106
+    hisse çok uzun sürer (binlerce istek)."""
+    import yfinance as yf
+    cik_haritasi = _edgar_cik_haritasi()
+    if not cik_haritasi:
+        return None, "SEC CIK haritası çekilemedi."
+
+    kayitlar = []
+    hisseler = US_INSIDER_TICKERS[:max_hisse]
+    for n_i, ticker in enumerate(hisseler, 1):
+        cik = cik_haritasi.get(ticker)
+        if not cik:
+            continue
+        try:
+            print(f"[EDGAR İçeriden İşlem {n_i}/{len(hisseler)}] {ticker}...", flush=True)
+            fiyat_df = yf.Ticker(ticker).history(period="2y", interval="1d")
+            if fiyat_df is None or fiyat_df.empty:
+                continue
+            fiyat_df = fiyat_df.rename(columns={"Close": "close"})
+            fiyat_df.index = pd.to_datetime(fiyat_df.index).tz_localize(None)
+
+            form4ler = _edgar_form4_listesi(cik, ticker)
+            time.sleep(0.15)
+            for f in form4ler[:30]:  # her hisse icin en fazla 30 son dosyalama
+                detaylar = _edgar_form4_detay(cik, f["accession"])
+                time.sleep(0.15)
+                for d in detaylar:
+                    try:
+                        islem_tarihi = pd.to_datetime(d["tarih"]).tz_localize(None)
+                    except Exception:
+                        continue
+                    giris_konum = fiyat_df.index.get_indexer([islem_tarihi], method="nearest")[0]
+                    if giris_konum < 0 or giris_konum + gun_ufku >= len(fiyat_df):
+                        continue
+                    giris_fiyat = fiyat_df.iloc[giris_konum]["close"]
+                    cikis_fiyat = fiyat_df.iloc[giris_konum + gun_ufku]["close"]
+                    if giris_fiyat == 0 or pd.isna(giris_fiyat) or pd.isna(cikis_fiyat):
+                        continue
+                    getiri = (cikis_fiyat - giris_fiyat) / giris_fiyat * 100
+                    kayitlar.append({"ticker": ticker, "tarih": d["tarih"],
+                                      "tur": d["tur"], "getiri_pct": round(getiri, 3)})
+        except Exception as e:
+            print(f"[EDGAR İçeriden İşlem] {ticker} hata: {e}", flush=True)
+
+    if not kayitlar:
+        return None, "EDGAR'dan hiçbir işlem kaydı üretilemedi."
+
+    df = pd.DataFrame(kayitlar)
+    dosya_yolu = _data_path("icgorusel_islem_edgar.csv")
+    df.to_csv(dosya_yolu, index=False, encoding="utf-8-sig")
+
+    ozet_satirlari = []
+    for tur, dogru_yon in [("ALIM", 1), ("SATIM", -1)]:
+        alt = df[df["tur"] == tur]
+        if len(alt) < EDGAR_MIN_N:
+            continue
+        dogru_n = int((alt["getiri_pct"] * dogru_yon > 0).sum())
+        p = _binom_p(dogru_n, len(alt))
+        ozet_satirlari.append({
+            "tur": tur, "n": len(alt), "dogru_n": dogru_n,
+            "kazanma_orani_pct": round(dogru_n / len(alt) * 100, 2),
+            "binom_p": p, "ort_getiri_pct": round(alt["getiri_pct"].mean(), 4),
+        })
+
+    if not ozet_satirlari:
+        return None, f"Yeterli örneklem büyüklüğüne ({EDGAR_MIN_N}) ulaşan ALIM/SATIM grubu bulunamadı."
+
+    return dosya_yolu, {"gun_ufku": gun_ufku, "toplam_islem": len(df),
+                         "hisse_sayisi": len(hisseler), "gruplar": ozet_satirlari}
+
+
+# =============================================================================
+# TERS İŞLEM (INVERSE) TESTİ — 2026-08-18
+# =============================================================================
+# GEREKÇE: DeepSeek'in önerdiği "Fitil+RSI+Hacim negatif çıktı, tersini
+# dene" fikri - AMA doğru şekilde. Sadece R-katsayısının işaretini
+# çevirmek MATEMATİKSEL OLARAK YANLIŞ olurdu (kayıp/kazanç asimetrik:
+# sabit -1R kayıp, değişken +kısmi TP/trailing kazanç - orijinal yönün
+# mumuna göre hesaplanmış stop/hedef, basitçe ters çevrilemez). Bunun
+# yerine YÖNÜ GERÇEKTEN TERS ALIP _kanit_bist_rr_sonuc'u SIFIRDAN,
+# doğru stop/hedef ile (ters yönün kendi mum verisine göre) çalıştırıyoruz.
+
+def kanit_ters_islem_testi_calistir() -> tuple:
+    """Fitil+RSI+Hacim ve Sadece RSI'ın SİNYAL YÖNÜNÜ ters çevirip
+    (LONG yerine SHORT, SHORT yerine LONG), _kanit_bist_rr_sonuc'u o
+    TERS yön için SIFIRDAN (doğru stop/hedef ile) çalıştırır - basit
+    işaret çevirme DEĞİL, gerçek yeniden hesaplama."""
+    import yfinance as yf
+    tum_sonuclar = {"[TERS] Fitil+RSI+Hacim": [], "[TERS] Sadece RSI": []}
+    ters_yon = {"LONG": "SHORT", "SHORT": "LONG"}
+    for n_i, ticker in enumerate(BIST_TICKERS, 1):
+        try:
+            print(f"[Ters İşlem Testi {n_i}/{len(BIST_TICKERS)}] {ticker}...", flush=True)
+            df = yf.Ticker(ticker).history(period="2y", interval="1d")
+            if df is None or df.empty or len(df) < 60:
+                continue
+            df = df.rename(columns={"Open": "open", "High": "high", "Low": "low",
+                                     "Close": "close", "Volume": "volume"})
+            df = df[["open", "high", "low", "close", "volume"]].copy().reset_index(drop=True)
+            df = _kanit_compute_indicators(df)
+
+            for idx in range(25, len(df) - 1):
+                row = df.iloc[idx]
+                for isim, fn in [("[TERS] Fitil+RSI+Hacim", _kanit_check_exhaustion),
+                                  ("[TERS] Sadece RSI", _kanit_check_rsi_only)]:
+                    orijinal_yon = fn(row)
+                    if orijinal_yon is None:
+                        continue
+                    yon = ters_yon[orijinal_yon]
+                    sonuc = _kanit_bist_rr_sonuc(df, idx, yon)
+                    if sonuc is None:
+                        continue
+                    durum, r = sonuc
+                    tum_sonuclar[isim].append((durum, r))
+        except Exception as e:
+            print(f"[Ters İşlem Testi] {ticker} hata: {e}", flush=True)
+        time.sleep(1.0)
+
+    satirlar = _kanit_ozet_tablosu(tum_sonuclar)
+    if not satirlar:
+        return None, "Hiçbir strateji için veri üretilemedi."
+    tablo = pd.DataFrame(satirlar)
+    dosya_yolu = _data_path("kanit_ters_islem_sonucu.csv")
+    tablo.to_csv(dosya_yolu, index=False, encoding="utf-8-sig")
+    return dosya_yolu, {"satirlar": satirlar}
 # yeniden test eder — 2026-08-18
 # =============================================================================
 # GEREKÇE: Kullanıcı, tüm bu yeni-kenar aramalarını (hesap makinesi, izole
@@ -2352,6 +2574,11 @@ def send_startup_message():
         "/icgorusel_islem [GÜN_UFKU] — ABD hisselerinde içeriden (yönetici/"
         "yönetim kurulu) alım-satımın sonraki getiriyle ilişkisini test eder "
         "(varsayılan 20 işlem günü ufku)\n"
+        "/icgorusel_islem_edgar [GÜN_UFKU] — aynı test ama SEC EDGAR'dan "
+        "(yfinance yerine), ilk 40 hisseyle sınırlı, daha yavaş ama hız "
+        "sınırına takılmıyor\n"
+        "/kanit_ters_islem — Fitil+RSI+Hacim ve Sadece RSI'ın yönünü ters "
+        "çevirip (doğru stop/hedef ile sıfırdan) test eder\n"
         "/kanit_dogrulama — canlı sistemin kanıtlanmış 4 stratejisini "
         "(Fitil+RSI+Hacim, Sadece RSI, ATR Kırılımı, Hacim Z-Skor) taze "
         "2 yıllık veriyle, gerçek çıkış mantığıyla ve anlamlılık testiyle "
@@ -2751,6 +2978,59 @@ def poll_arge_commands():
                 except Exception as e:
                     send_telegram_message(f"💱 Kur/Sektör testi hatası: {e}")
             threading.Thread(target=_arka_plan_kur_sektor, args=(baslangic, bitis), daemon=True).start()
+        elif text.startswith("/icgorusel_islem_edgar"):
+            parcalar = text.split()
+            gun_ufku = int(parcalar[1]) if len(parcalar) > 1 else ICGORUSEL_ISLEM_GUN_UFKU
+            send_telegram_message(
+                f"👤 EDGAR İÇERİDEN İŞLEM TESTİ başlıyor: SEC EDGAR'dan (yfinance "
+                f"yerine) çekiliyor, hız sınırına takılmamak için ilk 40 hisseyle "
+                f"sınırlı. Bu YAVAŞ olabilir (her hisse için onlarca Form 4 dosyası "
+                f"indiriliyor). ARKA PLANDA çalışıyor, bitince CSV + özet göndereceğim."
+            )
+
+            def _arka_plan_icgorusel_edgar(gu):
+                try:
+                    dosya_yolu, ozet = icgorusel_islem_testi_edgar_calistir(gu)
+                    if dosya_yolu is None:
+                        send_telegram_message(f"👤 EDGAR içeriden işlem testi başarısız: {ozet}")
+                        return
+                    satirlar = [f"👤 EDGAR İçeriden İşlem Testi Sonucu ({ozet['gun_ufku']} gün ufku)",
+                                f"{ozet['hisse_sayisi']} hisse, toplam işlem: {ozet['toplam_islem']}\n"]
+                    for g in ozet["gruplar"]:
+                        satirlar.append(
+                            f"{g['tur']}: n={g['n']}, %{g['kazanma_orani_pct']} doğru yönde "
+                            f"(binom p={g['binom_p']}), ort. getiri %{g['ort_getiri_pct']}"
+                        )
+                    send_telegram_document(dosya_yolu, caption="\n".join(satirlar))
+                except Exception as e:
+                    send_telegram_message(f"👤 EDGAR içeriden işlem testi hatası: {e}")
+            threading.Thread(target=_arka_plan_icgorusel_edgar, args=(gun_ufku,), daemon=True).start()
+        elif text.startswith("/kanit_ters_islem"):
+            send_telegram_message(
+                f"🔄 TERS İŞLEM TESTİ başlıyor: Fitil+RSI+Hacim ve Sadece RSI'ın "
+                f"sinyal yönü ters çevrilip (LONG↔SHORT), doğru stop/hedef ile "
+                f"SIFIRDAN hesaplanıyor - basit işaret çevirme değil. "
+                f"ARKA PLANDA çalışıyor, bitince CSV + özet göndereceğim."
+            )
+
+            def _arka_plan_ters_islem():
+                try:
+                    dosya_yolu, ozet = kanit_ters_islem_testi_calistir()
+                    if dosya_yolu is None:
+                        send_telegram_message(f"🔄 Ters işlem testi başarısız: {ozet}")
+                        return
+                    satirlar = ["🔄 Ters İşlem Testi Sonucu\n"]
+                    for s in ozet["satirlar"]:
+                        p_str = f", p={s['binom_p']}" if s["binom_p"] is not None else ""
+                        satirlar.append(
+                            f"{s['strateji']}: {s['toplam_sinyal']} sinyal "
+                            f"({s['win']}W/{s['loss']}L/{s['timeout']}T), "
+                            f"%{s['kazanma_orani_pct']} isabet{p_str}, ort R={s['ort_R']}"
+                        )
+                    send_telegram_document(dosya_yolu, caption="\n".join(satirlar))
+                except Exception as e:
+                    send_telegram_message(f"🔄 Ters işlem testi hatası: {e}")
+            threading.Thread(target=_arka_plan_ters_islem, daemon=True).start()
         elif text.startswith("/icgorusel_islem"):
             parcalar = text.split()
             gun_ufku = int(parcalar[1]) if len(parcalar) > 1 else ICGORUSEL_ISLEM_GUN_UFKU
