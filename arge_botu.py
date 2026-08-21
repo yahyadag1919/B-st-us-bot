@@ -49,7 +49,7 @@ import threading
 # mesajlarında görünür kılmak için (2026-08-17: 3 kez üst üste "aynı
 # sonuç geldi" şüphesi sonrası eklendi - deploy'un gerçekten güncel
 # olup olmadığını KANITLA göstermek için).
-ARGE_KOD_SURUMU = "v33-zaman-eslestirilmis-kontrol-2026-08-19"
+ARGE_KOD_SURUMU = "v34-rsi21-hedef-kiyasi-2026-08-19"
 import warnings
 from datetime import datetime, timezone
 
@@ -4106,6 +4106,125 @@ def gun_ici_surekli_tarama_testi_calistir(max_hisse: int = 30) -> tuple:
 
 
 # =============================================================================
+# RSI21 GÜN İÇİ — KÜÇÜK vs BÜYÜK HEDEF KIYASI — 2026-08-19
+# =============================================================================
+# GEREKÇE: Kullanıcı canlı sistemin RSI21 bildirimlerini "çalışıyor gibi
+# ama oranlar çok düşük" diye tarif etti - kod incelemesi doğruladı:
+# US_GUNICI_CHECKPOINTS hedefleri %0.15-%0.90 arası, yani neredeyse her
+# küçük titreşim bile "isabet" sayılıyor. Bu test AYNI RSI21 giriş
+# sinyalini (≤25/≥75) İKİ FARKLI hedef setiyle test ediyor: (1) canlı
+# sistemin GERÇEK küçük hedefleri (aynı 5 checkpoint, aynı yüzdeler),
+# (2) ATR Kırılımı/Hacim Z-Skor'un kullandığı GERÇEKTEN ANLAMLI büyük
+# hedefler (%1/2/3/5, 1/3/5/10 gün) - alttaki sinyal büyük ölçekte de
+# tutuyor mu, yoksa sadece küçük eşikte mi "iyi" görünüyor.
+
+RSI21_PERIOD = 21
+RSI21_OS, RSI21_OB = 25, 75
+RSI21_KUCUK_CHECKPOINTS = [(1, "15dk", 0.15), (2, "30dk", 0.25), (4, "1sa", 0.40),
+                           (8, "2sa", 0.60), (16, "4sa", 0.90)]  # 15dk bar sayisi olarak
+
+
+def _rsi_hesapla(close: pd.Series, n: int) -> pd.Series:
+    delta = close.diff()
+    gain = delta.clip(lower=0)
+    loss = -delta.clip(upper=0)
+    avg_gain = gain.ewm(alpha=1 / n, adjust=False).mean()
+    avg_loss = loss.ewm(alpha=1 / n, adjust=False).mean()
+    rs = avg_gain / avg_loss.replace(0, np.nan)
+    return 100 - (100 / (1 + rs))
+
+
+def _rsi21_kucuk_hedef_sonuc(barlar_15dk: pd.DataFrame, giris_konum: int, yon: str):
+    """Canlı sistemin GERÇEK küçük hedefleriyle (15dk-4sa, %0.15-%0.90)
+    checkpoint kontrolü - bar-index ofsetleriyle yaklaşık (yfinance'in
+    15dk barları düzenli aralıklı olduğu için makul bir yaklaşım)."""
+    giris_fiyat = barlar_15dk.iloc[giris_konum]["close"]
+    for bar_ofset, etiket, hedef_pct in RSI21_KUCUK_CHECKPOINTS:
+        konum = giris_konum + bar_ofset
+        if konum >= len(barlar_15dk):
+            return "TIMEOUT", None
+        bar = barlar_15dk.iloc[konum]
+        if yon == "LONG":
+            hedef_fiyat = giris_fiyat * (1 + hedef_pct / 100)
+            if bar["high"] >= hedef_fiyat:
+                return "WIN", hedef_pct
+        else:
+            hedef_fiyat = giris_fiyat * (1 - hedef_pct / 100)
+            if bar["low"] <= hedef_fiyat:
+                return "WIN", hedef_pct
+    return "LOSS", -1.0
+
+
+def rsi21_hedef_kiyasi_testi_calistir(max_hisse: int = 30) -> tuple:
+    """Aynı RSI21 (≤25/≥75) giriş sinyalini küçük (canlı, %0.15-0.90) ve
+    büyük (%1-5, gerçekten anlamlı) hedeflerle karşılaştırmalı test eder.
+    Döner: (dosya_yolu, özet_dict) ya da (None, hata_mesajı)."""
+    import yfinance as yf
+
+    hisseler = US_INSIDER_TICKERS[:max_hisse]
+    tum_sonuclar = {
+        "[KÜÇÜK HEDEF - canlı sistem] RSI21": [],
+        "[BÜYÜK HEDEF - anlamlı %1-5] RSI21": [],
+    }
+
+    for n_i, ticker in enumerate(hisseler, 1):
+        try:
+            print(f"[RSI21 Hedef Kıyası {n_i}/{len(hisseler)}] {ticker}...", flush=True)
+            gunluk = yf.Ticker(ticker).history(period="2y", interval="1d", timeout=20)
+            barlar_15dk = yf.Ticker(ticker).history(period="60d", interval="15m", timeout=20)
+            if gunluk is None or gunluk.empty or barlar_15dk is None or barlar_15dk.empty:
+                continue
+            gunluk.index = pd.to_datetime(gunluk.index).tz_localize(None)
+            gunluk = gunluk.rename(columns={"Close": "close"})
+
+            barlar_15dk = barlar_15dk.reset_index().rename(columns={
+                "Datetime": "ts", "Open": "open", "High": "high", "Low": "low",
+                "Close": "close", "Volume": "volume"})
+            if "ts" not in barlar_15dk.columns:
+                barlar_15dk = barlar_15dk.rename(columns={barlar_15dk.columns[0]: "ts"})
+            barlar_15dk["ts"] = pd.to_datetime(barlar_15dk["ts"]).dt.tz_localize(None)
+            barlar_15dk["gun"] = barlar_15dk["ts"].dt.date
+            barlar_15dk["rsi21"] = _rsi_hesapla(barlar_15dk["close"], RSI21_PERIOD)
+
+            tetiklenen_gunler = set()
+            for konum in range(RSI21_PERIOD + 5, len(barlar_15dk)):
+                bar = barlar_15dk.iloc[konum]
+                gun = bar["gun"]
+                if gun in tetiklenen_gunler:
+                    continue  # gunde sadece ilk tetiklenme
+                rsi = bar["rsi21"]
+                if pd.isna(rsi):
+                    continue
+                yon = "LONG" if rsi <= RSI21_OS else ("SHORT" if rsi >= RSI21_OB else None)
+                if yon is None:
+                    continue
+                tetiklenen_gunler.add(gun)
+
+                # KUCUK hedef (15dk bar ofsetleriyle, ayni gun/sonraki barlar)
+                kucuk_sonuc = _rsi21_kucuk_hedef_sonuc(barlar_15dk, konum, yon)
+                tum_sonuclar["[KÜÇÜK HEDEF - canlı sistem] RSI21"].append(kucuk_sonuc)
+
+                # BUYUK hedef (gunluk checkpoint sistemi, ayni gunun gunluk index'i)
+                gunluk_konum_list = gunluk.index[gunluk.index.date == gun]
+                if len(gunluk_konum_list) == 0:
+                    continue
+                gunluk_idx = gunluk.index.get_loc(gunluk_konum_list[0])
+                buyuk_sonuc = _kanit_us_checkpoint_sonuc(gunluk, gunluk_idx, yon)
+                tum_sonuclar["[BÜYÜK HEDEF - anlamlı %1-5] RSI21"].append(buyuk_sonuc)
+        except Exception as e:
+            print(f"[RSI21 Hedef Kıyası] {ticker} hata: {e}", flush=True)
+        time.sleep(0.5)
+
+    satirlar = _kanit_ozet_tablosu(tum_sonuclar)
+    if not satirlar:
+        return None, "Hiçbir grup için yeterli veri üretilemedi."
+    tablo = pd.DataFrame(satirlar)
+    dosya_yolu = _data_path("rsi21_hedef_kiyasi_testi.csv")
+    tablo.to_csv(dosya_yolu, index=False, encoding="utf-8-sig")
+    return dosya_yolu, {"satirlar": satirlar}
+
+
+# =============================================================================
 # EKŞİ SÖZLÜK BAĞLANTI TESTİ — 2026-08-19
 # =============================================================================
 # GEREKÇE: Ekşi Sözlük'ün resmi bir API'si yok - sadece web sayfası
@@ -4207,6 +4326,9 @@ def send_startup_message():
         "/gun_ici_tarama_testi — ATR Kırılımı/Hacim Z-Skor'u günde bir "
         "yerine gün içi (15dk) sürekli tarasak ne olur, kapanış-bazlı "
         "kontrol grubuyla karşılaştırır (izole deney, canlıya dokunmaz)\n"
+        "/rsi21_hedef_kiyasi — RSI21 gün içi sinyalini canlının küçük "
+        "hedefleriyle (%0.15-0.90) ve gerçekten anlamlı büyük hedeflerle "
+        "(%1-5) karşılaştırır\n"
         "/wiki_dogrulama — /wiki_testi'nin bulgusunu (yüksek izlenme -> "
         "LONG) izole, gerçek R:R çıkışıyla yeniden doğrular\n"
         "/eksisozluk_test [BAŞLIK] — Ekşi Sözlük'ten veri çekilebiliyor "
@@ -4942,6 +5064,32 @@ def poll_arge_commands():
                 except Exception as e:
                     send_telegram_message(f"⏱️ Gün içi tarama testi hatası: {e}")
             threading.Thread(target=_arka_plan_gun_ici_tarama, daemon=True).start()
+        elif text.startswith("/rsi21_hedef_kiyasi"):
+            send_telegram_message(
+                f"🎯 RSI21 HEDEF KIYASI başlıyor: aynı giriş sinyalini canlı "
+                f"sistemin küçük hedefleriyle (%0.15-0.90) VE gerçekten "
+                f"anlamlı büyük hedeflerle (%1-5) karşılaştırıyor. ARKA "
+                f"PLANDA çalışıyor, bitince CSV + özet göndereceğim."
+            )
+
+            def _arka_plan_rsi21_kiyas():
+                try:
+                    dosya_yolu, ozet = rsi21_hedef_kiyasi_testi_calistir()
+                    if dosya_yolu is None:
+                        send_telegram_message(f"🎯 RSI21 hedef kıyası başarısız: {ozet}")
+                        return
+                    satirlar = ["🎯 RSI21 Hedef Kıyası Sonucu\n"]
+                    for s in ozet["satirlar"]:
+                        p_str = f", p={s['binom_p']}" if s["binom_p"] is not None else ""
+                        satirlar.append(
+                            f"{s['strateji']}: {s['toplam_sinyal']} sinyal "
+                            f"({s['win']}W/{s['loss']}L/{s['timeout']}T), "
+                            f"%{s['kazanma_orani_pct']} isabet{p_str}, ort R={s['ort_R']}"
+                        )
+                    send_telegram_document(dosya_yolu, caption="\n".join(satirlar))
+                except Exception as e:
+                    send_telegram_message(f"🎯 RSI21 hedef kıyası hatası: {e}")
+            threading.Thread(target=_arka_plan_rsi21_kiyas, daemon=True).start()
         elif text.startswith("/ai_model_backtest"):
             send_telegram_message(
                 f"🤖 GERÇEK AI MODEL BACKTEST başlıyor: model.pkl ve "
