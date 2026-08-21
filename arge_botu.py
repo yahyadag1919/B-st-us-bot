@@ -49,7 +49,7 @@ import threading
 # mesajlarında görünür kılmak için (2026-08-17: 3 kez üst üste "aynı
 # sonuç geldi" şüphesi sonrası eklendi - deploy'un gerçekten güncel
 # olup olmadığını KANITLA göstermek için).
-ARGE_KOD_SURUMU = "v25-makro-gurultu-testi-2026-08-19"
+ARGE_KOD_SURUMU = "v26-piyasa-sapmasi-testi-2026-08-19"
 import warnings
 from datetime import datetime, timezone
 
@@ -3303,6 +3303,139 @@ def makro_gurultu_testi_calistir() -> tuple:
 
 
 # =============================================================================
+# PİYASA SAPMASI TESTİ — AZINLIĞIN AYRIŞMASI GERÇEK Mİ, GÜRÜLTÜ MÜ
+# =============================================================================
+# 2026-08-19 - GEREKÇE: makro_gurultu_testi'nin bulgusu üzerine kurulu -
+# ortalama bir günde hisselerin %75'i AYNI yönde hareket ediyor (v7
+# gözleminin sayısallaştırılmışı). Kullanıcının fikri: piyasa geneli bir
+# yöne giderken bu çoğunluğa UYMAYAN azınlık hisseler, gerçek bir
+# hisseye-özel sinyal taşıyor olabilir mi? İKİ REKABETÇİ HİPOTEZ:
+# DEVAM (sapma gerçek bir nedenden, ertesi gün de kendi yönünde gider)
+# vs GERİ DÖNÜŞ (sapma sadece gürültüydü, ertesi gün piyasaya/çoğunluğa
+# geri döner - mean reversion). Emir defteri gibi yeni bir veri kaynağı
+# GEREKTİRMİYOR - tamamen mevcut BIST_TICKERS günlük verisiyle kuruluyor.
+
+SAPMA_MIN_N = 30
+
+
+def piyasa_sapmasi_testi_calistir() -> tuple:
+    """Her gün piyasa çoğunluğunun yönünü bulur, o günün ÇOĞUNLUĞA
+    UYMAYAN (sapan) hisselerini işaretler, DEVAM (kendi yönünde) ve
+    GERİ DÖNÜŞ (çoğunluğun yönüne) hipotezlerini ertesi güne karşı test
+    eder. Döner: (dosya_yolu, özet_dict) ya da (None, hata_mesajı)."""
+    import yfinance as yf
+
+    hisse_getirileri = {}
+    for n_i, ticker in enumerate(BIST_TICKERS, 1):
+        try:
+            print(f"[Piyasa Sapması {n_i}/{len(BIST_TICKERS)}] {ticker}...", flush=True)
+            df = yf.Ticker(ticker).history(period="2y", interval="1d")
+            if df is None or df.empty:
+                continue
+            df.index = pd.to_datetime(df.index).tz_localize(None)
+            getiri = df["Close"].pct_change() * 100
+            hisse_getirileri[ticker] = getiri
+        except Exception as e:
+            print(f"[Piyasa Sapması] {ticker} hata: {e}", flush=True)
+        time.sleep(0.3)
+
+    if len(hisse_getirileri) < 10:
+        return None, "Yeterli hisse verisi toplanamadı."
+
+    getiri_df = pd.DataFrame(hisse_getirileri)  # satir: tarih, kolon: ticker
+    # her gun coğunluk yonunu bul (pozitif getirili hisse orani > 0.5 ise LONG cogunluk)
+    pozitif_oran = (getiri_df > 0).sum(axis=1) / getiri_df.notna().sum(axis=1)
+    piyasa_yonu = pozitif_oran.apply(lambda x: "LONG" if x > 0.5 else "SHORT" if x < 0.5 else None)
+
+    kayitlar = []
+    tarihler = getiri_df.index
+    for i in range(1, len(tarihler) - 1):
+        tarih = tarihler[i]
+        yon = piyasa_yonu.iloc[i]
+        if yon is None:
+            continue
+        for ticker in hisse_getirileri:
+            hisse_getiri_bugun = getiri_df.iloc[i][ticker]
+            hisse_getiri_yarin = getiri_df.iloc[i + 1][ticker]
+            if pd.isna(hisse_getiri_bugun) or pd.isna(hisse_getiri_yarin) or hisse_getiri_bugun == 0:
+                continue
+            hisse_yonu_bugun = "LONG" if hisse_getiri_bugun > 0 else "SHORT"
+            sapan_mi = hisse_yonu_bugun != yon
+            if not sapan_mi:
+                continue  # sadece SAPAN (azinlik) hisseleri kaydediyoruz
+            kayitlar.append({
+                "ticker": ticker, "tarih": tarih.date().isoformat(),
+                "piyasa_yonu": yon, "hisse_yonu_bugun": hisse_yonu_bugun,
+                "sonraki_gun_getiri_pct": round(hisse_getiri_yarin, 3),
+            })
+
+    if not kayitlar:
+        return None, "Hiçbir sapan (azınlık) gözlem üretilemedi."
+
+    df_all = pd.DataFrame(kayitlar)
+    if len(df_all) < SAPMA_MIN_N:
+        return None, f"Yeterli örneklem büyüklüğü yok (sadece {len(df_all)} sapan gözlem)."
+
+    satirlar = []
+    # DEVAM: sapan hisse KENDİ dünkü yönünde devam ediyor mu
+    dogru_devam = ((df_all["hisse_yonu_bugun"] == "LONG") & (df_all["sonraki_gun_getiri_pct"] > 0)) | \
+                  ((df_all["hisse_yonu_bugun"] == "SHORT") & (df_all["sonraki_gun_getiri_pct"] < 0))
+    dogru_n = int(dogru_devam.sum())
+    satirlar.append({
+        "hipotez": "DEVAM (sapan hisse kendi yönünde devam eder)",
+        "n": len(df_all), "dogru_n": dogru_n,
+        "kazanma_orani_pct": round(dogru_devam.mean() * 100, 2),
+        "binom_p": _binom_p(dogru_n, len(df_all)),
+    })
+
+    # GERİ DÖNÜŞ: sapan hisse PİYASANIN (dünkü çoğunluğun) yönüne geri dönüyor mu
+    dogru_donus = ((df_all["piyasa_yonu"] == "LONG") & (df_all["sonraki_gun_getiri_pct"] > 0)) | \
+                  ((df_all["piyasa_yonu"] == "SHORT") & (df_all["sonraki_gun_getiri_pct"] < 0))
+    dogru_n2 = int(dogru_donus.sum())
+    satirlar.append({
+        "hipotez": "GERİ DÖNÜŞ (sapan hisse piyasa çoğunluğuna döner)",
+        "n": len(df_all), "dogru_n": dogru_n2,
+        "kazanma_orani_pct": round(dogru_donus.mean() * 100, 2),
+        "binom_p": _binom_p(dogru_n2, len(df_all)),
+    })
+
+    # kontrol: PIYASAYLA AYNI YONDE giden (uyumlu) hisselerin ayni testi -
+    # sapanlarla kiyaslamak icin. Bunun icin ikinci bir gecis gerekiyor.
+    kayitlar_uyumlu = []
+    for i in range(1, len(tarihler) - 1):
+        tarih = tarihler[i]
+        yon = piyasa_yonu.iloc[i]
+        if yon is None:
+            continue
+        for ticker in hisse_getirileri:
+            hisse_getiri_bugun = getiri_df.iloc[i][ticker]
+            hisse_getiri_yarin = getiri_df.iloc[i + 1][ticker]
+            if pd.isna(hisse_getiri_bugun) or pd.isna(hisse_getiri_yarin) or hisse_getiri_bugun == 0:
+                continue
+            hisse_yonu_bugun = "LONG" if hisse_getiri_bugun > 0 else "SHORT"
+            if hisse_yonu_bugun != yon:
+                continue  # bu sefer sadece UYUMLU (coğunlukla ayni) hisseleri kaydediyoruz
+            kayitlar_uyumlu.append({"hisse_yonu_bugun": hisse_yonu_bugun,
+                                     "sonraki_gun_getiri_pct": hisse_getiri_yarin})
+    if kayitlar_uyumlu:
+        df_uyumlu = pd.DataFrame(kayitlar_uyumlu)
+        dogru_uyumlu = ((df_uyumlu["hisse_yonu_bugun"] == "LONG") & (df_uyumlu["sonraki_gun_getiri_pct"] > 0)) | \
+                       ((df_uyumlu["hisse_yonu_bugun"] == "SHORT") & (df_uyumlu["sonraki_gun_getiri_pct"] < 0))
+        dogru_n3 = int(dogru_uyumlu.sum())
+        satirlar.append({
+            "hipotez": "[KONTROL] Çoğunlukla UYUMLU hisse kendi yönünde devam eder mi",
+            "n": len(df_uyumlu), "dogru_n": dogru_n3,
+            "kazanma_orani_pct": round(dogru_uyumlu.mean() * 100, 2),
+            "binom_p": _binom_p(dogru_n3, len(df_uyumlu)),
+        })
+
+    tablo = pd.DataFrame(satirlar)
+    dosya_yolu = _data_path("piyasa_sapmasi_testi.csv")
+    tablo.to_csv(dosya_yolu, index=False, encoding="utf-8-sig")
+    return dosya_yolu, {"toplam_sapan_gozlem": len(df_all), "satirlar": satirlar}
+
+
+# =============================================================================
 # EKŞİ SÖZLÜK BAĞLANTI TESTİ — 2026-08-19
 # =============================================================================
 # GEREKÇE: Ekşi Sözlük'ün resmi bir API'si yok - sadece web sayfası
@@ -3389,6 +3522,8 @@ def send_startup_message():
         "kontrol grubuna karşı izole doğrular\n"
         "/makro_gurultu_testi — geceki S&P500/USDTRY hareketinin XU100/"
         "hisse getirisiyle ilişkisini ölçer, 'sakin gece' eşiği önerir\n"
+        "/piyasa_sapmasi_testi — piyasa çoğunluğuna uymayan (sapan) "
+        "hisselerin ertesi gün DEVAM mı GERİ Mİ DÖNDÜĞÜNÜ test eder\n"
         "/wiki_dogrulama — /wiki_testi'nin bulgusunu (yüksek izlenme -> "
         "LONG) izole, gerçek R:R çıkışıyla yeniden doğrular\n"
         "/eksisozluk_test [BAŞLIK] — Ekşi Sözlük'ten veri çekilebiliyor "
@@ -3980,6 +4115,32 @@ def poll_arge_commands():
                 except Exception as e:
                     send_telegram_message(f"🌍 Makro gürültü testi hatası: {e}")
             threading.Thread(target=_arka_plan_makro_gurultu, daemon=True).start()
+        elif text.startswith("/piyasa_sapmasi_testi"):
+            send_telegram_message(
+                f"🔀 PİYASA SAPMASI TESTİ başlıyor: her gün piyasa çoğunluğunun "
+                f"yönünü bulup, çoğunluğa UYMAYAN (sapan/azınlık) hisselerin "
+                f"ertesi gün DEVAM mı ettiğini yoksa GERİ Mİ DÖNDÜĞÜNÜ test "
+                f"ediyor. ARKA PLANDA çalışıyor, bitince CSV + özet göndereceğim."
+            )
+
+            def _arka_plan_piyasa_sapmasi():
+                try:
+                    dosya_yolu, ozet = piyasa_sapmasi_testi_calistir()
+                    if dosya_yolu is None:
+                        send_telegram_message(f"🔀 Piyasa sapması testi başarısız: {ozet}")
+                        return
+                    satirlar = [f"🔀 Piyasa Sapması Testi Sonucu",
+                                f"Toplam sapan (azınlık) gözlem: {ozet['toplam_sapan_gozlem']}\n"]
+                    for s in ozet["satirlar"]:
+                        p_str = f", p={s['binom_p']}" if s["binom_p"] is not None else ""
+                        satirlar.append(
+                            f"{s['hipotez']}: n={s['n']}, %{s['kazanma_orani_pct']} "
+                            f"isabet{p_str}"
+                        )
+                    send_telegram_document(dosya_yolu, caption="\n".join(satirlar))
+                except Exception as e:
+                    send_telegram_message(f"🔀 Piyasa sapması testi hatası: {e}")
+            threading.Thread(target=_arka_plan_piyasa_sapmasi, daemon=True).start()
         elif text.startswith("/eksisozluk_test"):
             parcalar = text.split()
             baslik = parcalar[1] if len(parcalar) > 1 else "thyao"
