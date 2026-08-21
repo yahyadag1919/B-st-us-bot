@@ -49,7 +49,7 @@ import threading
 # mesajlarında görünür kılmak için (2026-08-17: 3 kez üst üste "aynı
 # sonuç geldi" şüphesi sonrası eklendi - deploy'un gerçekten güncel
 # olup olmadığını KANITLA göstermek için).
-ARGE_KOD_SURUMU = "v27-piyasa-sapmasi-hiz-timeout-duzeltmesi-2026-08-19"
+ARGE_KOD_SURUMU = "v28-piyasa-sapmasi-kanit-dogrulama-2026-08-19"
 import warnings
 from datetime import datetime, timezone
 
@@ -3418,6 +3418,94 @@ def piyasa_sapmasi_testi_calistir() -> tuple:
 
 
 # =============================================================================
+# PİYASA SAPMASI — GERÇEK ÇIKIŞ MANTIĞIYLA İZOLE DOĞRULAMA — 2026-08-19
+# =============================================================================
+# GEREKÇE: piyasa_sapmasi_testi_calistir bulgusu (sapan hisse DEVAM %52.23
+# p=0.0083, uyumlu hisse kendi yönünde devam %48.03) küçük ama gerçek bir
+# kenar gösterdi. Wikipedia'da öğrendiğimiz gibi basit isabet oranı testi
+# yanıltıcı olabiliyor - bunu GERÇEK BIST çıkış mantığıyla (1.5R kısmi TP
+# + trailing) ve İKİ GRUBU (sapan vs uyumlu) karşılaştırmalı test ediyor.
+
+def piyasa_sapmasi_kanit_dogrulama_calistir() -> tuple:
+    """Sapan ve uyumlu hisseleri, kendi günün yönünde (LONG/SHORT), BIST'in
+    gerçek çıkış mantığıyla test eder. Döner: (dosya_yolu, özet_dict) ya da
+    (None, hata_mesajı)."""
+    import yfinance as yf
+
+    # 1. AŞAMA: her hisse için OHLCV+ATR çek, kapanış getirisini de
+    # ayrıca tutup piyasa çoğunluk yönünü hesaplamak için biriktir.
+    ticker_veri = {}
+    kapanis_getirileri = {}
+    for n_i, ticker in enumerate(BIST_TICKERS, 1):
+        try:
+            print(f"[Sapma Kanıt 1/2 - {n_i}/{len(BIST_TICKERS)}] {ticker}...", flush=True)
+            raw = yf.Ticker(ticker).history(period="2y", interval="1d", timeout=20)
+            if raw is None or raw.empty or len(raw) < 60:
+                continue
+            raw = raw.rename(columns={"Open": "open", "High": "high", "Low": "low",
+                                       "Close": "close", "Volume": "volume"})
+            raw = raw[["open", "high", "low", "close", "volume"]].copy()
+            raw.index = pd.to_datetime(raw.index).tz_localize(None)
+            kapanis_getirileri[ticker] = raw["close"].pct_change() * 100
+            tarihler = raw.index
+            df = raw.reset_index(drop=True)
+            df = _kanit_compute_indicators(df)
+            ticker_veri[ticker] = (tarihler, df)
+        except Exception as e:
+            print(f"[Sapma Kanıt] {ticker} hata: {e}", flush=True)
+        time.sleep(0.3)
+
+    if len(kapanis_getirileri) < 10:
+        return None, "Yeterli hisse verisi toplanamadı."
+
+    # 2. AŞAMA: piyasa çoğunluk yönü (vektörleştirilmiş, ayni mantik)
+    getiri_df = pd.DataFrame(kapanis_getirileri)
+    pozitif_oran = (getiri_df > 0).sum(axis=1) / getiri_df.notna().sum(axis=1)
+    piyasa_yonu = pd.Series(
+        np.where(pozitif_oran > 0.5, "LONG", np.where(pozitif_oran < 0.5, "SHORT", None)),
+        index=getiri_df.index)
+
+    # 3. AŞAMA: her hisse için gerçek RR ile SAPAN vs UYUMLU gruplarını
+    # kendi günün yönünde (LONG/SHORT) test et
+    tum_sonuclar = {"[SAPAN] Kendi yönünde (azınlık)": [], "[UYUMLU] Kendi yönünde (çoğunluk)": []}
+    for n_i, (ticker, (tarihler, df)) in enumerate(ticker_veri.items(), 1):
+        try:
+            print(f"[Sapma Kanıt 2/2 - {n_i}/{len(ticker_veri)}] {ticker}...", flush=True)
+            for idx in range(25, len(df) - 1):
+                tarih = tarihler[idx]
+                if tarih not in piyasa_yonu.index:
+                    continue
+                yon_piyasa = piyasa_yonu.loc[tarih]
+                if yon_piyasa is None or pd.isna(yon_piyasa):
+                    continue
+                onceki_kapanis = df.iloc[idx - 1]["close"]
+                bugunku_kapanis = df.iloc[idx]["close"]
+                if onceki_kapanis == 0:
+                    continue
+                getiri_bugun = (bugunku_kapanis - onceki_kapanis) / onceki_kapanis * 100
+                if getiri_bugun == 0:
+                    continue
+                hisse_yonu = "LONG" if getiri_bugun > 0 else "SHORT"
+                sapan_mi = hisse_yonu != yon_piyasa
+
+                sonuc = _kanit_bist_rr_sonuc(df, idx, hisse_yonu)
+                if sonuc is None:
+                    continue
+                grup = "[SAPAN] Kendi yönünde (azınlık)" if sapan_mi else "[UYUMLU] Kendi yönünde (çoğunluk)"
+                tum_sonuclar[grup].append(sonuc)
+        except Exception as e:
+            print(f"[Sapma Kanıt] {ticker} işleme hatası: {e}", flush=True)
+
+    satirlar = _kanit_ozet_tablosu(tum_sonuclar)
+    if not satirlar:
+        return None, "Hiçbir grup için yeterli veri üretilemedi."
+    tablo = pd.DataFrame(satirlar)
+    dosya_yolu = _data_path("piyasa_sapmasi_kanit_dogrulama.csv")
+    tablo.to_csv(dosya_yolu, index=False, encoding="utf-8-sig")
+    return dosya_yolu, {"satirlar": satirlar}
+
+
+# =============================================================================
 # EKŞİ SÖZLÜK BAĞLANTI TESTİ — 2026-08-19
 # =============================================================================
 # GEREKÇE: Ekşi Sözlük'ün resmi bir API'si yok - sadece web sayfası
@@ -3506,6 +3594,8 @@ def send_startup_message():
         "hisse getirisiyle ilişkisini ölçer, 'sakin gece' eşiği önerir\n"
         "/piyasa_sapmasi_testi — piyasa çoğunluğuna uymayan (sapan) "
         "hisselerin ertesi gün DEVAM mı GERİ Mİ DÖNDÜĞÜNÜ test eder\n"
+        "/piyasa_sapmasi_kanit_dogrulama — sapan vs uyumlu hisseleri "
+        "BIST'in gerçek çıkış mantığıyla karşılaştırmalı izole doğrular\n"
         "/wiki_dogrulama — /wiki_testi'nin bulgusunu (yüksek izlenme -> "
         "LONG) izole, gerçek R:R çıkışıyla yeniden doğrular\n"
         "/eksisozluk_test [BAŞLIK] — Ekşi Sözlük'ten veri çekilebiliyor "
@@ -4123,6 +4213,32 @@ def poll_arge_commands():
                 except Exception as e:
                     send_telegram_message(f"🔀 Piyasa sapması testi hatası: {e}")
             threading.Thread(target=_arka_plan_piyasa_sapmasi, daemon=True).start()
+        elif text.startswith("/piyasa_sapmasi_kanit_dogrulama"):
+            send_telegram_message(
+                f"🔀✅ PİYASA SAPMASI İZOLE DOĞRULAMA başlıyor: sapan (azınlık) "
+                f"ve uyumlu (çoğunluk) hisseleri, BIST'in gerçek çıkış "
+                f"mantığıyla (1.5R kısmi TP + trailing) karşılaştırmalı test "
+                f"ediyor. ARKA PLANDA çalışıyor, bitince CSV + özet göndereceğim."
+            )
+
+            def _arka_plan_sapma_kanit():
+                try:
+                    dosya_yolu, ozet = piyasa_sapmasi_kanit_dogrulama_calistir()
+                    if dosya_yolu is None:
+                        send_telegram_message(f"🔀✅ Piyasa sapması kanıt doğrulama başarısız: {ozet}")
+                        return
+                    satirlar = ["🔀✅ Piyasa Sapması İzole Doğrulama Sonucu\n"]
+                    for s in ozet["satirlar"]:
+                        p_str = f", p={s['binom_p']}" if s["binom_p"] is not None else ""
+                        satirlar.append(
+                            f"{s['strateji']}: {s['toplam_sinyal']} sinyal "
+                            f"({s['win']}W/{s['loss']}L/{s['timeout']}T), "
+                            f"%{s['kazanma_orani_pct']} isabet{p_str}, ort R={s['ort_R']}"
+                        )
+                    send_telegram_document(dosya_yolu, caption="\n".join(satirlar))
+                except Exception as e:
+                    send_telegram_message(f"🔀✅ Piyasa sapması kanıt doğrulama hatası: {e}")
+            threading.Thread(target=_arka_plan_sapma_kanit, daemon=True).start()
         elif text.startswith("/eksisozluk_test"):
             parcalar = text.split()
             baslik = parcalar[1] if len(parcalar) > 1 else "thyao"
