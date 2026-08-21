@@ -49,7 +49,7 @@ import threading
 # mesajlarında görünür kılmak için (2026-08-17: 3 kez üst üste "aynı
 # sonuç geldi" şüphesi sonrası eklendi - deploy'un gerçekten güncel
 # olup olmadığını KANITLA göstermek için).
-ARGE_KOD_SURUMU = "v32-gun-ici-tarama-testi-2026-08-19"
+ARGE_KOD_SURUMU = "v33-zaman-eslestirilmis-kontrol-2026-08-19"
 import warnings
 from datetime import datetime, timezone
 
@@ -4067,8 +4067,18 @@ def gun_ici_surekli_tarama_testi_calistir(max_hisse: int = 30) -> tuple:
                         break
 
             # KONTROL: ayni ticker/donem icin SADECE kapanis bazli (canli sistem) test
+            # 2026-08-19 DUZELTME: kullanicinin dogru tespiti - gun-ici veri
+            # sadece son 60 gunu kapsiyor (yfinance siniri), ama kontrol tum
+            # 2 yili kullaniyordu - ADIL DEGILDI. Simdi kontrol de AYNI 60
+            # gunluk pencereyle sinirlandiriliyor (zaman-esleştirilmis kiyas).
+            gun_ici_ilk_tarih = min(gunler) if len(gunler) > 0 else None
+            gun_ici_son_tarih = max(gunler) if len(gunler) > 0 else None
             for idx in range(20, len(gunluk) - 11):
                 row = gunluk.iloc[idx]
+                if gun_ici_ilk_tarih is not None:
+                    row_tarihi = gunluk.index[idx].date()
+                    if row_tarihi < gun_ici_ilk_tarih or row_tarihi > gun_ici_son_tarih:
+                        continue  # zaman penceresi disi - adil kiyas icin atla
                 prev_close_k = gunluk.iloc[idx - 1]["close"]
                 atr_k = row["atr14"]
                 if pd.notna(atr_k) and atr_k != 0:
