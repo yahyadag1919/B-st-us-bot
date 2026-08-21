@@ -49,7 +49,7 @@ import threading
 # mesajlarında görünür kılmak için (2026-08-17: 3 kez üst üste "aynı
 # sonuç geldi" şüphesi sonrası eklendi - deploy'un gerçekten güncel
 # olup olmadığını KANITLA göstermek için).
-ARGE_KOD_SURUMU = "v29-xu100-makro-deger-testi-2026-08-19"
+ARGE_KOD_SURUMU = "v30-ai-model-gercek-backtest-2026-08-19"
 import warnings
 from datetime import datetime, timezone
 
@@ -3726,6 +3726,207 @@ def deger_testi_calistir() -> tuple:
 
 
 # =============================================================================
+# GERÇEK AI MODEL BACKTEST — model.pkl + overnight_model.pkl — 2026-08-19
+# =============================================================================
+# GEREKÇE: Kullanıcı bu iki modelin (gerçek dosyalar, XGBClassifier
+# doğrulandı) canlı performansını sordu ama Render deploy'ları CSV
+# takibini sürekli sıfırlamış - kalıcı bir geçmiş yok. Bu, ml_radar.py
+# ve overnight_radar.py'den BİREBİR AYNI özellik hesaplama mantığını
+# kullanarak, GERÇEK modellerle, GERÇEK 15dk geçmiş veride bağımsız bir
+# backtest kuruyor - deploy sıfırlamalarından etkilenmez.
+# DÜRÜST SINIR 1: yfinance'in 15dk verisi sadece SON 60 GÜNLE sınırlı -
+# daha eski bir backtest yapılamıyor.
+# DÜRÜST SINIR 2: has_catalyst (KAP katalizörü) geçmişe dönük olarak
+# hesaplanamıyor (kap_monitor.py'nin canlı log dosyası yok/geçmişi kısa) -
+# HER ZAMAN 0 varsayılıyor. Bu, canlıdaki gerçek davranıştan bir sapma -
+# modelin canlı skorları biraz farklı çıkabilir.
+# DÜRÜST SINIR 3: Basitlik için günde BİR TARAMA (günün sonuna yakın)
+# simüle ediliyor - ml_radar.py canlıda günde birden fazla kez tarıyor,
+# bu farkı azaltır ama tam eşleşme değildir.
+
+AI_BACKTEST_MODEL_PATH = os.environ.get("ML_MODEL_PATH", "model.pkl")
+AI_BACKTEST_OVERNIGHT_MODEL_PATH = os.environ.get("OVERNIGHT_MODEL_PATH", "overnight_model.pkl")
+AI_BACKTEST_FEATURES_ML = ["volume_factor", "rsi", "price_change_pct", "gap_pct", "cmf", "has_catalyst"]
+AI_BACKTEST_FEATURES_OVERNIGHT = AI_BACKTEST_FEATURES_ML + ["close_to_high_ratio"]
+AI_BACKTEST_MIN_N = 20
+
+
+def _ai_backtest_rsi(close, n=14):
+    delta = close.diff()
+    gain = delta.clip(lower=0)
+    loss = -delta.clip(upper=0)
+    avg_gain = gain.ewm(alpha=1 / n, adjust=False).mean()
+    avg_loss = loss.ewm(alpha=1 / n, adjust=False).mean()
+    rs = avg_gain / avg_loss.replace(0, np.nan)
+    return 100 - (100 / (1 + rs))
+
+
+def _ai_backtest_cmf(high, low, close, volume, n=20):
+    rng = (high - low).replace(0, np.nan)
+    mfm = ((close - low) - (high - close)) / rng
+    mfv = mfm * volume
+    return mfv.rolling(n).sum() / volume.rolling(n).sum()
+
+
+def _ai_backtest_ozellikler_gun_sonu(df_15m: pd.DataFrame, gun) -> dict:
+    """build_live_features (ml_radar.py/overnight_radar.py) ile BİREBİR
+    AYNI mantık - ama canlı değil, GEÇMİŞ bir günün 15dk barlarından.
+    has_catalyst HER ZAMAN 0 (bkz. yukarıdaki DÜRÜST SINIR 2)."""
+    gun_barlari = df_15m[df_15m["session"] == gun]
+    if len(gun_barlari) < 3:
+        return None
+    acilis = float(gun_barlari.iloc[0]["open"])
+    if acilis <= 0:
+        return None
+    fiyat = float(gun_barlari.iloc[-1]["close"])
+    pct_change = (fiyat - acilis) / acilis * 100
+    gap_percent = pct_change
+
+    tum_gunler = sorted(df_15m["session"].unique())
+    if gun in tum_gunler and tum_gunler.index(gun) > 0:
+        onceki_gun = tum_gunler[tum_gunler.index(gun) - 1]
+        onceki_kapanis_barlari = df_15m[df_15m["session"] == onceki_gun]
+        if not onceki_kapanis_barlari.empty:
+            prev_close = float(onceki_kapanis_barlari.iloc[-1]["close"])
+            if prev_close:
+                gap_percent = (acilis - prev_close) / prev_close * 100
+
+    df_su_ana_kadar = df_15m[df_15m.index <= gun_barlari.index[-1]]
+    vol_ma = df_su_ana_kadar["volume"].tail(20 * 8).mean()
+    volume_factor = float(gun_barlari.iloc[-1]["volume"] / vol_ma) if vol_ma else np.nan
+
+    rsi_seri = _ai_backtest_rsi(df_su_ana_kadar["close"], 14)
+    rsi14 = float(rsi_seri.iloc[-1]) if not rsi_seri.empty else np.nan
+
+    cmf_seri = _ai_backtest_cmf(df_su_ana_kadar["high"], df_su_ana_kadar["low"],
+                                 df_su_ana_kadar["close"], df_su_ana_kadar["volume"])
+    cmf = float(cmf_seri.iloc[-1]) if not cmf_seri.empty else np.nan
+
+    gun_high = float(gun_barlari["high"].max())
+    gun_low = float(gun_barlari["low"].min())
+    close_to_high_ratio = (fiyat - gun_low) / (gun_high - gun_low) if (gun_high - gun_low) > 0 else 0.5
+
+    return {
+        "fiyat": fiyat, "pct_change": pct_change, "gap_percent": gap_percent,
+        "volume_factor": volume_factor, "rsi14": rsi14, "cmf": cmf,
+        "has_catalyst": 0, "close_to_high_ratio": close_to_high_ratio,
+    }
+
+
+def ai_model_gercek_backtest_calistir(max_hisse: int = 20) -> tuple:
+    """model.pkl (ml_radar) ve overnight_model.pkl'yi GERÇEKTEN yükleyip,
+    son 60 günün 15dk verisiyle GÜNLÜK bazda özellik üretip, GERÇEK
+    predict_proba skorunu, GERÇEK ertesi-gün-+%2 sonucuna karşı test
+    eder. Döner: (dosya_yolu, özet_dict) ya da (None, hata_mesajı)."""
+    import yfinance as yf
+    try:
+        import joblib
+    except ImportError:
+        return None, "joblib kurulu değil."
+
+    modeller = {}
+    for isim, yol, feat_cols in [
+        ("ml_radar (model.pkl)", AI_BACKTEST_MODEL_PATH, AI_BACKTEST_FEATURES_ML),
+        ("overnight (overnight_model.pkl)", AI_BACKTEST_OVERNIGHT_MODEL_PATH, AI_BACKTEST_FEATURES_OVERNIGHT),
+    ]:
+        try:
+            m = joblib.load(yol)
+            modeller[isim] = (m, feat_cols)
+            print(f"[AI Backtest] {isim} yüklendi.", flush=True)
+        except Exception as e:
+            print(f"[AI Backtest] {isim} yüklenemedi: {e}", flush=True)
+
+    if not modeller:
+        return None, "Hiçbir model dosyası yüklenemedi (repo'da model.pkl/overnight_model.pkl var mı kontrol et)."
+
+    hisseler = BIST_TICKERS[:max_hisse]
+    kayitlar = {isim: [] for isim in modeller}
+
+    for n_i, ticker in enumerate(hisseler, 1):
+        try:
+            print(f"[AI Backtest {n_i}/{len(hisseler)}] {ticker}...", flush=True)
+            df = yf.Ticker(ticker).history(period="60d", interval="15m", timeout=20)
+            if df is None or df.empty:
+                continue
+            df = df.reset_index().rename(columns={
+                "Datetime": "ts", "Date": "ts", "Open": "open", "High": "high",
+                "Low": "low", "Close": "close", "Volume": "volume"})
+            need = ["ts", "open", "high", "low", "close", "volume"]
+            if not all(c in df.columns for c in need):
+                continue
+            df = df[need].copy()
+            df["session"] = pd.to_datetime(df["ts"]).dt.date
+
+            gunler = sorted(df["session"].unique())
+            if len(gunler) < 10:
+                continue
+
+            for gun_idx in range(5, len(gunler) - 1):  # ilk birkac gun gostergeler icin isinma
+                gun = gunler[gun_idx]
+                ham = _ai_backtest_ozellikler_gun_sonu(df, gun)
+                if ham is None:
+                    continue
+                if any(v is None or (isinstance(v, float) and np.isnan(v)) for v in ham.values()):
+                    continue
+
+                sonraki_gun = gunler[gun_idx + 1]
+                sonraki_gun_barlari = df[df["session"] == sonraki_gun]
+                if sonraki_gun_barlari.empty:
+                    continue
+                giris_fiyat = ham["fiyat"]
+                en_yuksek_sonraki = float(sonraki_gun_barlari["high"].max())
+                basari = (en_yuksek_sonraki - giris_fiyat) / giris_fiyat * 100 >= 2.0
+
+                for isim, (model, feat_cols) in modeller.items():
+                    feat_map = {"volume_factor": ham["volume_factor"], "rsi": ham["rsi14"],
+                                "price_change_pct": ham["pct_change"], "gap_pct": ham["gap_percent"],
+                                "cmf": ham["cmf"], "has_catalyst": ham["has_catalyst"],
+                                "close_to_high_ratio": ham["close_to_high_ratio"]}
+                    X = pd.DataFrame([[feat_map[c] for c in feat_cols]], columns=feat_cols)
+                    try:
+                        proba = float(model.predict_proba(X)[0][1])
+                    except Exception as e:
+                        print(f"[AI Backtest] {isim} predict hatası ({ticker}): {e}", flush=True)
+                        continue
+                    kayitlar[isim].append({"ticker": ticker, "tarih": str(gun),
+                                            "ai_skor": round(proba, 4), "basari": basari})
+        except Exception as e:
+            print(f"[AI Backtest] {ticker} hata: {e}", flush=True)
+        time.sleep(0.3)
+
+    tum_satirlar = []
+    for isim, kayit_listesi in kayitlar.items():
+        if not kayit_listesi:
+            continue
+        df_k = pd.DataFrame(kayit_listesi)
+        # kor temel cizgi (tum taranan gozlemler)
+        kor_dogru = int(df_k["basari"].sum())
+        tum_satirlar.append({
+            "model": isim, "esik": "[KÖR] tüm gözlemler", "n": len(df_k),
+            "basari_n": kor_dogru, "basari_orani_pct": round(df_k["basari"].mean() * 100, 2),
+            "binom_p": _binom_p(kor_dogru, len(df_k)),
+        })
+        for esik in [0.5, 0.6, 0.7, 0.8]:
+            secilen = df_k[df_k["ai_skor"] >= esik]
+            if len(secilen) < AI_BACKTEST_MIN_N:
+                continue
+            dogru_n = int(secilen["basari"].sum())
+            tum_satirlar.append({
+                "model": isim, "esik": f"AI skor >= {esik}", "n": len(secilen),
+                "basari_n": dogru_n, "basari_orani_pct": round(secilen["basari"].mean() * 100, 2),
+                "binom_p": _binom_p(dogru_n, len(secilen)),
+            })
+
+    if not tum_satirlar:
+        return None, "Hiçbir model için yeterli gözlem üretilemedi."
+
+    tablo = pd.DataFrame(tum_satirlar)
+    dosya_yolu = _data_path("ai_model_gercek_backtest.csv")
+    tablo.to_csv(dosya_yolu, index=False, encoding="utf-8-sig")
+    return dosya_yolu, {"satirlar": tum_satirlar}
+
+
+# =============================================================================
 # EKŞİ SÖZLÜK BAĞLANTI TESTİ — 2026-08-19
 # =============================================================================
 # GEREKÇE: Ekşi Sözlük'ün resmi bir API'si yok - sadece web sayfası
@@ -3820,6 +4021,8 @@ def send_startup_message():
         "ilişkisini 5 ufukta (1g-1ay) test eder\n"
         "/deger_testi — hisselerin F/K oranına göre ucuz/pahalı gruplarının "
         "1/3/6 ay performansını karşılaştırır (klasik değer yatırımı testi)\n"
+        "/ai_model_backtest — model.pkl ve overnight_model.pkl'yi GERÇEKTEN "
+        "yükleyip son 60 günün 15dk verisiyle gerçek tahminlerini test eder\n"
         "/wiki_dogrulama — /wiki_testi'nin bulgusunu (yüksek izlenme -> "
         "LONG) izole, gerçek R:R çıkışıyla yeniden doğrular\n"
         "/eksisozluk_test [BAŞLIK] — Ekşi Sözlük'ten veri çekilebiliyor "
@@ -4516,6 +4719,33 @@ def poll_arge_commands():
                 except Exception as e:
                     send_telegram_message(f"💰 Değer testi hatası: {e}")
             threading.Thread(target=_arka_plan_deger_testi, daemon=True).start()
+        elif text.startswith("/ai_model_backtest"):
+            send_telegram_message(
+                f"🤖 GERÇEK AI MODEL BACKTEST başlıyor: model.pkl ve "
+                f"overnight_model.pkl'yi gerçekten yükleyip, son 60 günün "
+                f"15dk verisiyle GERÇEK tahminlerini GERÇEK sonuçlara karşı "
+                f"test ediyor. has_catalyst=0 varsayılıyor (geçmişe dönük "
+                f"KAP verisi yok). ARKA PLANDA çalışıyor, biraz sürebilir, "
+                f"bitince CSV + özet göndereceğim."
+            )
+
+            def _arka_plan_ai_backtest():
+                try:
+                    dosya_yolu, ozet = ai_model_gercek_backtest_calistir()
+                    if dosya_yolu is None:
+                        send_telegram_message(f"🤖 AI model backtest başarısız: {ozet}")
+                        return
+                    satirlar = ["🤖 Gerçek AI Model Backtest Sonucu\n"]
+                    for s in ozet["satirlar"]:
+                        p_str = f", p={s['binom_p']}" if s["binom_p"] is not None else ""
+                        satirlar.append(
+                            f"[{s['model']}] {s['esik']}: n={s['n']}, "
+                            f"%{s['basari_orani_pct']} başarı (+%2 hedefi){p_str}"
+                        )
+                    send_telegram_document(dosya_yolu, caption="\n".join(satirlar))
+                except Exception as e:
+                    send_telegram_message(f"🤖 AI model backtest hatası: {e}")
+            threading.Thread(target=_arka_plan_ai_backtest, daemon=True).start()
         elif text.startswith("/eksisozluk_test"):
             parcalar = text.split()
             baslik = parcalar[1] if len(parcalar) > 1 else "thyao"
