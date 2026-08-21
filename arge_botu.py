@@ -49,7 +49,7 @@ import threading
 # mesajlarında görünür kılmak için (2026-08-17: 3 kez üst üste "aynı
 # sonuç geldi" şüphesi sonrası eklendi - deploy'un gerçekten güncel
 # olup olmadığını KANITLA göstermek için).
-ARGE_KOD_SURUMU = "v24-wiki-izole-rr-dogrulama-2026-08-19"
+ARGE_KOD_SURUMU = "v25-makro-gurultu-testi-2026-08-19"
 import warnings
 from datetime import datetime, timezone
 
@@ -3166,6 +3166,143 @@ def wiki_kanit_dogrulama_calistir() -> tuple:
 
 
 # =============================================================================
+# MAKRO GÜRÜLTÜ TESTİ — ABD/DOLAR GECELİK HAREKETİ BIST'İ NE KADAR AÇIKLIYOR
+# =============================================================================
+# 2026-08-19 - GEREKÇE: Kullanıcının emir defteri pilotu fikri iyi ama
+# "gece haber olmadığı sürece ciddi değişmez" varsayımını test etmemiz
+# gerekiyordu - v7'de zaten şüphelenmiştik (bir günde hisselerin %83-96'sı
+# aynı yöne gidiyordu) ama bunu hiç SAYISAL olarak ölçmedik. Bu test:
+# (1) bir önceki gece S&P500 ne yaptı + USDTRY ne kadar hareket etti,
+# (2) bunun o günkü BIST/hisse getirisiyle korelasyonu ne kadar güçlü,
+# (3) yön olarak anlamlı şekilde tahmin edilebiliyor mu (binom testi).
+# Pratik çıktı: "sakin gece" eşiği için somut, veriye dayalı bir sayı -
+# kullanıcının pilotunda elle tahmin etmek yerine kullanabileceği.
+
+MAKRO_MIN_N = 30
+
+
+def makro_gurultu_testi_calistir() -> tuple:
+    """XU100 + BIST_TICKERS'ın günlük getirisini, bir önceki gece S&P500
+    ve USDTRY hareketine karşı test eder - korelasyon + yön-tahmin
+    anlamlılığı + 'sakin gece' eşiği önerisi. Döner: (dosya_yolu,
+    özet_dict) ya da (None, hata_mesajı)."""
+    import yfinance as yf
+
+    sp500 = yf.Ticker("^GSPC").history(period="2y", interval="1d")
+    usdtry = yf.Ticker("USDTRY=X").history(period="2y", interval="1d")
+    xu100 = yf.Ticker("XU100.IS").history(period="2y", interval="1d")
+    if sp500 is None or sp500.empty or usdtry is None or usdtry.empty or xu100 is None or xu100.empty:
+        return None, "S&P500/USDTRY/XU100 verisi çekilemedi."
+
+    for df in (sp500, usdtry, xu100):
+        df.index = pd.to_datetime(df.index).tz_localize(None)
+    sp500_getiri = sp500["Close"].pct_change() * 100
+    usdtry_getiri = usdtry["Close"].pct_change() * 100
+    xu100_getiri = xu100["Close"].pct_change() * 100
+
+    # 1. AŞAMA: XU100 (endeks geneli) için makro-öncesi/sonrası test
+    ortak_df = pd.DataFrame({
+        "sp500_onceki_gece": sp500_getiri,
+        "usdtry_onceki_gece": usdtry_getiri,
+        "xu100_bugun": xu100_getiri,
+    }).dropna()
+    # bir onceki ABD/kur hareketini BIR GUN KAYDIRIP bugunku XU100 ile hizala
+    ortak_df["sp500_onceki_gece"] = ortak_df["sp500_onceki_gece"].shift(1)
+    ortak_df["usdtry_onceki_gece"] = ortak_df["usdtry_onceki_gece"].shift(1)
+    ortak_df = ortak_df.dropna()
+
+    korelasyon_sp500 = round(float(ortak_df["sp500_onceki_gece"].corr(ortak_df["xu100_bugun"])), 4)
+    korelasyon_usdtry = round(float(ortak_df["usdtry_onceki_gece"].corr(ortak_df["xu100_bugun"])), 4)
+
+    # yon tahmini: sp500 dustuyse XU100 de dusecek mi (binom testi)
+    yon_satirlari = []
+    for isim, kolon, beklenen_yon in [
+        ("S&P500 geceki yön -> XU100 bugün aynı yön mü", "sp500_onceki_gece", 1),
+        ("USDTRY geceki yön -> XU100 bugün TERS yön mü (kur yükselirse BIST düşer varsayımı)",
+         "usdtry_onceki_gece", -1),
+    ]:
+        alt = ortak_df[ortak_df[kolon] != 0]
+        if len(alt) < MAKRO_MIN_N:
+            continue
+        dogru = np.sign(alt[kolon]) * beklenen_yon == np.sign(alt["xu100_bugun"])
+        dogru_n = int(dogru.sum())
+        yon_satirlari.append({
+            "tur": "XU100 (endeks geneli)", "hipotez": isim, "n": len(alt),
+            "dogru_n": dogru_n, "kazanma_orani_pct": round(dogru.mean() * 100, 2),
+            "binom_p": _binom_p(dogru_n, len(alt)),
+        })
+
+    # 2. AŞAMA: "sakin gece" esigi onerisi - ceyreklik dilimler
+    sp500_ceyrekler = ortak_df["sp500_onceki_gece"].abs().quantile([0.25, 0.5, 0.75]).round(3).to_dict()
+    usdtry_ceyrekler = ortak_df["usdtry_onceki_gece"].abs().quantile([0.25, 0.5, 0.75]).round(3).to_dict()
+
+    # sakin vs hareketli gece bolumlemesi - medyan altı/üstü ile XU100 getiri STD karsilastirmasi
+    medyan_sp500 = ortak_df["sp500_onceki_gece"].abs().median()
+    medyan_usdtry = ortak_df["usdtry_onceki_gece"].abs().median()
+    sakin = ortak_df[(ortak_df["sp500_onceki_gece"].abs() <= medyan_sp500) &
+                      (ortak_df["usdtry_onceki_gece"].abs() <= medyan_usdtry)]
+    hareketli = ortak_df[(ortak_df["sp500_onceki_gece"].abs() > medyan_sp500) |
+                          (ortak_df["usdtry_onceki_gece"].abs() > medyan_usdtry)]
+
+    ozet_satirlari = [{
+        "olcum": "Korelasyon: S&P500 (geceki) <-> XU100 (bugün)", "deger": korelasyon_sp500
+    }, {
+        "olcum": "Korelasyon: USDTRY (geceki) <-> XU100 (bugün)", "deger": korelasyon_usdtry
+    }, {
+        "olcum": "SAKİN gece grubu: XU100 getiri std sapması (n=" + str(len(sakin)) + ")",
+        "deger": round(float(sakin["xu100_bugun"].std()), 4) if len(sakin) > 5 else None
+    }, {
+        "olcum": "HAREKETLİ gece grubu: XU100 getiri std sapması (n=" + str(len(hareketli)) + ")",
+        "deger": round(float(hareketli["xu100_bugun"].std()), 4) if len(hareketli) > 5 else None
+    }, {
+        "olcum": "ÖNERİLEN 'sakin gece' eşiği: |S&P500 geceki| <= X%",
+        "deger": sp500_ceyrekler.get(0.5)
+    }, {
+        "olcum": "ÖNERİLEN 'sakin gece' eşiği: |USDTRY geceki| <= X%",
+        "deger": usdtry_ceyrekler.get(0.5)
+    }]
+
+    # 3. AŞAMA: hisse bazlı - kaç hissenin o gün ayni yonde hareket ettigi
+    # (v7'deki "hisselerin %83-96'si ayni yonde" gozlemini SAYISALLASTIRIYOR)
+    hisse_getirileri = []
+    for ticker in BIST_TICKERS:
+        try:
+            df = yf.Ticker(ticker).history(period="2y", interval="1d")
+            if df is None or df.empty:
+                continue
+            df.index = pd.to_datetime(df.index).tz_localize(None)
+            getiri = df["Close"].pct_change() * 100
+            hisse_getirileri.append(getiri.rename(ticker))
+        except Exception:
+            pass
+        time.sleep(0.3)
+
+    ayni_yon_orani_ortalama = None
+    if hisse_getirileri:
+        hisse_df = pd.concat(hisse_getirileri, axis=1)
+        gunluk_pozitif_oran = (hisse_df > 0).sum(axis=1) / hisse_df.notna().sum(axis=1)
+        # "ayni yonde hareket" = ya cogu pozitif ya cogu negatif
+        ayni_yon = gunluk_pozitif_oran.apply(lambda x: max(x, 1 - x) if pd.notna(x) else np.nan)
+        ayni_yon_orani_ortalama = round(float(ayni_yon.mean()) * 100, 2)
+        ozet_satirlari.append({
+            "olcum": f"Ortalama gün: hisselerin ne kadarı AYNI yönde hareket ediyor "
+                     f"({len(hisse_getirileri)} hisse, v7 gözleminin sayısallaştırılmışı)",
+            "deger": ayni_yon_orani_ortalama
+        })
+
+    dosya_yolu = _data_path("makro_gurultu_testi.csv")
+    pd.DataFrame(ozet_satirlari + yon_satirlari).to_csv(dosya_yolu, index=False, encoding="utf-8-sig")
+
+    return dosya_yolu, {
+        "korelasyon_sp500": korelasyon_sp500, "korelasyon_usdtry": korelasyon_usdtry,
+        "sakin_std": ozet_satirlari[2]["deger"], "hareketli_std": ozet_satirlari[3]["deger"],
+        "sp500_esik": sp500_ceyrekler.get(0.5), "usdtry_esik": usdtry_ceyrekler.get(0.5),
+        "ayni_yon_orani": ayni_yon_orani_ortalama,
+        "yon_satirlari": yon_satirlari,
+    }
+
+
+# =============================================================================
 # EKŞİ SÖZLÜK BAĞLANTI TESTİ — 2026-08-19
 # =============================================================================
 # GEREKÇE: Ekşi Sözlük'ün resmi bir API'si yok - sadece web sayfası
@@ -3250,6 +3387,8 @@ def send_startup_message():
         "/wiki_kanit_dogrulama — wiki_testi'nin en güçlü bulgusunu (yüksek "
         "izlenme -> LONG) BIST'in gerçek çıkış mantığıyla, koşulsuz LONG "
         "kontrol grubuna karşı izole doğrular\n"
+        "/makro_gurultu_testi — geceki S&P500/USDTRY hareketinin XU100/"
+        "hisse getirisiyle ilişkisini ölçer, 'sakin gece' eşiği önerir\n"
         "/wiki_dogrulama — /wiki_testi'nin bulgusunu (yüksek izlenme -> "
         "LONG) izole, gerçek R:R çıkışıyla yeniden doğrular\n"
         "/eksisozluk_test [BAŞLIK] — Ekşi Sözlük'ten veri çekilebiliyor "
@@ -3808,6 +3947,39 @@ def poll_arge_commands():
                 except Exception as e:
                     send_telegram_message(f"📖✅ Wiki kanıt doğrulama hatası: {e}")
             threading.Thread(target=_arka_plan_wiki_kanit, daemon=True).start()
+        elif text.startswith("/makro_gurultu_testi"):
+            send_telegram_message(
+                f"🌍 MAKRO GÜRÜLTÜ TESTİ başlıyor: bir önceki gece S&P500 ve "
+                f"USDTRY hareketinin XU100/hisse getirisiyle ilişkisini "
+                f"ölçüyor, 'sakin gece' eşiği önerisi üretiyor. ARKA "
+                f"PLANDA çalışıyor, bitince CSV + özet göndereceğim."
+            )
+
+            def _arka_plan_makro_gurultu():
+                try:
+                    dosya_yolu, ozet = makro_gurultu_testi_calistir()
+                    if dosya_yolu is None:
+                        send_telegram_message(f"🌍 Makro gürültü testi başarısız: {ozet}")
+                        return
+                    satirlar = [
+                        "🌍 Makro Gürültü Testi Sonucu",
+                        f"Korelasyon S&P500(gece)<->XU100(bugün): {ozet['korelasyon_sp500']}",
+                        f"Korelasyon USDTRY(gece)<->XU100(bugün): {ozet['korelasyon_usdtry']}",
+                        f"Sakin gece std sapma: {ozet['sakin_std']} | "
+                        f"Hareketli gece std sapma: {ozet['hareketli_std']}",
+                        f"Önerilen 'sakin gece' eşiği: |S&P500| <= %{ozet['sp500_esik']}, "
+                        f"|USDTRY| <= %{ozet['usdtry_esik']}",
+                        f"Ortalama gün hisselerin aynı-yön oranı: %{ozet['ayni_yon_orani']} "
+                        f"(v7 gözleminin sayısallaştırılmışı)\n",
+                    ]
+                    for s in ozet["yon_satirlari"]:
+                        p_str = f", p={s['binom_p']}" if s["binom_p"] is not None else ""
+                        satirlar.append(f"{s['hipotez']}: n={s['n']}, "
+                                         f"%{s['kazanma_orani_pct']} isabet{p_str}")
+                    send_telegram_document(dosya_yolu, caption="\n".join(satirlar))
+                except Exception as e:
+                    send_telegram_message(f"🌍 Makro gürültü testi hatası: {e}")
+            threading.Thread(target=_arka_plan_makro_gurultu, daemon=True).start()
         elif text.startswith("/eksisozluk_test"):
             parcalar = text.split()
             baslik = parcalar[1] if len(parcalar) > 1 else "thyao"
