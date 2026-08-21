@@ -49,7 +49,7 @@ import threading
 # mesajlarında görünür kılmak için (2026-08-17: 3 kez üst üste "aynı
 # sonuç geldi" şüphesi sonrası eklendi - deploy'un gerçekten güncel
 # olup olmadığını KANITLA göstermek için).
-ARGE_KOD_SURUMU = "v26-piyasa-sapmasi-testi-2026-08-19"
+ARGE_KOD_SURUMU = "v27-piyasa-sapmasi-hiz-timeout-duzeltmesi-2026-08-19"
 import warnings
 from datetime import datetime, timezone
 
@@ -3322,15 +3322,24 @@ def piyasa_sapmasi_testi_calistir() -> tuple:
     """Her gün piyasa çoğunluğunun yönünü bulur, o günün ÇOĞUNLUĞA
     UYMAYAN (sapan) hisselerini işaretler, DEVAM (kendi yönünde) ve
     GERİ DÖNÜŞ (çoğunluğun yönüne) hipotezlerini ertesi güne karşı test
-    eder. Döner: (dosya_yolu, özet_dict) ya da (None, hata_mesajı)."""
+    eder. Döner: (dosya_yolu, özet_dict) ya da (None, hata_mesajı).
+    2026-08-19 DÜZELTME: kullanıcının canlı çalıştırması 2 saatten uzun
+    sürüp hiç bitmedi - muhtemelen zaman aşımı olmayan bir yfinance
+    çağrısı sonsuza kadar takıldı (aynı deploy'da KOZAL.IS'te tekrarlanan
+    'Too Many Requests' zaten görülüyordu) VE eski kod gün×hisse üzerinde
+    İKİ AYRI Python döngüsüyle geziniyordu (yavaş). İkisi de düzeltildi:
+    her yfinance çağrısına timeout=20 eklendi, çift döngü TAMAMEN
+    pandas vektör işlemleriyle değiştirildi (Python seviyesinde tarih×
+    hisse döngüsü yok)."""
     import yfinance as yf
 
     hisse_getirileri = {}
     for n_i, ticker in enumerate(BIST_TICKERS, 1):
         try:
             print(f"[Piyasa Sapması {n_i}/{len(BIST_TICKERS)}] {ticker}...", flush=True)
-            df = yf.Ticker(ticker).history(period="2y", interval="1d")
+            df = yf.Ticker(ticker).history(period="2y", interval="1d", timeout=20)
             if df is None or df.empty:
+                print(f"[Piyasa Sapması] {ticker}: veri boş, atlanıyor.", flush=True)
                 continue
             df.index = pd.to_datetime(df.index).tz_localize(None)
             getiri = df["Close"].pct_change() * 100
@@ -3342,97 +3351,70 @@ def piyasa_sapmasi_testi_calistir() -> tuple:
     if len(hisse_getirileri) < 10:
         return None, "Yeterli hisse verisi toplanamadı."
 
+    print("[Piyasa Sapması] Veri çekme bitti, vektörleştirilmiş analiz başlıyor...", flush=True)
+
     getiri_df = pd.DataFrame(hisse_getirileri)  # satir: tarih, kolon: ticker
-    # her gun coğunluk yonunu bul (pozitif getirili hisse orani > 0.5 ise LONG cogunluk)
     pozitif_oran = (getiri_df > 0).sum(axis=1) / getiri_df.notna().sum(axis=1)
-    piyasa_yonu = pozitif_oran.apply(lambda x: "LONG" if x > 0.5 else "SHORT" if x < 0.5 else None)
+    piyasa_yonu = pd.Series(
+        np.where(pozitif_oran > 0.5, "LONG", np.where(pozitif_oran < 0.5, "SHORT", None)),
+        index=getiri_df.index)
 
-    kayitlar = []
-    tarihler = getiri_df.index
-    for i in range(1, len(tarihler) - 1):
-        tarih = tarihler[i]
-        yon = piyasa_yonu.iloc[i]
-        if yon is None:
-            continue
-        for ticker in hisse_getirileri:
-            hisse_getiri_bugun = getiri_df.iloc[i][ticker]
-            hisse_getiri_yarin = getiri_df.iloc[i + 1][ticker]
-            if pd.isna(hisse_getiri_bugun) or pd.isna(hisse_getiri_yarin) or hisse_getiri_bugun == 0:
-                continue
-            hisse_yonu_bugun = "LONG" if hisse_getiri_bugun > 0 else "SHORT"
-            sapan_mi = hisse_yonu_bugun != yon
-            if not sapan_mi:
-                continue  # sadece SAPAN (azinlik) hisseleri kaydediyoruz
-            kayitlar.append({
-                "ticker": ticker, "tarih": tarih.date().isoformat(),
-                "piyasa_yonu": yon, "hisse_yonu_bugun": hisse_yonu_bugun,
-                "sonraki_gun_getiri_pct": round(hisse_getiri_yarin, 3),
-            })
+    # UZUN FORMATA çevir - tum (tarih,ticker) ciftleri tek seferde,
+    # Python dongusu YOK
+    getiri_yarin_df = getiri_df.shift(-1)
+    bugun_uzun = getiri_df.stack().rename("getiri_bugun").reset_index()
+    bugun_uzun.columns = ["tarih", "ticker", "getiri_bugun"]
+    yarin_uzun = getiri_yarin_df.stack().rename("getiri_yarin").reset_index()
+    yarin_uzun.columns = ["tarih", "ticker", "getiri_yarin"]
 
-    if not kayitlar:
-        return None, "Hiçbir sapan (azınlık) gözlem üretilemedi."
+    uzun = bugun_uzun.merge(yarin_uzun, on=["tarih", "ticker"], how="inner")
+    uzun["piyasa_yonu"] = uzun["tarih"].map(piyasa_yonu)
+    uzun = uzun.dropna(subset=["getiri_bugun", "getiri_yarin", "piyasa_yonu"])
+    uzun = uzun[uzun["getiri_bugun"] != 0]
+    uzun["hisse_yonu_bugun"] = np.where(uzun["getiri_bugun"] > 0, "LONG", "SHORT")
 
-    df_all = pd.DataFrame(kayitlar)
-    if len(df_all) < SAPMA_MIN_N:
-        return None, f"Yeterli örneklem büyüklüğü yok (sadece {len(df_all)} sapan gözlem)."
+    sapan = uzun[uzun["hisse_yonu_bugun"] != uzun["piyasa_yonu"]]
+    uyumlu = uzun[uzun["hisse_yonu_bugun"] == uzun["piyasa_yonu"]]
+
+    if len(sapan) < SAPMA_MIN_N:
+        return None, f"Yeterli örneklem büyüklüğü yok (sadece {len(sapan)} sapan gözlem)."
 
     satirlar = []
-    # DEVAM: sapan hisse KENDİ dünkü yönünde devam ediyor mu
-    dogru_devam = ((df_all["hisse_yonu_bugun"] == "LONG") & (df_all["sonraki_gun_getiri_pct"] > 0)) | \
-                  ((df_all["hisse_yonu_bugun"] == "SHORT") & (df_all["sonraki_gun_getiri_pct"] < 0))
+    dogru_devam = ((sapan["hisse_yonu_bugun"] == "LONG") & (sapan["getiri_yarin"] > 0)) | \
+                  ((sapan["hisse_yonu_bugun"] == "SHORT") & (sapan["getiri_yarin"] < 0))
     dogru_n = int(dogru_devam.sum())
     satirlar.append({
         "hipotez": "DEVAM (sapan hisse kendi yönünde devam eder)",
-        "n": len(df_all), "dogru_n": dogru_n,
+        "n": len(sapan), "dogru_n": dogru_n,
         "kazanma_orani_pct": round(dogru_devam.mean() * 100, 2),
-        "binom_p": _binom_p(dogru_n, len(df_all)),
+        "binom_p": _binom_p(dogru_n, len(sapan)),
     })
 
-    # GERİ DÖNÜŞ: sapan hisse PİYASANIN (dünkü çoğunluğun) yönüne geri dönüyor mu
-    dogru_donus = ((df_all["piyasa_yonu"] == "LONG") & (df_all["sonraki_gun_getiri_pct"] > 0)) | \
-                  ((df_all["piyasa_yonu"] == "SHORT") & (df_all["sonraki_gun_getiri_pct"] < 0))
+    dogru_donus = ((sapan["piyasa_yonu"] == "LONG") & (sapan["getiri_yarin"] > 0)) | \
+                  ((sapan["piyasa_yonu"] == "SHORT") & (sapan["getiri_yarin"] < 0))
     dogru_n2 = int(dogru_donus.sum())
     satirlar.append({
         "hipotez": "GERİ DÖNÜŞ (sapan hisse piyasa çoğunluğuna döner)",
-        "n": len(df_all), "dogru_n": dogru_n2,
+        "n": len(sapan), "dogru_n": dogru_n2,
         "kazanma_orani_pct": round(dogru_donus.mean() * 100, 2),
-        "binom_p": _binom_p(dogru_n2, len(df_all)),
+        "binom_p": _binom_p(dogru_n2, len(sapan)),
     })
 
-    # kontrol: PIYASAYLA AYNI YONDE giden (uyumlu) hisselerin ayni testi -
-    # sapanlarla kiyaslamak icin. Bunun icin ikinci bir gecis gerekiyor.
-    kayitlar_uyumlu = []
-    for i in range(1, len(tarihler) - 1):
-        tarih = tarihler[i]
-        yon = piyasa_yonu.iloc[i]
-        if yon is None:
-            continue
-        for ticker in hisse_getirileri:
-            hisse_getiri_bugun = getiri_df.iloc[i][ticker]
-            hisse_getiri_yarin = getiri_df.iloc[i + 1][ticker]
-            if pd.isna(hisse_getiri_bugun) or pd.isna(hisse_getiri_yarin) or hisse_getiri_bugun == 0:
-                continue
-            hisse_yonu_bugun = "LONG" if hisse_getiri_bugun > 0 else "SHORT"
-            if hisse_yonu_bugun != yon:
-                continue  # bu sefer sadece UYUMLU (coğunlukla ayni) hisseleri kaydediyoruz
-            kayitlar_uyumlu.append({"hisse_yonu_bugun": hisse_yonu_bugun,
-                                     "sonraki_gun_getiri_pct": hisse_getiri_yarin})
-    if kayitlar_uyumlu:
-        df_uyumlu = pd.DataFrame(kayitlar_uyumlu)
-        dogru_uyumlu = ((df_uyumlu["hisse_yonu_bugun"] == "LONG") & (df_uyumlu["sonraki_gun_getiri_pct"] > 0)) | \
-                       ((df_uyumlu["hisse_yonu_bugun"] == "SHORT") & (df_uyumlu["sonraki_gun_getiri_pct"] < 0))
+    if len(uyumlu) >= SAPMA_MIN_N:
+        dogru_uyumlu = ((uyumlu["hisse_yonu_bugun"] == "LONG") & (uyumlu["getiri_yarin"] > 0)) | \
+                       ((uyumlu["hisse_yonu_bugun"] == "SHORT") & (uyumlu["getiri_yarin"] < 0))
         dogru_n3 = int(dogru_uyumlu.sum())
         satirlar.append({
             "hipotez": "[KONTROL] Çoğunlukla UYUMLU hisse kendi yönünde devam eder mi",
-            "n": len(df_uyumlu), "dogru_n": dogru_n3,
+            "n": len(uyumlu), "dogru_n": dogru_n3,
             "kazanma_orani_pct": round(dogru_uyumlu.mean() * 100, 2),
-            "binom_p": _binom_p(dogru_n3, len(df_uyumlu)),
+            "binom_p": _binom_p(dogru_n3, len(uyumlu)),
         })
 
     tablo = pd.DataFrame(satirlar)
     dosya_yolu = _data_path("piyasa_sapmasi_testi.csv")
     tablo.to_csv(dosya_yolu, index=False, encoding="utf-8-sig")
-    return dosya_yolu, {"toplam_sapan_gozlem": len(df_all), "satirlar": satirlar}
+    return dosya_yolu, {"toplam_sapan_gozlem": len(sapan), "satirlar": satirlar}
 
 
 # =============================================================================
