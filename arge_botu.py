@@ -49,7 +49,7 @@ import threading
 # mesajlarında görünür kılmak için (2026-08-17: 3 kez üst üste "aynı
 # sonuç geldi" şüphesi sonrası eklendi - deploy'un gerçekten güncel
 # olup olmadığını KANITLA göstermek için).
-ARGE_KOD_SURUMU = "v31-ai-ozellik-onem-raporu-2026-08-19"
+ARGE_KOD_SURUMU = "v32-gun-ici-tarama-testi-2026-08-19"
 import warnings
 from datetime import datetime, timezone
 
@@ -3955,6 +3955,147 @@ def ai_model_gercek_backtest_calistir(max_hisse: int = 20) -> tuple:
 
 
 # =============================================================================
+# GÜN İÇİ SÜREKLİ TARAMA TESTİ (ATR Kırılımı + Hacim Z-Skor) — 2026-08-19
+# =============================================================================
+# GEREKÇE: Kullanıcının fikri - canlı sistem ATR Kırılımı/Hacim Z-Skor'u
+# günde BİR KEZ (ABD kapanışı ~23:05) tarıyor, günün ORTASINDA da (15dk'da
+# bir - yfinance'in en ince kalıcı granülaritesi, kullanıcının istediği
+# "10 dk" değil ama en yakın gerçekçi seçenek) tarasak ne olur? Bu TAMAMEN
+# İZOLE bir test - stock_screener_bot.py'deki kanıtlanmış canlı sisteme
+# HİÇBİR ŞEKİLDE dokunmuyor, sadece arge_botu.py'de yeni bir deney.
+# DÜRÜST TASARIM NOTU: günün ortasında "bugünün hacmi" yarım gündür, tam
+# günle KIYASLANAMAZ - bu yüzden hacim z-skoru, o hissenin KENDİ
+# GEÇMİŞİNDE, GÜNÜN AYNI SAATİNE KADAR biriken ortalama hacmine göre
+# hesaplanıyor (adil kıyas). ATR Kırılımı için ATR14 zaten günlük/çok-
+# günlük bir istatistik, gün içi kullanımda sorun yok.
+# DÜRÜST SINIR: yfinance 15dk veri sadece SON 60 GÜNLE sınırlı.
+# Aynı gün içinde tekrar tekrar tetiklenmeyi önlemek için (ayrışık
+# rastgele fazladan sinyal üretmesin diye) her (hisse,gün) için SADECE
+# İLK tetiklenme kaydediliyor.
+
+GUNICI_ATR_MULT = 2.0
+GUNICI_ZSCORE_ESIK = 2.0
+GUNICI_MIN_N = 20
+
+
+def gun_ici_surekli_tarama_testi_calistir(max_hisse: int = 30) -> tuple:
+    """ATR Kırılımı ve Hacim Z-Skor'u GÜN İÇİNDE (15dk barlarda, sadece
+    her (hisse,gün) için ilk tetiklenme) test eder, canlı sistemin
+    checkpoint çıkış mantığıyla (1g/3g/5g/10g). Kıyas için AYNI evren/
+    dönemde SADECE KAPANIŞ bazlı (canlı sistemin gerçek davranışı)
+    kontrol grubu da üretiliyor. Döner: (dosya_yolu, özet_dict) ya da
+    (None, hata_mesajı)."""
+    import yfinance as yf
+
+    hisseler = US_INSIDER_TICKERS[:max_hisse]
+    tum_sonuclar = {
+        "[GÜN İÇİ] ATR Kırılımı x2.0 (ilk tetiklenme)": [],
+        "[GÜN İÇİ] Hacim Z-Skor (ilk tetiklenme)": [],
+        "[KAPANIŞ - kontrol] ATR Kırılımı x2.0": [],
+        "[KAPANIŞ - kontrol] Hacim Z-Skor": [],
+    }
+
+    for n_i, ticker in enumerate(hisseler, 1):
+        try:
+            print(f"[Gün İçi Tarama {n_i}/{len(hisseler)}] {ticker}...", flush=True)
+            gunluk = yf.Ticker(ticker).history(period="2y", interval="1d", timeout=20)
+            barlar_15dk = yf.Ticker(ticker).history(period="60d", interval="15m", timeout=20)
+            if gunluk is None or gunluk.empty or barlar_15dk is None or barlar_15dk.empty:
+                continue
+            gunluk.index = pd.to_datetime(gunluk.index).tz_localize(None)
+            gunluk = gunluk.rename(columns={"Close": "close", "High": "high", "Low": "low",
+                                             "Open": "open", "Volume": "volume"})
+            high_low = gunluk["high"] - gunluk["low"]
+            high_close = (gunluk["high"] - gunluk["close"].shift()).abs()
+            low_close = (gunluk["low"] - gunluk["close"].shift()).abs()
+            tr = pd.concat([high_low, high_close, low_close], axis=1).max(axis=1)
+            gunluk["atr14"] = tr.rolling(14).mean()
+            gunluk["vol_sma20"] = gunluk["volume"].rolling(20).mean()
+            gunluk["vol_std20"] = gunluk["volume"].rolling(20).std()
+            gunluk["vol_zscore"] = (gunluk["volume"] - gunluk["vol_sma20"]) / gunluk["vol_std20"].replace(0, np.nan)
+
+            barlar_15dk = barlar_15dk.reset_index().rename(columns={
+                "Datetime": "ts", "Open": "open", "High": "high", "Low": "low",
+                "Close": "close", "Volume": "volume"})
+            if "ts" not in barlar_15dk.columns:
+                barlar_15dk = barlar_15dk.rename(columns={barlar_15dk.columns[0]: "ts"})
+            barlar_15dk["ts"] = pd.to_datetime(barlar_15dk["ts"]).dt.tz_localize(None)
+            barlar_15dk["gun"] = barlar_15dk["ts"].dt.date
+            barlar_15dk["bar_sirasi"] = barlar_15dk.groupby("gun").cumcount()
+            barlar_15dk["kumulatif_hacim"] = barlar_15dk.groupby("gun")["volume"].cumsum()
+
+            # her bar_sirasi icin, o saate kadarki ortalama kumulatif hacim
+            # (bu hissenin KENDI GECMISI - adil gun-ici kiyas)
+            ortalama_kumulatif = barlar_15dk.groupby("bar_sirasi")["kumulatif_hacim"].transform("mean")
+            std_kumulatif = barlar_15dk.groupby("bar_sirasi")["kumulatif_hacim"].transform("std")
+            barlar_15dk["gun_ici_zscore"] = (barlar_15dk["kumulatif_hacim"] - ortalama_kumulatif) / \
+                                             std_kumulatif.replace(0, np.nan)
+
+            gunler = sorted(barlar_15dk["gun"].unique())
+            for gun in gunler:
+                gun_barlari = barlar_15dk[barlar_15dk["gun"] == gun].sort_values("ts")
+                if len(gun_barlari) < 5:
+                    continue
+                gunluk_konum_list = gunluk.index[gunluk.index.date == gun]
+                if len(gunluk_konum_list) == 0:
+                    continue
+                gunluk_idx = gunluk.index.get_loc(gunluk_konum_list[0])
+                if gunluk_idx == 0 or gunluk_idx >= len(gunluk):
+                    continue
+                prev_close = gunluk.iloc[gunluk_idx - 1]["close"]
+                atr = gunluk.iloc[gunluk_idx]["atr14"]
+                if pd.isna(atr) or atr == 0 or pd.isna(prev_close):
+                    continue
+
+                atr_tetiklendi = False
+                hacim_tetiklendi = False
+                for _, bar in gun_barlari.iterrows():
+                    move = bar["close"] - prev_close
+                    if not atr_tetiklendi and abs(move) >= GUNICI_ATR_MULT * atr:
+                        yon = "LONG" if move > 0 else "SHORT"
+                        sonuc = _kanit_us_checkpoint_sonuc(gunluk, gunluk_idx, yon)
+                        tum_sonuclar["[GÜN İÇİ] ATR Kırılımı x2.0 (ilk tetiklenme)"].append(sonuc)
+                        atr_tetiklendi = True
+                    if not hacim_tetiklendi and pd.notna(bar["gun_ici_zscore"]) and \
+                            bar["gun_ici_zscore"] >= GUNICI_ZSCORE_ESIK:
+                        yon = "LONG" if bar["close"] < bar["open"] else ("SHORT" if bar["close"] > bar["open"] else None)
+                        if yon:
+                            sonuc = _kanit_us_checkpoint_sonuc(gunluk, gunluk_idx, yon)
+                            tum_sonuclar["[GÜN İÇİ] Hacim Z-Skor (ilk tetiklenme)"].append(sonuc)
+                        hacim_tetiklendi = True
+                    if atr_tetiklendi and hacim_tetiklendi:
+                        break
+
+            # KONTROL: ayni ticker/donem icin SADECE kapanis bazli (canli sistem) test
+            for idx in range(20, len(gunluk) - 11):
+                row = gunluk.iloc[idx]
+                prev_close_k = gunluk.iloc[idx - 1]["close"]
+                atr_k = row["atr14"]
+                if pd.notna(atr_k) and atr_k != 0:
+                    move_k = row["close"] - prev_close_k
+                    if abs(move_k) >= GUNICI_ATR_MULT * atr_k:
+                        yon_k = "LONG" if move_k > 0 else "SHORT"
+                        tum_sonuclar["[KAPANIŞ - kontrol] ATR Kırılımı x2.0"].append(
+                            _kanit_us_checkpoint_sonuc(gunluk, idx, yon_k))
+                if pd.notna(row.get("vol_zscore")) and row["vol_zscore"] >= GUNICI_ZSCORE_ESIK:
+                    yon_hk = "LONG" if row["close"] < row["open"] else ("SHORT" if row["close"] > row["open"] else None)
+                    if yon_hk:
+                        tum_sonuclar["[KAPANIŞ - kontrol] Hacim Z-Skor"].append(
+                            _kanit_us_checkpoint_sonuc(gunluk, idx, yon_hk))
+        except Exception as e:
+            print(f"[Gün İçi Tarama] {ticker} hata: {e}", flush=True)
+        time.sleep(0.5)
+
+    satirlar = _kanit_ozet_tablosu(tum_sonuclar)
+    if not satirlar:
+        return None, "Hiçbir grup için yeterli veri üretilemedi."
+    tablo = pd.DataFrame(satirlar)
+    dosya_yolu = _data_path("gun_ici_surekli_tarama_testi.csv")
+    tablo.to_csv(dosya_yolu, index=False, encoding="utf-8-sig")
+    return dosya_yolu, {"satirlar": satirlar}
+
+
+# =============================================================================
 # EKŞİ SÖZLÜK BAĞLANTI TESTİ — 2026-08-19
 # =============================================================================
 # GEREKÇE: Ekşi Sözlük'ün resmi bir API'si yok - sadece web sayfası
@@ -4053,6 +4194,9 @@ def send_startup_message():
         "yükleyip son 60 günün 15dk verisiyle gerçek tahminlerini test eder\n"
         "/ai_ozellik_onemi — iki modelin her özelliğe (has_catalyst dahil) "
         "ne kadar önem verdiğini gösterir\n"
+        "/gun_ici_tarama_testi — ATR Kırılımı/Hacim Z-Skor'u günde bir "
+        "yerine gün içi (15dk) sürekli tarasak ne olur, kapanış-bazlı "
+        "kontrol grubuyla karşılaştırır (izole deney, canlıya dokunmaz)\n"
         "/wiki_dogrulama — /wiki_testi'nin bulgusunu (yüksek izlenme -> "
         "LONG) izole, gerçek R:R çıkışıyla yeniden doğrular\n"
         "/eksisozluk_test [BAŞLIK] — Ekşi Sözlük'ten veri çekilebiliyor "
@@ -4759,6 +4903,35 @@ def poll_arge_commands():
                 except Exception as e:
                     send_telegram_message(f"📊 Özellik önem raporu hatası: {e}")
             threading.Thread(target=_arka_plan_ozellik_onem, daemon=True).start()
+        elif text.startswith("/gun_ici_tarama_testi"):
+            send_telegram_message(
+                f"⏱️ GÜN İÇİ SÜREKLİ TARAMA TESTİ başlıyor: ATR Kırılımı ve "
+                f"Hacim Z-Skor'u 15dk barlarla gün içinde (sadece ilk "
+                f"tetiklenme) test edip, aynı dönemde SADECE kapanış-bazlı "
+                f"(canlı sistemin gerçek davranışı) kontrol grubuyla "
+                f"karşılaştırıyor. Bu TAMAMEN İZOLE bir deney, canlı "
+                f"sisteme dokunmuyor. ARKA PLANDA çalışıyor, bitince CSV + "
+                f"özet göndereceğim."
+            )
+
+            def _arka_plan_gun_ici_tarama():
+                try:
+                    dosya_yolu, ozet = gun_ici_surekli_tarama_testi_calistir()
+                    if dosya_yolu is None:
+                        send_telegram_message(f"⏱️ Gün içi tarama testi başarısız: {ozet}")
+                        return
+                    satirlar = ["⏱️ Gün İçi Sürekli Tarama Testi Sonucu\n"]
+                    for s in ozet["satirlar"]:
+                        p_str = f", p={s['binom_p']}" if s["binom_p"] is not None else ""
+                        satirlar.append(
+                            f"{s['strateji']}: {s['toplam_sinyal']} sinyal "
+                            f"({s['win']}W/{s['loss']}L/{s['timeout']}T), "
+                            f"%{s['kazanma_orani_pct']} isabet{p_str}, ort R={s['ort_R']}"
+                        )
+                    send_telegram_document(dosya_yolu, caption="\n".join(satirlar))
+                except Exception as e:
+                    send_telegram_message(f"⏱️ Gün içi tarama testi hatası: {e}")
+            threading.Thread(target=_arka_plan_gun_ici_tarama, daemon=True).start()
         elif text.startswith("/ai_model_backtest"):
             send_telegram_message(
                 f"🤖 GERÇEK AI MODEL BACKTEST başlıyor: model.pkl ve "
