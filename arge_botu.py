@@ -49,7 +49,7 @@ import threading
 # mesajlarında görünür kılmak için (2026-08-17: 3 kez üst üste "aynı
 # sonuç geldi" şüphesi sonrası eklendi - deploy'un gerçekten güncel
 # olup olmadığını KANITLA göstermek için).
-ARGE_KOD_SURUMU = "v30-ai-model-gercek-backtest-2026-08-19"
+ARGE_KOD_SURUMU = "v31-ai-ozellik-onem-raporu-2026-08-19"
 import warnings
 from datetime import datetime, timezone
 
@@ -3813,6 +3813,34 @@ def _ai_backtest_ozellikler_gun_sonu(df_15m: pd.DataFrame, gun) -> dict:
     }
 
 
+def ai_model_ozellik_onem_raporu() -> str:
+    """İki modelin (model.pkl, overnight_model.pkl) her özelliğe (volume_factor,
+    rsi, has_catalyst vb.) ne kadar önem verdiğini (feature_importances_)
+    yazdırır - has_catalyst'in baskın olup olmadığını görmek için, çünkü
+    backtest'te bu özellik her zaman 0 (geçmişe dönük KAP verisi yok)."""
+    try:
+        import joblib
+    except ImportError:
+        return "joblib kurulu değil."
+    satirlar = []
+    for isim, yol, feat_cols in [
+        ("ml_radar (model.pkl)", AI_BACKTEST_MODEL_PATH, AI_BACKTEST_FEATURES_ML),
+        ("overnight (overnight_model.pkl)", AI_BACKTEST_OVERNIGHT_MODEL_PATH, AI_BACKTEST_FEATURES_OVERNIGHT),
+    ]:
+        satirlar.append(f"\n📊 {isim}:")
+        try:
+            m = joblib.load(yol)
+            onemler = getattr(m, "feature_importances_", None)
+            if onemler is None:
+                satirlar.append("  feature_importances_ bulunamadı.")
+                continue
+            for feat, onem in sorted(zip(feat_cols, onemler), key=lambda x: -x[1]):
+                satirlar.append(f"  {feat}: {onem:.4f}")
+        except Exception as e:
+            satirlar.append(f"  Yüklenemedi: {e}")
+    return "\n".join(satirlar)
+
+
 def ai_model_gercek_backtest_calistir(max_hisse: int = 20) -> tuple:
     """model.pkl (ml_radar) ve overnight_model.pkl'yi GERÇEKTEN yükleyip,
     son 60 günün 15dk verisiyle GÜNLÜK bazda özellik üretip, GERÇEK
@@ -4023,6 +4051,8 @@ def send_startup_message():
         "1/3/6 ay performansını karşılaştırır (klasik değer yatırımı testi)\n"
         "/ai_model_backtest — model.pkl ve overnight_model.pkl'yi GERÇEKTEN "
         "yükleyip son 60 günün 15dk verisiyle gerçek tahminlerini test eder\n"
+        "/ai_ozellik_onemi — iki modelin her özelliğe (has_catalyst dahil) "
+        "ne kadar önem verdiğini gösterir\n"
         "/wiki_dogrulama — /wiki_testi'nin bulgusunu (yüksek izlenme -> "
         "LONG) izole, gerçek R:R çıkışıyla yeniden doğrular\n"
         "/eksisozluk_test [BAŞLIK] — Ekşi Sözlük'ten veri çekilebiliyor "
@@ -4719,6 +4749,16 @@ def poll_arge_commands():
                 except Exception as e:
                     send_telegram_message(f"💰 Değer testi hatası: {e}")
             threading.Thread(target=_arka_plan_deger_testi, daemon=True).start()
+        elif text.startswith("/ai_ozellik_onemi"):
+            send_telegram_message("📊 Özellik önem raporu hazırlanıyor...")
+
+            def _arka_plan_ozellik_onem():
+                try:
+                    sonuc = ai_model_ozellik_onem_raporu()
+                    send_telegram_message(f"📊 AI Model Özellik Önem Raporu:\n{sonuc}")
+                except Exception as e:
+                    send_telegram_message(f"📊 Özellik önem raporu hatası: {e}")
+            threading.Thread(target=_arka_plan_ozellik_onem, daemon=True).start()
         elif text.startswith("/ai_model_backtest"):
             send_telegram_message(
                 f"🤖 GERÇEK AI MODEL BACKTEST başlıyor: model.pkl ve "
