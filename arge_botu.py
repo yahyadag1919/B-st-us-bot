@@ -49,7 +49,7 @@ import threading
 # mesajlarında görünür kılmak için (2026-08-17: 3 kez üst üste "aynı
 # sonuç geldi" şüphesi sonrası eklendi - deploy'un gerçekten güncel
 # olup olmadığını KANITLA göstermek için).
-ARGE_KOD_SURUMU = "v34-rsi21-hedef-kiyasi-2026-08-19"
+ARGE_KOD_SURUMU = "v35-rsi21-tarih-esleme-duzeltmesi-2026-08-19"
 import warnings
 from datetime import datetime, timezone
 
@@ -4205,10 +4205,21 @@ def rsi21_hedef_kiyasi_testi_calistir(max_hisse: int = 30) -> tuple:
                 tum_sonuclar["[KÜÇÜK HEDEF - canlı sistem] RSI21"].append(kucuk_sonuc)
 
                 # BUYUK hedef (gunluk checkpoint sistemi, ayni gunun gunluk index'i)
-                gunluk_konum_list = gunluk.index[gunluk.index.date == gun]
-                if len(gunluk_konum_list) == 0:
+                # 2026-08-19 DUZELTME: kesin tarih esleşmesi (==) canli veride
+                # hic eslesme bulamadi (muhtemelen kucuk bir saat dilimi/format
+                # farkı) - "en yakin tarih" yontemine gecirildi, digerlerinde
+                # kullandigimiz ayni desen, daha dayanikli.
+                gun_ts = pd.Timestamp(gun)
+                gunluk_idx = gunluk.index.get_indexer([gun_ts], method="nearest")[0]
+                if gunluk_idx < 0:
+                    if len(tum_sonuclar["[BÜYÜK HEDEF - anlamlı %1-5] RSI21"]) == 0:
+                        print(f"[RSI21 Hedef Kıyası TEŞHİS] {ticker}: gun={gun} "
+                              f"(tip={type(gun)}) gunluk.index aralığı="
+                              f"[{gunluk.index.min()} - {gunluk.index.max()}]", flush=True)
                     continue
-                gunluk_idx = gunluk.index.get_loc(gunluk_konum_list[0])
+                fark_gun = abs((gunluk.index[gunluk_idx].date() - gun).days)
+                if fark_gun > 3:
+                    continue  # en yakin tarih bile cok uzaksa (veri araligi disi) atla
                 buyuk_sonuc = _kanit_us_checkpoint_sonuc(gunluk, gunluk_idx, yon)
                 tum_sonuclar["[BÜYÜK HEDEF - anlamlı %1-5] RSI21"].append(buyuk_sonuc)
         except Exception as e:
