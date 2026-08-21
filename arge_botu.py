@@ -49,7 +49,7 @@ import threading
 # mesajlarında görünür kılmak için (2026-08-17: 3 kez üst üste "aynı
 # sonuç geldi" şüphesi sonrası eklendi - deploy'un gerçekten güncel
 # olup olmadığını KANITLA göstermek için).
-ARGE_KOD_SURUMU = "v28-piyasa-sapmasi-kanit-dogrulama-2026-08-19"
+ARGE_KOD_SURUMU = "v29-xu100-makro-deger-testi-2026-08-19"
 import warnings
 from datetime import datetime, timezone
 
@@ -3506,6 +3506,226 @@ def piyasa_sapmasi_kanit_dogrulama_calistir() -> tuple:
 
 
 # =============================================================================
+# SEÇENEK 3: XU100 ENDEKS-SEVİYESİ MAKRO ZAMANLAMA TESTİ — 2026-08-19
+# =============================================================================
+# GEREKÇE: makro_gurultu_testi tek hisse bazında zayıf korelasyon bulmuştu.
+# Kullanıcının fikri: belki hisse seçiminde değil, ENDEKSİN KENDİSİNDE
+# (XU100 - onlarca hissenin ortalaması, gürültü kısmen iptal olur) bir
+# zamanlama sinyeli daha güçlü çıkar. ÇOKLU UFUK (1,3,5,10,20 gün) ile
+# test ediliyor - value/makro etkiler genelde daha uzun ufukta belirir.
+
+XU100_UFUKLAR = [(1, "1 gün"), (3, "3 gün"), (5, "1 hafta"), (10, "2 hafta"), (20, "1 ay")]
+XU100_MIN_N = 20
+
+
+def xu100_makro_zamanlama_testi_calistir() -> tuple:
+    """S&P500 ve USDTRY'nin geceki hareketini, XU100'ün KENDİSİNİN çoklu
+    ufuktaki getirisine karşı test eder. Döner: (dosya_yolu, özet_dict)
+    ya da (None, hata_mesajı)."""
+    import yfinance as yf
+
+    sp500 = yf.Ticker("^GSPC").history(period="2y", interval="1d", timeout=20)
+    usdtry = yf.Ticker("USDTRY=X").history(period="2y", interval="1d", timeout=20)
+    xu100 = yf.Ticker("XU100.IS").history(period="2y", interval="1d", timeout=20)
+    if sp500 is None or sp500.empty or usdtry is None or usdtry.empty or xu100 is None or xu100.empty:
+        return None, "S&P500/USDTRY/XU100 verisi çekilemedi."
+
+    for df in (sp500, usdtry, xu100):
+        df.index = pd.to_datetime(df.index).tz_localize(None)
+    sp500_getiri = sp500["Close"].pct_change() * 100
+    usdtry_getiri = usdtry["Close"].pct_change() * 100
+
+    xu100_kapanis = xu100["Close"]
+    ortak_index = xu100_kapanis.index
+
+    satirlar = []
+    for gun, etiket in XU100_UFUKLAR:
+        xu100_ufuk_getiri = (xu100_kapanis.shift(-gun) - xu100_kapanis) / xu100_kapanis * 100
+        birlesik = pd.DataFrame({
+            "sp500_onceki_gece": sp500_getiri.reindex(ortak_index).shift(1),
+            "usdtry_onceki_gece": usdtry_getiri.reindex(ortak_index).shift(1),
+            "xu100_ufuk_getiri": xu100_ufuk_getiri,
+        }).dropna()
+        if len(birlesik) < XU100_MIN_N:
+            continue
+
+        kor_sp = round(float(birlesik["sp500_onceki_gece"].corr(birlesik["xu100_ufuk_getiri"])), 4)
+        kor_usd = round(float(birlesik["usdtry_onceki_gece"].corr(birlesik["xu100_ufuk_getiri"])), 4)
+
+        for isim, kolon, beklenen_yon in [
+            (f"[{etiket}] S&P500 geceki yön -> XU100 aynı yön mü", "sp500_onceki_gece", 1),
+            (f"[{etiket}] USDTRY geceki yön -> XU100 ters yön mü", "usdtry_onceki_gece", -1),
+        ]:
+            alt = birlesik[birlesik[kolon] != 0]
+            if len(alt) < XU100_MIN_N:
+                continue
+            dogru = np.sign(alt[kolon]) * beklenen_yon == np.sign(alt["xu100_ufuk_getiri"])
+            dogru_n = int(dogru.sum())
+            satirlar.append({
+                "ufuk": etiket, "hipotez": isim, "n": len(alt), "dogru_n": dogru_n,
+                "kazanma_orani_pct": round(dogru.mean() * 100, 2),
+                "binom_p": _binom_p(dogru_n, len(alt)),
+                "korelasyon_sp500": kor_sp, "korelasyon_usdtry": kor_usd,
+            })
+
+    if not satirlar:
+        return None, "Yeterli örneklem büyüklüğüne ulaşan ufuk bulunamadı."
+    tablo = pd.DataFrame(satirlar)
+    dosya_yolu = _data_path("xu100_makro_zamanlama_testi.csv")
+    tablo.to_csv(dosya_yolu, index=False, encoding="utf-8-sig")
+    return dosya_yolu, {"satirlar": satirlar}
+
+
+# =============================================================================
+# SEÇENEK 1: DEĞER/TEMEL ANALİZ (P/E) TESTİ — 2026-08-19
+# =============================================================================
+# GEREKÇE: Kullanıcının fikri - kısa vadeli fiyat tahmini yerine, ucuz
+# (düşük F/K) hisselerin ORTA/UZUN vadede pahalı hisselerden daha iyi
+# performans gösterip göstermediğine bakmak - klasik "value" etkisi,
+# akademik literatürde gerçek bulguları olan bir alan.
+# DÜRÜST SINIR: yfinance'in BIST hisseleri için finansal veri (kazanç/
+# EPS geçmişi) kapsamı BELİRSİZ - teknik/fiyat verisi kadar güvenilir
+# olmayabilir. Savunmacı kodlandı: veri bulunamayan hisseler atlanıyor,
+# hatalar açıkça loglanıyor, sessizce yanlış sonuç üretilmiyor.
+
+DEGER_ESIK_YUZDE = 0.20
+DEGER_UFUKLAR = [(21, "1 ay"), (63, "3 ay"), (126, "6 ay")]
+DEGER_MIN_N = 20
+
+
+def _hisse_eps_gecmisi(ticker: str):
+    """Çeyreklik EPS (hisse başı kazanç) geçmişini çekmeyi dener - yfinance
+    sürümüne göre birkaç farklı özellik adı deneniyor (API zamanla
+    değişmiş olabilir)."""
+    import yfinance as yf
+    t = yf.Ticker(ticker)
+    for ozellik_adi in ["quarterly_income_stmt", "quarterly_financials"]:
+        try:
+            veri = getattr(t, ozellik_adi, None)
+            if veri is not None and not veri.empty:
+                for satir_adi in ["Diluted EPS", "Basic EPS", "Net Income"]:
+                    if satir_adi in veri.index:
+                        seri = veri.loc[satir_adi].dropna()
+                        if len(seri) >= 4:
+                            return seri.sort_index()
+        except Exception:
+            continue
+    return None
+
+
+def deger_testi_calistir() -> tuple:
+    """Her hisse için çeyreklik EPS geçmişinden 12-aylık toplam (trailing)
+    EPS hesaplar, F/K oranını (fiyat/EPS) üretir, ucuz (düşük F/K) ve
+    pahalı (yüksek F/K) gruplarını çoklu ufukta (1/3/6 ay) karşılaştırır.
+    Döner: (dosya_yolu, özet_dict) ya da (None, hata_mesajı)."""
+    import yfinance as yf
+
+    parcalar = []
+    hisse_atlandi = []
+    for n_i, ticker in enumerate(BIST_TICKERS, 1):
+        try:
+            print(f"[Değer Testi {n_i}/{len(BIST_TICKERS)}] {ticker}...", flush=True)
+            eps_seri = _hisse_eps_gecmisi(ticker)
+            if eps_seri is None or len(eps_seri) < 4:
+                hisse_atlandi.append(ticker)
+                continue
+            eps_seri.index = pd.to_datetime(eps_seri.index).tz_localize(None)
+            trailing_eps = eps_seri.rolling(4).sum().dropna()
+            if trailing_eps.empty:
+                hisse_atlandi.append(ticker)
+                continue
+
+            fiyat_df = yf.Ticker(ticker).history(period="2y", interval="1d", timeout=20)
+            if fiyat_df is None or fiyat_df.empty:
+                hisse_atlandi.append(ticker)
+                continue
+            fiyat_df = fiyat_df.rename(columns={"Close": "close"})
+            fiyat_df.index = pd.to_datetime(fiyat_df.index).tz_localize(None)
+
+            for rapor_tarihi, eps_deger in trailing_eps.items():
+                if eps_deger == 0 or pd.isna(eps_deger):
+                    continue
+                # BAKISH-AHEAD KORUMASI: bu EPS degeri sadece rapor
+                # tarihinden SONRAKI fiyatlarla eslesir (rapordan once
+                # piyasa bu degeri bilmiyordu)
+                sonraki_gunler = fiyat_df.index[fiyat_df.index > rapor_tarihi]
+                if len(sonraki_gunler) < DEGER_UFUKLAR[-1][0] + 1:
+                    continue
+                giris_tarihi = sonraki_gunler[0]
+                giris_konum = fiyat_df.index.get_loc(giris_tarihi)
+                giris_fiyat = fiyat_df.iloc[giris_konum]["close"]
+                if giris_fiyat == 0:
+                    continue
+                fk_orani = giris_fiyat / eps_deger
+                satir = {"ticker": ticker, "tarih": giris_tarihi.date().isoformat(), "fk_orani": fk_orani}
+                gecerli = False
+                for gun, etiket in DEGER_UFUKLAR:
+                    cikis_konum = giris_konum + gun
+                    if cikis_konum >= len(fiyat_df):
+                        continue
+                    cikis_fiyat = fiyat_df.iloc[cikis_konum]["close"]
+                    if pd.isna(cikis_fiyat):
+                        continue
+                    getiri = (cikis_fiyat - giris_fiyat) / giris_fiyat * 100
+                    satir[f"getiri_{gun}g"] = round(getiri, 3)
+                    gecerli = True
+                if gecerli:
+                    parcalar.append(satir)
+        except Exception as e:
+            print(f"[Değer Testi] {ticker} hata: {e}", flush=True)
+            hisse_atlandi.append(ticker)
+        time.sleep(0.3)
+
+    print(f"[Değer Testi] Atlanan hisse sayısı (finansal veri yok/yetersiz): "
+          f"{len(hisse_atlandi)}/{len(BIST_TICKERS)} - {hisse_atlandi}", flush=True)
+
+    if not parcalar:
+        return None, (f"Hiçbir hisse için F/K verisi üretilemedi - yfinance'in BIST "
+                       f"finansal veri kapsamı yetersiz olabilir ({len(hisse_atlandi)}/"
+                       f"{len(BIST_TICKERS)} hisse atlandı).")
+
+    df_all = pd.DataFrame(parcalar)
+    # sadece pozitif F/K (negatif EPS/zarar eden sirket F/K yorumlamasi
+    # karmasiklastirir, ayri ele alinmali - basit tutmak icin disarida)
+    df_all = df_all[df_all["fk_orani"] > 0]
+    if len(df_all) < 100:
+        return None, (f"Yeterli veri toplanamadı (sadece {len(df_all)} geçerli F/K "
+                       f"gözlemi, {len(hisse_atlandi)}/{len(BIST_TICKERS)} hisse atlandı).")
+
+    satirlar = []
+    ucuz_esik = df_all["fk_orani"].quantile(DEGER_ESIK_YUZDE)
+    pahali_esik = df_all["fk_orani"].quantile(1 - DEGER_ESIK_YUZDE)
+    for gun, etiket in DEGER_UFUKLAR:
+        kolon = f"getiri_{gun}g"
+        if kolon not in df_all.columns:
+            continue
+        alt_df = df_all.dropna(subset=[kolon])
+        ucuz = alt_df[alt_df["fk_orani"] <= ucuz_esik]
+        pahali = alt_df[alt_df["fk_orani"] >= pahali_esik]
+        for grup_adi, grup in [(f"[{etiket}] UCUZ (düşük F/K) grubu", ucuz),
+                                (f"[{etiket}] PAHALI (yüksek F/K) grubu", pahali)]:
+            if len(grup) < DEGER_MIN_N:
+                continue
+            dogru_n = int((grup[kolon] > 0).sum())
+            satirlar.append({
+                "hipotez": grup_adi, "n": len(grup), "dogru_n": dogru_n,
+                "kazanma_orani_pct": round((grup[kolon] > 0).mean() * 100, 2),
+                "binom_p": _binom_p(dogru_n, len(grup)),
+                "ort_getiri_pct": round(grup[kolon].mean(), 4),
+            })
+
+    if not satirlar:
+        return None, "Yeterli örneklem büyüklüğüne ulaşan ufuk/grup bulunamadı."
+    tablo = pd.DataFrame(satirlar)
+    dosya_yolu = _data_path("deger_testi.csv")
+    tablo.to_csv(dosya_yolu, index=False, encoding="utf-8-sig")
+    return dosya_yolu, {
+        "hisse_sayisi": len(BIST_TICKERS) - len(hisse_atlandi), "atlanan_hisse": len(hisse_atlandi),
+        "toplam_gozlem": len(df_all), "satirlar": satirlar,
+    }
+
+
+# =============================================================================
 # EKŞİ SÖZLÜK BAĞLANTI TESTİ — 2026-08-19
 # =============================================================================
 # GEREKÇE: Ekşi Sözlük'ün resmi bir API'si yok - sadece web sayfası
@@ -3596,6 +3816,10 @@ def send_startup_message():
         "hisselerin ertesi gün DEVAM mı GERİ Mİ DÖNDÜĞÜNÜ test eder\n"
         "/piyasa_sapmasi_kanit_dogrulama — sapan vs uyumlu hisseleri "
         "BIST'in gerçek çıkış mantığıyla karşılaştırmalı izole doğrular\n"
+        "/xu100_makro_zamanlama — S&P500/USDTRY'nin XU100'ün kendisiyle "
+        "ilişkisini 5 ufukta (1g-1ay) test eder\n"
+        "/deger_testi — hisselerin F/K oranına göre ucuz/pahalı gruplarının "
+        "1/3/6 ay performansını karşılaştırır (klasik değer yatırımı testi)\n"
         "/wiki_dogrulama — /wiki_testi'nin bulgusunu (yüksek izlenme -> "
         "LONG) izole, gerçek R:R çıkışıyla yeniden doğrular\n"
         "/eksisozluk_test [BAŞLIK] — Ekşi Sözlük'ten veri çekilebiliyor "
@@ -4239,6 +4463,59 @@ def poll_arge_commands():
                 except Exception as e:
                     send_telegram_message(f"🔀✅ Piyasa sapması kanıt doğrulama hatası: {e}")
             threading.Thread(target=_arka_plan_sapma_kanit, daemon=True).start()
+        elif text.startswith("/xu100_makro_zamanlama"):
+            send_telegram_message(
+                f"📊 XU100 MAKRO ZAMANLAMA TESTİ başlıyor: S&P500/USDTRY'nin "
+                f"geceki hareketini XU100'ün kendisine karşı 5 ayrı ufukta "
+                f"(1g/3g/1hf/2hf/1ay) test ediyor. ARKA PLANDA çalışıyor, "
+                f"bitince CSV + özet göndereceğim."
+            )
+
+            def _arka_plan_xu100_makro():
+                try:
+                    dosya_yolu, ozet = xu100_makro_zamanlama_testi_calistir()
+                    if dosya_yolu is None:
+                        send_telegram_message(f"📊 XU100 makro zamanlama testi başarısız: {ozet}")
+                        return
+                    satirlar = ["📊 XU100 Makro Zamanlama Testi Sonucu\n"]
+                    for s in ozet["satirlar"]:
+                        p_str = f", p={s['binom_p']}" if s["binom_p"] is not None else ""
+                        satirlar.append(f"{s['hipotez']}: n={s['n']}, "
+                                         f"%{s['kazanma_orani_pct']} isabet{p_str}")
+                    send_telegram_document(dosya_yolu, caption="\n".join(satirlar))
+                except Exception as e:
+                    send_telegram_message(f"📊 XU100 makro zamanlama testi hatası: {e}")
+            threading.Thread(target=_arka_plan_xu100_makro, daemon=True).start()
+        elif text.startswith("/deger_testi"):
+            send_telegram_message(
+                f"💰 DEĞER (F/K) TESTİ başlıyor: her hisse için çeyreklik EPS "
+                f"geçmişinden F/K oranı hesaplanıp, ucuz vs pahalı grupları "
+                f"1/3/6 ay ufuklarında karşılaştırılacak. yfinance'in BIST "
+                f"finansal veri kapsamı belirsiz - bazı hisseler atlanabilir, "
+                f"bu normal. ARKA PLANDA çalışıyor, bitince CSV + özet "
+                f"göndereceğim."
+            )
+
+            def _arka_plan_deger_testi():
+                try:
+                    dosya_yolu, ozet = deger_testi_calistir()
+                    if dosya_yolu is None:
+                        send_telegram_message(f"💰 Değer testi başarısız: {ozet}")
+                        return
+                    satirlar = [f"💰 Değer (F/K) Testi Sonucu",
+                                f"{ozet['hisse_sayisi']} hisse kullanıldı "
+                                f"({ozet['atlanan_hisse']} atlandı - veri yok/yetersiz), "
+                                f"{ozet['toplam_gozlem']} gözlem\n"]
+                    for s in ozet["satirlar"]:
+                        p_str = f", p={s['binom_p']}" if s["binom_p"] is not None else ""
+                        satirlar.append(
+                            f"{s['hipotez']}: n={s['n']}, %{s['kazanma_orani_pct']} "
+                            f"pozitif{p_str}, ort. getiri %{s['ort_getiri_pct']}"
+                        )
+                    send_telegram_document(dosya_yolu, caption="\n".join(satirlar))
+                except Exception as e:
+                    send_telegram_message(f"💰 Değer testi hatası: {e}")
+            threading.Thread(target=_arka_plan_deger_testi, daemon=True).start()
         elif text.startswith("/eksisozluk_test"):
             parcalar = text.split()
             baslik = parcalar[1] if len(parcalar) > 1 else "thyao"
