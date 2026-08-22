@@ -49,7 +49,7 @@ import threading
 # mesajlarında görünür kılmak için (2026-08-17: 3 kez üst üste "aynı
 # sonuç geldi" şüphesi sonrası eklendi - deploy'un gerçekten güncel
 # olup olmadığını KANITLA göstermek için).
-ARGE_KOD_SURUMU = "v42-gosterge-cephaneligi-2026-08-19"
+ARGE_KOD_SURUMU = "v43-cephanelik-5-yeni-gosterge-2026-08-19"
 import warnings
 from datetime import datetime, timezone
 
@@ -4706,6 +4706,39 @@ def _psar_hesapla(high, low, close, hizlanma=0.02, maks=0.2):
     return sar, trend_yukari
 
 
+KELTNER_EMA_PERIOD, KELTNER_ATR_PERIOD, KELTNER_MULT = 20, 10, 2.0
+WILLIAMS_R_PERIOD, WILLIAMS_OS, WILLIAMS_OB = 14, -80, -20
+EMA_UCLU_KISA, EMA_UCLU_ORTA, EMA_UCLU_UZUN = 5, 13, 34
+AO_KISA, AO_UZUN = 5, 34
+
+
+def _keltner_hesapla(high, low, close, ema_n=20, atr_n=10, mult=2.0):
+    orta = _ema_hesapla(close, ema_n)
+    tr = pd.concat([(high - low), (high - close.shift()).abs(), (low - close.shift()).abs()], axis=1).max(axis=1)
+    atr = tr.rolling(atr_n).mean()
+    return orta - mult * atr, orta + mult * atr  # alt, ust
+
+
+def _williams_r_hesapla(high, low, close, n=14):
+    en_yuksek = high.rolling(n).max()
+    en_dusuk = low.rolling(n).min()
+    return -100 * (en_yuksek - close) / (en_yuksek - en_dusuk).replace(0, np.nan)
+
+
+def _vwap_gun_ici_hesapla(high, low, close, volume, gun_serisi):
+    tipik = (high + low + close) / 3
+    pv = tipik * volume
+    gun_df = pd.DataFrame({"pv": pv, "volume": volume, "gun": gun_serisi})
+    kumulatif_pv = gun_df.groupby("gun")["pv"].cumsum()
+    kumulatif_vol = gun_df.groupby("gun")["volume"].cumsum()
+    return kumulatif_pv / kumulatif_vol.replace(0, np.nan)
+
+
+def _awesome_oscillator_hesapla(high, low, kisa=5, uzun=34):
+    medyan = (high + low) / 2
+    return medyan.rolling(kisa).mean() - medyan.rolling(uzun).mean()
+
+
 def gosterge_cephaneligi_calistir(max_hisse: int = 25) -> tuple:
     """(1) 4 güçlü sinyalin (Bollinger/Stochastic/CCI/RSI21) örtüşmesini,
     (2) 8 yeni trend/momentum adayını (EMA kesişimi, MACD kesişimi,
@@ -4720,7 +4753,9 @@ def gosterge_cephaneligi_calistir(max_hisse: int = 25) -> tuple:
     yeni_isimler = ["EMA9/21 kesişimi", "MACD kesişimi", "Donchian-20 kırılımı",
                      "Donchian-50 kırılımı", "ADX+DI yön", "ROC-10 sıfır kesişimi",
                      "RSI orta-hat (50) kesişimi", "Parabolic SAR dönüşü",
-                     "Hacim-onaylı kırılım (10 bar)"]
+                     "Hacim-onaylı kırılım (10 bar)", "Keltner Kanalı kırılımı",
+                     "Williams %R", "VWAP sapması", "Üçlü EMA hizalanması",
+                     "Awesome Oscillator sıfır kesişimi"]
     tum_sonuclar = {isim: [] for isim in guclu_isimler + yeni_isimler}
     tum_sonuclar["[ÖRTÜŞME] 2+ güçlü sinyal aynı yön"] = []
     tum_sonuclar["[KÖR] Koşulsuz LONG"] = []
@@ -4784,10 +4819,27 @@ def gosterge_cephaneligi_calistir(max_hisse: int = 25) -> tuple:
             barlar_15dk["bar_ust10"] = barlar_15dk["high"].rolling(10).max().shift(1)
             barlar_15dk["bar_alt10"] = barlar_15dk["low"].rolling(10).min().shift(1)
 
+            keltner_alt, keltner_ust = _keltner_hesapla(barlar_15dk["high"], barlar_15dk["low"],
+                                                          barlar_15dk["close"], KELTNER_EMA_PERIOD,
+                                                          KELTNER_ATR_PERIOD, KELTNER_MULT)
+            barlar_15dk["keltner_alt"], barlar_15dk["keltner_ust"] = keltner_alt, keltner_ust
+            barlar_15dk["williams_r"] = _williams_r_hesapla(barlar_15dk["high"], barlar_15dk["low"],
+                                                             barlar_15dk["close"], WILLIAMS_R_PERIOD)
+            barlar_15dk["vwap"] = _vwap_gun_ici_hesapla(barlar_15dk["high"], barlar_15dk["low"],
+                                                         barlar_15dk["close"], barlar_15dk["volume"],
+                                                         barlar_15dk["gun"])
+            barlar_15dk["vwap_sapma_pct"] = (barlar_15dk["close"] - barlar_15dk["vwap"]) / barlar_15dk["vwap"] * 100
+            barlar_15dk["ema_kisa3"] = _ema_hesapla(barlar_15dk["close"], EMA_UCLU_KISA)
+            barlar_15dk["ema_orta3"] = _ema_hesapla(barlar_15dk["close"], EMA_UCLU_ORTA)
+            barlar_15dk["ema_uzun3"] = _ema_hesapla(barlar_15dk["close"], EMA_UCLU_UZUN)
+            barlar_15dk["ao"] = _awesome_oscillator_hesapla(barlar_15dk["high"], barlar_15dk["low"],
+                                                             AO_KISA, AO_UZUN)
+
             tum_isimler = guclu_isimler + yeni_isimler
             tetiklenen = {isim: set() for isim in tum_isimler}
             baslangic_konum = max(RSI21_PERIOD, STOCH_PERIOD, CCI_PERIOD, BOLL_PERIOD,
-                                   EMA_YAVAS, MACD_YAVAS, DONCHIAN_UZUN, ADX_PERIOD, ROC_PERIOD) + 5
+                                   EMA_YAVAS, MACD_YAVAS, DONCHIAN_UZUN, ADX_PERIOD, ROC_PERIOD,
+                                   KELTNER_EMA_PERIOD, WILLIAMS_R_PERIOD, EMA_UCLU_UZUN, AO_UZUN) + 5
 
             for konum in range(baslangic_konum, len(barlar_15dk)):
                 bar = barlar_15dk.iloc[konum]
@@ -4865,6 +4917,35 @@ def gosterge_cephaneligi_calistir(max_hisse: int = 25) -> tuple:
                         adaylar.append(("Hacim-onaylı kırılım (10 bar)", "LONG"))
                     elif hacim_yuksek and bar["close"] < bar["bar_alt10"]:
                         adaylar.append(("Hacim-onaylı kırılım (10 bar)", "SHORT"))
+                if gun not in tetiklenen["Keltner Kanalı kırılımı"] and pd.notna(bar["keltner_alt"]):
+                    if bar["close"] >= bar["keltner_ust"]:
+                        adaylar.append(("Keltner Kanalı kırılımı", "LONG"))
+                    elif bar["close"] <= bar["keltner_alt"]:
+                        adaylar.append(("Keltner Kanalı kırılımı", "SHORT"))
+                if gun not in tetiklenen["Williams %R"] and pd.notna(bar["williams_r"]):
+                    if bar["williams_r"] <= WILLIAMS_OS:
+                        adaylar.append(("Williams %R", "LONG"))
+                    elif bar["williams_r"] >= WILLIAMS_OB:
+                        adaylar.append(("Williams %R", "SHORT"))
+                if gun not in tetiklenen["VWAP sapması"] and pd.notna(bar["vwap_sapma_pct"]):
+                    if bar["vwap_sapma_pct"] <= -1.0:
+                        adaylar.append(("VWAP sapması", "LONG"))
+                    elif bar["vwap_sapma_pct"] >= 1.0:
+                        adaylar.append(("VWAP sapması", "SHORT"))
+                if gun not in tetiklenen["Üçlü EMA hizalanması"] and pd.notna(bar["ema_kisa3"]) and pd.notna(onceki["ema_kisa3"]):
+                    yeni_yukari_hizali = (bar["ema_kisa3"] > bar["ema_orta3"] > bar["ema_uzun3"])
+                    onceki_yukari_hizali = (onceki["ema_kisa3"] > onceki["ema_orta3"] > onceki["ema_uzun3"])
+                    yeni_asagi_hizali = (bar["ema_kisa3"] < bar["ema_orta3"] < bar["ema_uzun3"])
+                    onceki_asagi_hizali = (onceki["ema_kisa3"] < onceki["ema_orta3"] < onceki["ema_uzun3"])
+                    if yeni_yukari_hizali and not onceki_yukari_hizali:
+                        adaylar.append(("Üçlü EMA hizalanması", "LONG"))
+                    elif yeni_asagi_hizali and not onceki_asagi_hizali:
+                        adaylar.append(("Üçlü EMA hizalanması", "SHORT"))
+                if gun not in tetiklenen["Awesome Oscillator sıfır kesişimi"] and pd.notna(bar["ao"]) and pd.notna(onceki["ao"]):
+                    if onceki["ao"] <= 0 and bar["ao"] > 0:
+                        adaylar.append(("Awesome Oscillator sıfır kesişimi", "LONG"))
+                    elif onceki["ao"] >= 0 and bar["ao"] < 0:
+                        adaylar.append(("Awesome Oscillator sıfır kesişimi", "SHORT"))
 
                 for isim, yon in adaylar:
                     tetiklenen[isim].add(gun)
@@ -5018,9 +5099,11 @@ def send_startup_message():
         "/nihai_kor_kiyasi — 7 ABD stratejisinin (ATR, Hacim, RSI21, "
         "Stochastic, CCI, MFI, Bollinger) HEPSİNİ tek taramada kör temel "
         "çizgiye karşı kıyaslar, gerçek edge'i (kör'den fark) gösterir\n"
-        "/gosterge_cephaneligi — 4 güçlü sinyalin örtüşmesi + 8 yeni "
-        "trend/momentum adayı (EMA/MACD kesişimi, Donchian, ADX+DI, ROC, "
-        "RSI50, PSAR, hacim-onaylı kırılım), kör çizgiyle birlikte\n"
+        "/gosterge_cephaneligi [HİSSE_SAYISI] — 4 güçlü sinyalin örtüşmesi + "
+        "13 trend/momentum adayı (Donchian, EMA, MACD, ADX+DI, ROC, RSI50, "
+        "PSAR, hacim-onaylı kırılım, Keltner, Williams %R, VWAP sapması, "
+        "Üçlü EMA, Awesome Oscillator), kör çizgiyle birlikte (varsayılan "
+        "25 hisse, daha büyük örneklem için sayı belirt)\n"
         "/wiki_dogrulama — /wiki_testi'nin bulgusunu (yüksek izlenme -> "
         "LONG) izole, gerçek R:R çıkışıyla yeniden doğrular\n"
         "/eksisozluk_test [BAŞLIK] — Ekşi Sözlük'ten veri çekilebiliyor "
@@ -5868,20 +5951,22 @@ def poll_arge_commands():
                     send_telegram_message(f"⚖️ Nihai kör kıyas hatası: {e}")
             threading.Thread(target=_arka_plan_nihai_kor, daemon=True).start()
         elif text.startswith("/gosterge_cephaneligi"):
+            parcalar = text.split()
+            hisse_sayisi = int(parcalar[1]) if len(parcalar) > 1 else 25
             send_telegram_message(
-                f"🏹 GÖSTERGE CEPHANELİĞİ başlıyor: (1) 4 güçlü sinyalin "
-                f"(Bollinger/Stochastic/CCI/RSI21) örtüşmesini, (2) 8 yeni "
-                f"trend/momentum adayını (EMA/MACD kesişimi, Donchian "
-                f"kırılımı x2, ADX+DI, ROC, RSI50, PSAR, hacim-onaylı "
-                f"kırılım) kör temel çizgiyle birlikte TEK taramada test "
-                f"ediyor. Bu ÇOK UZUN sürecek (13 strateji + kör çizgi, "
-                f"muhtemelen 30-40+ dakika). ARKA PLANDA çalışıyor, bitince "
-                f"CSV + özet göndereceğim."
+                f"🏹 GÖSTERGE CEPHANELİĞİ başlıyor ({hisse_sayisi} hisse): (1) 4 "
+                f"güçlü sinyalin örtüşmesini, (2) 13 trend/momentum adayını "
+                f"(EMA/MACD kesişimi, Donchian x2, ADX+DI, ROC, RSI50, PSAR, "
+                f"hacim-onaylı kırılım, Keltner, Williams %R, VWAP sapması, "
+                f"Üçlü EMA, Awesome Oscillator) kör temel çizgiyle birlikte "
+                f"TEK taramada test ediyor. Bu ÇOK UZUN sürecek (18 strateji "
+                f"+ kör çizgi), hisse sayısına göre değişir. ARKA PLANDA "
+                f"çalışıyor, bitince CSV + özet göndereceğim."
             )
 
-            def _arka_plan_cephanelik():
+            def _arka_plan_cephanelik(hs):
                 try:
-                    dosya_yolu, ozet = gosterge_cephaneligi_calistir()
+                    dosya_yolu, ozet = gosterge_cephaneligi_calistir(hs)
                     if dosya_yolu is None:
                         send_telegram_message(f"🏹 Gösterge cephaneliği başarısız: {ozet}")
                         return
@@ -5896,7 +5981,7 @@ def poll_arge_commands():
                     send_telegram_document(dosya_yolu, caption="\n".join(satirlar))
                 except Exception as e:
                     send_telegram_message(f"🏹 Gösterge cephaneliği hatası: {e}")
-            threading.Thread(target=_arka_plan_cephanelik, daemon=True).start()
+            threading.Thread(target=_arka_plan_cephanelik, args=(hisse_sayisi,), daemon=True).start()
         elif text.startswith("/ai_model_backtest"):
             send_telegram_message(
                 f"🤖 GERÇEK AI MODEL BACKTEST başlıyor: model.pkl ve "
