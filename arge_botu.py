@@ -49,7 +49,7 @@ import threading
 # mesajlarında görünür kılmak için (2026-08-17: 3 kez üst üste "aynı
 # sonuç geldi" şüphesi sonrası eklendi - deploy'un gerçekten güncel
 # olup olmadığını KANITLA göstermek için).
-ARGE_KOD_SURUMU = "v40-kor-temel-cizgi-eklendi-2026-08-19"
+ARGE_KOD_SURUMU = "v41-nihai-kor-kiyasi-2026-08-19"
 import warnings
 from datetime import datetime, timezone
 
@@ -4474,6 +4474,150 @@ def yeni_gosterge_turnuvasi_us_calistir(max_hisse: int = 30) -> tuple:
 
 
 # =============================================================================
+# TÜM ABD GÖSTERGELERİ — TEK KÖR ÇİZGİYE KARŞI NİHAİ KIYAS — 2026-08-19
+# =============================================================================
+# GEREKÇE: yeni_gosterge_turnuvasi_us_calistir'de kör temel çizginin
+# şaşırtıcı derecede yüksek çıktığı (LONG %64, SHORT %59) görüldü - bu,
+# checkpoint sisteminin (4 kademeli, %1-5, 10 güne kadar) TEK BAŞINA
+# cömert olduğunu gösterdi. AMA bu kör çizgi bugüne kadar ATR Kırılımı,
+# Hacim Z-Skor ve RSI21 için HİÇ kontrol edilmedi - o "kanıtlanmış"
+# sonuçlar da aslında bu kör çizgiye göre ne kadar gerçek kenar
+# taşıyor, bilmiyoruz. Bu fonksiyon YEDİ stratejiyi + kör çizgiyi TEK
+# taramada (hisse başına tek fetch, verimli) hesaplayıp gerçek "kör
+# çizginin üstündeki fark"ı (edge_above_kor) net gösteriyor.
+
+def tum_abd_gostergeleri_kor_kiyasi_calistir(max_hisse: int = 30) -> tuple:
+    """ATR Kırılımı, Hacim Z-Skor, RSI21, Stochastic, CCI, MFI, Bollinger
+    + kör temel çizgiyi (koşulsuz LONG/SHORT) TEK taramada, aynı
+    checkpoint sistemine karşı test eder. Döner: (dosya_yolu, özet_dict)
+    ya da (None, hata_mesajı)."""
+    import yfinance as yf
+
+    hisseler = US_INSIDER_TICKERS[:max_hisse]
+    tum_sonuclar = {
+        "ATR Kırılımı x2.0": [], "Hacim Z-Skor": [], "RSI21 gün içi": [],
+        "Stochastic %K": [], "CCI": [], "MFI": [], "Bollinger dokunuşu": [],
+        "[KÖR] Koşulsuz LONG": [], "[KÖR] Koşulsuz SHORT": [],
+    }
+
+    for n_i, ticker in enumerate(hisseler, 1):
+        try:
+            print(f"[Nihai Kıyas {n_i}/{len(hisseler)}] {ticker}...", flush=True)
+            gunluk = yf.Ticker(ticker).history(period="2y", interval="1d", timeout=20)
+            barlar_15dk = yf.Ticker(ticker).history(period="60d", interval="15m", timeout=20)
+            if gunluk is None or gunluk.empty or barlar_15dk is None or barlar_15dk.empty:
+                continue
+            gunluk = gunluk.rename(columns={"Close": "close", "High": "high", "Low": "low",
+                                             "Open": "open", "Volume": "volume"})
+            gunluk.index = pd.to_datetime(gunluk.index).tz_localize(None)
+            tarihler = gunluk.index
+            gunluk_hesaplanmis = gunluk.reset_index(drop=True)
+            gunluk_hesaplanmis = _kanit_compute_indicators(gunluk_hesaplanmis)
+            # index'i geri tarihe cevir (kolayca eslesmek icin)
+            gunluk_hesaplanmis.index = tarihler
+
+            # --- GUNLUK BAZLI: ATR Kırılımı + Hacim Z-Skor + KÖR ÇİZGİ ---
+            gunluk_pos = gunluk_hesaplanmis.reset_index(drop=True)
+            for idx in range(20, len(gunluk_pos) - 11):
+                row = gunluk_pos.iloc[idx]
+                prev_close = gunluk_pos.iloc[idx - 1]["close"]
+                yon_atr = _kanit_check_us_atr_breakout(row, prev_close)
+                if yon_atr:
+                    tum_sonuclar["ATR Kırılımı x2.0"].append(
+                        _kanit_us_checkpoint_sonuc(gunluk_pos, idx, yon_atr))
+                yon_hacim = _kanit_check_us_volume_zscore(row)
+                if yon_hacim:
+                    tum_sonuclar["Hacim Z-Skor"].append(
+                        _kanit_us_checkpoint_sonuc(gunluk_pos, idx, yon_hacim))
+                tum_sonuclar["[KÖR] Koşulsuz LONG"].append(
+                    _kanit_us_checkpoint_sonuc(gunluk_pos, idx, "LONG"))
+                tum_sonuclar["[KÖR] Koşulsuz SHORT"].append(
+                    _kanit_us_checkpoint_sonuc(gunluk_pos, idx, "SHORT"))
+
+            # --- GUN ICI (15dk) BAZLI: RSI21, Stochastic, CCI, MFI, Bollinger ---
+            barlar_15dk = barlar_15dk.reset_index().rename(columns={
+                "Datetime": "ts", "Open": "open", "High": "high", "Low": "low",
+                "Close": "close", "Volume": "volume"})
+            if "ts" not in barlar_15dk.columns:
+                barlar_15dk = barlar_15dk.rename(columns={barlar_15dk.columns[0]: "ts"})
+            barlar_15dk["ts"] = pd.to_datetime(barlar_15dk["ts"]).dt.tz_localize(None)
+            barlar_15dk["gun"] = barlar_15dk["ts"].dt.date
+            barlar_15dk["rsi21"] = _rsi_hesapla(barlar_15dk["close"], RSI21_PERIOD)
+            barlar_15dk["stoch"] = _stochastic_hesapla(barlar_15dk["high"], barlar_15dk["low"],
+                                                        barlar_15dk["close"], STOCH_PERIOD)
+            barlar_15dk["cci"] = _cci_hesapla(barlar_15dk["high"], barlar_15dk["low"],
+                                               barlar_15dk["close"], CCI_PERIOD)
+            barlar_15dk["mfi"] = _mfi_hesapla(barlar_15dk["high"], barlar_15dk["low"],
+                                               barlar_15dk["close"], barlar_15dk["volume"], MFI_PERIOD)
+            alt_bant, ust_bant = _bollinger_hesapla(barlar_15dk["close"], BOLL_PERIOD, BOLL_STD)
+            barlar_15dk["boll_alt"], barlar_15dk["boll_ust"] = alt_bant, ust_bant
+
+            tetiklenen = {isim: set() for isim in
+                          ["RSI21 gün içi", "Stochastic %K", "CCI", "MFI", "Bollinger dokunuşu"]}
+            baslangic_konum = max(RSI21_PERIOD, STOCH_PERIOD, CCI_PERIOD, MFI_PERIOD, BOLL_PERIOD) + 5
+            for konum in range(baslangic_konum, len(barlar_15dk)):
+                bar = barlar_15dk.iloc[konum]
+                gun = bar["gun"]
+                adaylar = []
+                if gun not in tetiklenen["RSI21 gün içi"] and pd.notna(bar["rsi21"]):
+                    if bar["rsi21"] <= RSI21_OS:
+                        adaylar.append(("RSI21 gün içi", "LONG"))
+                    elif bar["rsi21"] >= RSI21_OB:
+                        adaylar.append(("RSI21 gün içi", "SHORT"))
+                if gun not in tetiklenen["Stochastic %K"] and pd.notna(bar["stoch"]):
+                    if bar["stoch"] <= STOCH_OS:
+                        adaylar.append(("Stochastic %K", "LONG"))
+                    elif bar["stoch"] >= STOCH_OB:
+                        adaylar.append(("Stochastic %K", "SHORT"))
+                if gun not in tetiklenen["CCI"] and pd.notna(bar["cci"]):
+                    if bar["cci"] <= -CCI_ESIK:
+                        adaylar.append(("CCI", "LONG"))
+                    elif bar["cci"] >= CCI_ESIK:
+                        adaylar.append(("CCI", "SHORT"))
+                if gun not in tetiklenen["MFI"] and pd.notna(bar["mfi"]):
+                    if bar["mfi"] <= MFI_OS:
+                        adaylar.append(("MFI", "LONG"))
+                    elif bar["mfi"] >= MFI_OB:
+                        adaylar.append(("MFI", "SHORT"))
+                if gun not in tetiklenen["Bollinger dokunuşu"] and pd.notna(bar["boll_alt"]):
+                    if bar["close"] <= bar["boll_alt"]:
+                        adaylar.append(("Bollinger dokunuşu", "LONG"))
+                    elif bar["close"] >= bar["boll_ust"]:
+                        adaylar.append(("Bollinger dokunuşu", "SHORT"))
+
+                for isim, yon in adaylar:
+                    tetiklenen[isim].add(gun)
+                    gun_ts = pd.Timestamp(gun)
+                    gunluk_idx2 = tarihler.get_indexer([gun_ts], method="nearest")[0]
+                    if gunluk_idx2 < 0:
+                        continue
+                    if abs((tarihler[gunluk_idx2].date() - gun).days) > 3:
+                        continue
+                    tum_sonuclar[isim].append(_kanit_us_checkpoint_sonuc(gunluk_pos, gunluk_idx2, yon))
+        except Exception as e:
+            print(f"[Nihai Kıyas] {ticker} hata: {e}", flush=True)
+        time.sleep(0.5)
+
+    satirlar = _kanit_ozet_tablosu(tum_sonuclar)
+    if not satirlar:
+        return None, "Hiçbir strateji için yeterli veri üretilemedi."
+
+    # kor cizgiden farki (edge) hesapla, kolon olarak ekle
+    kor_long_orani = next((s["kazanma_orani_pct"] for s in satirlar
+                            if s["strateji"] == "[KÖR] Koşulsuz LONG"), None)
+    for s in satirlar:
+        if kor_long_orani is not None and s["kazanma_orani_pct"] is not None:
+            s["kor_cizgiden_fark_puan"] = round(s["kazanma_orani_pct"] - kor_long_orani, 2)
+        else:
+            s["kor_cizgiden_fark_puan"] = None
+
+    tablo = pd.DataFrame(satirlar).sort_values("kor_cizgiden_fark_puan", ascending=False)
+    dosya_yolu = _data_path("tum_abd_gostergeleri_kor_kiyasi.csv")
+    tablo.to_csv(dosya_yolu, index=False, encoding="utf-8-sig")
+    return dosya_yolu, {"satirlar": satirlar}
+
+
+# =============================================================================
 # EKŞİ SÖZLÜK BAĞLANTI TESTİ — 2026-08-19
 # =============================================================================
 # GEREKÇE: Ekşi Sözlük'ün resmi bir API'si yok - sadece web sayfası
@@ -4582,6 +4726,9 @@ def send_startup_message():
         "BIST'in gerçek çıkış mantığıyla (1.5R kısmi TP + trailing) test eder\n"
         "/yeni_gosterge_turnuvasi_us — Stochastic/CCI/MFI/Bollinger'ı ABD'de "
         "gün içi aşırı uç + gerçek büyük hedeflerle (RSI21 yöntemiyle) test eder\n"
+        "/nihai_kor_kiyasi — 7 ABD stratejisinin (ATR, Hacim, RSI21, "
+        "Stochastic, CCI, MFI, Bollinger) HEPSİNİ tek taramada kör temel "
+        "çizgiye karşı kıyaslar, gerçek edge'i (kör'den fark) gösterir\n"
         "/wiki_dogrulama — /wiki_testi'nin bulgusunu (yüksek izlenme -> "
         "LONG) izole, gerçek R:R çıkışıyla yeniden doğrular\n"
         "/eksisozluk_test [BAŞLIK] — Ekşi Sözlük'ten veri çekilebiliyor "
@@ -5398,6 +5545,36 @@ def poll_arge_commands():
                 except Exception as e:
                     send_telegram_message(f"🆕 Yeni gösterge turnuvası hatası: {e}")
             threading.Thread(target=_arka_plan_yeni_gosterge_us, daemon=True).start()
+        elif text.startswith("/nihai_kor_kiyasi"):
+            send_telegram_message(
+                f"⚖️ NİHAİ KÖR KIYAS başlıyor: ATR Kırılımı, Hacim Z-Skor, "
+                f"RSI21, Stochastic, CCI, MFI, Bollinger + kör temel çizgiyi "
+                f"(koşulsuz LONG/SHORT) TEK taramada, aynı checkpoint "
+                f"sistemine karşı test ediyor - hepsinin kör çizgiden GERÇEK "
+                f"farkını (edge) gösterecek. Bu EN UZUN süren test (hisse "
+                f"başına hem günlük hem 15dk veri + 7 gösterge + kör çizgi), "
+                f"muhtemelen 20-30+ dakika. ARKA PLANDA çalışıyor, bitince "
+                f"CSV + özet göndereceğim."
+            )
+
+            def _arka_plan_nihai_kor():
+                try:
+                    dosya_yolu, ozet = tum_abd_gostergeleri_kor_kiyasi_calistir()
+                    if dosya_yolu is None:
+                        send_telegram_message(f"⚖️ Nihai kör kıyas başarısız: {ozet}")
+                        return
+                    satirlar = ["⚖️ Nihai Kör Kıyas Sonucu (kör çizgiden farka göre sıralı)\n"]
+                    for s in ozet["satirlar"]:
+                        fark_str = f", kör'den fark: {s['kor_cizgiden_fark_puan']:+.2f}puan" \
+                            if s.get("kor_cizgiden_fark_puan") is not None else ""
+                        satirlar.append(
+                            f"{s['strateji']}: n={s['toplam_sinyal']}, "
+                            f"%{s['kazanma_orani_pct']} isabet{fark_str}, ort R={s['ort_R']}"
+                        )
+                    send_telegram_document(dosya_yolu, caption="\n".join(satirlar))
+                except Exception as e:
+                    send_telegram_message(f"⚖️ Nihai kör kıyas hatası: {e}")
+            threading.Thread(target=_arka_plan_nihai_kor, daemon=True).start()
         elif text.startswith("/ai_model_backtest"):
             send_telegram_message(
                 f"🤖 GERÇEK AI MODEL BACKTEST başlıyor: model.pkl ve "
