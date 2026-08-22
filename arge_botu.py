@@ -49,7 +49,7 @@ import threading
 # mesajlarında görünür kılmak için (2026-08-17: 3 kez üst üste "aynı
 # sonuç geldi" şüphesi sonrası eklendi - deploy'un gerçekten güncel
 # olup olmadığını KANITLA göstermek için).
-ARGE_KOD_SURUMU = "v39-yeni-gosterge-kolon-duzeltmesi-2026-08-19"
+ARGE_KOD_SURUMU = "v40-kor-temel-cizgi-eklendi-2026-08-19"
 import warnings
 from datetime import datetime, timezone
 
@@ -4366,6 +4366,11 @@ def _bollinger_hesapla(close, n=20, k=2.0):
 def yeni_gosterge_turnuvasi_us_calistir(max_hisse: int = 30) -> tuple:
     """Stochastic/CCI/MFI/Bollinger aşırı uç sinyallerini (15dk, günde
     ilk tetiklenme) US_SWING_CHECKPOINTS ile (%1-5, 1-10 gün) test eder.
+    2026-08-19 EKLENDİ: KÖR TEMEL ÇİZGİ - her gün koşulsuz (hiçbir
+    göstergeye bakmadan) LONG ve SHORT açsak bu cömert checkpoint
+    sistemi tek başına ne verir - 4 göstergenin "gerçek" kenarını bu
+    kör çizgiden ayırt etmek için (çok cömert bir hedef dizisi tek
+    başına yüksek isabet verebilir, göstergelerden bağımsız olarak).
     Döner: (dosya_yolu, özet_dict) ya da (None, hata_mesajı)."""
     import yfinance as yf
 
@@ -4373,6 +4378,8 @@ def yeni_gosterge_turnuvasi_us_calistir(max_hisse: int = 30) -> tuple:
     tum_sonuclar = {
         "Stochastic %K (≤20/≥80)": [], "CCI (±100)": [],
         "MFI (≤20/≥80)": [], "Bollinger Bandı dokunuşu": [],
+        "[KÖR TEMEL ÇİZGİ] Koşulsuz LONG (her gün)": [],
+        "[KÖR TEMEL ÇİZGİ] Koşulsuz SHORT (her gün)": [],
     }
 
     for n_i, ticker in enumerate(hisseler, 1):
@@ -4444,6 +4451,15 @@ def yeni_gosterge_turnuvasi_us_calistir(max_hisse: int = 30) -> tuple:
                         continue
                     sonuc = _kanit_us_checkpoint_sonuc(gunluk, gunluk_idx, yon)
                     tum_sonuclar[isim].append(sonuc)
+
+            # KOR TEMEL CIZGI: HER GUNLUK BAR icin kosulsuz LONG ve SHORT -
+            # gostergelere hic bakmadan, bu cömert checkpoint sisteminin
+            # KENDI BASINA ne verdigini olcuyor.
+            for gunluk_idx in range(20, len(gunluk) - 11):
+                tum_sonuclar["[KÖR TEMEL ÇİZGİ] Koşulsuz LONG (her gün)"].append(
+                    _kanit_us_checkpoint_sonuc(gunluk, gunluk_idx, "LONG"))
+                tum_sonuclar["[KÖR TEMEL ÇİZGİ] Koşulsuz SHORT (her gün)"].append(
+                    _kanit_us_checkpoint_sonuc(gunluk, gunluk_idx, "SHORT"))
         except Exception as e:
             print(f"[Yeni Gösterge Turnuvası] {ticker} hata: {e}", flush=True)
         time.sleep(0.5)
@@ -5358,9 +5374,10 @@ def poll_arge_commands():
                 f"🆕 YENİ ABD GÖSTERGE TURNUVASI başlıyor: Stochastic %K, "
                 f"CCI, MFI, Bollinger Bandı dokunuşunu gün içi (15dk) aşırı "
                 f"uç sinyalleriyle, gerçek büyük hedeflerle (%1-5, RSI21/ATR/"
-                f"Hacim Z-Skor ile aynı checkpoint sistemi) test ediyor. "
-                f"ARKA PLANDA çalışıyor, biraz sürebilir, bitince CSV + "
-                f"özet göndereceğim."
+                f"Hacim Z-Skor ile aynı checkpoint sistemi) test ediyor. Artık "
+                f"KÖR TEMEL ÇİZGİ (koşulsuz her gün LONG/SHORT) de eklendi - "
+                f"bu daha UZUN sürecek (~15-20+ dakika). ARKA PLANDA "
+                f"çalışıyor, bitince CSV + özet göndereceğim."
             )
 
             def _arka_plan_yeni_gosterge_us():
