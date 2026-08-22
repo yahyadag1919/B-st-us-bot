@@ -49,7 +49,7 @@ import threading
 # mesajlarında görünür kılmak için (2026-08-17: 3 kez üst üste "aynı
 # sonuç geldi" şüphesi sonrası eklendi - deploy'un gerçekten güncel
 # olup olmadığını KANITLA göstermek için).
-ARGE_KOD_SURUMU = "v38-yeni-gosterge-turnuvasi-us-2026-08-19"
+ARGE_KOD_SURUMU = "v39-yeni-gosterge-kolon-duzeltmesi-2026-08-19"
 import warnings
 from datetime import datetime, timezone
 
@@ -4382,7 +4382,8 @@ def yeni_gosterge_turnuvasi_us_calistir(max_hisse: int = 30) -> tuple:
             barlar_15dk = yf.Ticker(ticker).history(period="60d", interval="15m", timeout=20)
             if gunluk is None or gunluk.empty or barlar_15dk is None or barlar_15dk.empty:
                 continue
-            gunluk = gunluk.rename(columns={"Close": "close"})
+            gunluk = gunluk.rename(columns={"Close": "close", "High": "high", "Low": "low",
+                                             "Open": "open", "Volume": "volume"})
             gunluk.index = pd.to_datetime(gunluk.index).tz_localize(None)
             tarihler = gunluk.index
 
