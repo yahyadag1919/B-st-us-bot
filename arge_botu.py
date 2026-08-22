@@ -49,7 +49,7 @@ import threading
 # mesajlarında görünür kılmak için (2026-08-17: 3 kez üst üste "aynı
 # sonuç geldi" şüphesi sonrası eklendi - deploy'un gerçekten güncel
 # olup olmadığını KANITLA göstermek için).
-ARGE_KOD_SURUMU = "v37-rsi21-bist-testi-2026-08-19"
+ARGE_KOD_SURUMU = "v38-yeni-gosterge-turnuvasi-us-2026-08-19"
 import warnings
 from datetime import datetime, timezone
 
@@ -4319,6 +4319,144 @@ def rsi21_bist_testi_calistir(max_hisse: int = 29) -> tuple:
 
 
 # =============================================================================
+# YENİ ABD GÖSTERGE TURNUVASI (Stochastic/CCI/MFI/Bollinger) — 2026-08-19
+# =============================================================================
+# GEREKÇE: RSI21 + büyük hedef kombinasyonu gerçek bir kenar ortaya
+# çıkardı (%70.04, ort_R=+0.73) - aynı yöntemi (gün içi 15dk aşırı uç
+# giriş + gerçek checkpoint çıkışı) henüz denenmemiş 4 göstergeye
+# uyguluyoruz: Stochastic %K, CCI, MFI, Bollinger Bandı dokunuşu.
+# Hepsi AYNI çıkış mantığını (_kanit_us_checkpoint_sonuc, ATR Kırılımı/
+# Hacim Z-Skor/RSI21 ile birebir aynı) kullanıyor - tutarlı kıyas.
+
+STOCH_PERIOD, STOCH_OS, STOCH_OB = 14, 20, 80
+CCI_PERIOD, CCI_ESIK = 20, 100
+MFI_PERIOD, MFI_OS, MFI_OB = 14, 20, 80
+BOLL_PERIOD, BOLL_STD = 20, 2.0
+
+
+def _stochastic_hesapla(high, low, close, n=14):
+    en_dusuk = low.rolling(n).min()
+    en_yuksek = high.rolling(n).max()
+    return 100 * (close - en_dusuk) / (en_yuksek - en_dusuk).replace(0, np.nan)
+
+
+def _cci_hesapla(high, low, close, n=20):
+    tipik_fiyat = (high + low + close) / 3
+    sma = tipik_fiyat.rolling(n).mean()
+    ort_sapma = tipik_fiyat.rolling(n).apply(lambda x: np.abs(x - x.mean()).mean(), raw=True)
+    return (tipik_fiyat - sma) / (0.015 * ort_sapma.replace(0, np.nan))
+
+
+def _mfi_hesapla(high, low, close, volume, n=14):
+    tipik_fiyat = (high + low + close) / 3
+    para_akisi = tipik_fiyat * volume
+    yon = tipik_fiyat.diff()
+    pozitif_akis = para_akisi.where(yon > 0, 0).rolling(n).sum()
+    negatif_akis = para_akisi.where(yon < 0, 0).rolling(n).sum()
+    oran = pozitif_akis / negatif_akis.replace(0, np.nan)
+    return 100 - (100 / (1 + oran))
+
+
+def _bollinger_hesapla(close, n=20, k=2.0):
+    orta = close.rolling(n).mean()
+    std = close.rolling(n).std()
+    return orta - k * std, orta + k * std  # alt, ust bant
+
+
+def yeni_gosterge_turnuvasi_us_calistir(max_hisse: int = 30) -> tuple:
+    """Stochastic/CCI/MFI/Bollinger aşırı uç sinyallerini (15dk, günde
+    ilk tetiklenme) US_SWING_CHECKPOINTS ile (%1-5, 1-10 gün) test eder.
+    Döner: (dosya_yolu, özet_dict) ya da (None, hata_mesajı)."""
+    import yfinance as yf
+
+    hisseler = US_INSIDER_TICKERS[:max_hisse]
+    tum_sonuclar = {
+        "Stochastic %K (≤20/≥80)": [], "CCI (±100)": [],
+        "MFI (≤20/≥80)": [], "Bollinger Bandı dokunuşu": [],
+    }
+
+    for n_i, ticker in enumerate(hisseler, 1):
+        try:
+            print(f"[Yeni Gösterge Turnuvası {n_i}/{len(hisseler)}] {ticker}...", flush=True)
+            gunluk = yf.Ticker(ticker).history(period="2y", interval="1d", timeout=20)
+            barlar_15dk = yf.Ticker(ticker).history(period="60d", interval="15m", timeout=20)
+            if gunluk is None or gunluk.empty or barlar_15dk is None or barlar_15dk.empty:
+                continue
+            gunluk = gunluk.rename(columns={"Close": "close"})
+            gunluk.index = pd.to_datetime(gunluk.index).tz_localize(None)
+            tarihler = gunluk.index
+
+            barlar_15dk = barlar_15dk.reset_index().rename(columns={
+                "Datetime": "ts", "Open": "open", "High": "high", "Low": "low",
+                "Close": "close", "Volume": "volume"})
+            if "ts" not in barlar_15dk.columns:
+                barlar_15dk = barlar_15dk.rename(columns={barlar_15dk.columns[0]: "ts"})
+            barlar_15dk["ts"] = pd.to_datetime(barlar_15dk["ts"]).dt.tz_localize(None)
+            barlar_15dk["gun"] = barlar_15dk["ts"].dt.date
+
+            barlar_15dk["stoch"] = _stochastic_hesapla(barlar_15dk["high"], barlar_15dk["low"],
+                                                        barlar_15dk["close"], STOCH_PERIOD)
+            barlar_15dk["cci"] = _cci_hesapla(barlar_15dk["high"], barlar_15dk["low"],
+                                               barlar_15dk["close"], CCI_PERIOD)
+            barlar_15dk["mfi"] = _mfi_hesapla(barlar_15dk["high"], barlar_15dk["low"],
+                                               barlar_15dk["close"], barlar_15dk["volume"], MFI_PERIOD)
+            alt_bant, ust_bant = _bollinger_hesapla(barlar_15dk["close"], BOLL_PERIOD, BOLL_STD)
+            barlar_15dk["boll_alt"] = alt_bant
+            barlar_15dk["boll_ust"] = ust_bant
+
+            tetiklenen = {isim: set() for isim in tum_sonuclar}
+            baslangic_konum = max(STOCH_PERIOD, CCI_PERIOD, MFI_PERIOD, BOLL_PERIOD) + 5
+            for konum in range(baslangic_konum, len(barlar_15dk)):
+                bar = barlar_15dk.iloc[konum]
+                gun = bar["gun"]
+
+                adaylar = []
+                if gun not in tetiklenen["Stochastic %K (≤20/≥80)"] and pd.notna(bar["stoch"]):
+                    if bar["stoch"] <= STOCH_OS:
+                        adaylar.append(("Stochastic %K (≤20/≥80)", "LONG"))
+                    elif bar["stoch"] >= STOCH_OB:
+                        adaylar.append(("Stochastic %K (≤20/≥80)", "SHORT"))
+                if gun not in tetiklenen["CCI (±100)"] and pd.notna(bar["cci"]):
+                    if bar["cci"] <= -CCI_ESIK:
+                        adaylar.append(("CCI (±100)", "LONG"))
+                    elif bar["cci"] >= CCI_ESIK:
+                        adaylar.append(("CCI (±100)", "SHORT"))
+                if gun not in tetiklenen["MFI (≤20/≥80)"] and pd.notna(bar["mfi"]):
+                    if bar["mfi"] <= MFI_OS:
+                        adaylar.append(("MFI (≤20/≥80)", "LONG"))
+                    elif bar["mfi"] >= MFI_OB:
+                        adaylar.append(("MFI (≤20/≥80)", "SHORT"))
+                if gun not in tetiklenen["Bollinger Bandı dokunuşu"] and pd.notna(bar["boll_alt"]):
+                    if bar["close"] <= bar["boll_alt"]:
+                        adaylar.append(("Bollinger Bandı dokunuşu", "LONG"))
+                    elif bar["close"] >= bar["boll_ust"]:
+                        adaylar.append(("Bollinger Bandı dokunuşu", "SHORT"))
+
+                for isim, yon in adaylar:
+                    tetiklenen[isim].add(gun)
+                    gun_ts = pd.Timestamp(gun)
+                    gunluk_idx = tarihler.get_indexer([gun_ts], method="nearest")[0]
+                    if gunluk_idx < 0:
+                        continue
+                    fark_gun = abs((tarihler[gunluk_idx].date() - gun).days)
+                    if fark_gun > 3:
+                        continue
+                    sonuc = _kanit_us_checkpoint_sonuc(gunluk, gunluk_idx, yon)
+                    tum_sonuclar[isim].append(sonuc)
+        except Exception as e:
+            print(f"[Yeni Gösterge Turnuvası] {ticker} hata: {e}", flush=True)
+        time.sleep(0.5)
+
+    satirlar = _kanit_ozet_tablosu(tum_sonuclar)
+    if not satirlar:
+        return None, "Hiçbir gösterge için yeterli veri üretilemedi."
+    tablo = pd.DataFrame(satirlar).sort_values("kazanma_orani_pct", ascending=False)
+    dosya_yolu = _data_path("yeni_gosterge_turnuvasi_us.csv")
+    tablo.to_csv(dosya_yolu, index=False, encoding="utf-8-sig")
+    return dosya_yolu, {"satirlar": satirlar}
+
+
+# =============================================================================
 # EKŞİ SÖZLÜK BAĞLANTI TESTİ — 2026-08-19
 # =============================================================================
 # GEREKÇE: Ekşi Sözlük'ün resmi bir API'si yok - sadece web sayfası
@@ -4425,6 +4563,8 @@ def send_startup_message():
         "(%1-5) karşılaştırır\n"
         "/rsi21_bist_testi — RSI21 gün içi sinyalini BIST hisselerinde, "
         "BIST'in gerçek çıkış mantığıyla (1.5R kısmi TP + trailing) test eder\n"
+        "/yeni_gosterge_turnuvasi_us — Stochastic/CCI/MFI/Bollinger'ı ABD'de "
+        "gün içi aşırı uç + gerçek büyük hedeflerle (RSI21 yöntemiyle) test eder\n"
         "/wiki_dogrulama — /wiki_testi'nin bulgusunu (yüksek izlenme -> "
         "LONG) izole, gerçek R:R çıkışıyla yeniden doğrular\n"
         "/eksisozluk_test [BAŞLIK] — Ekşi Sözlük'ten veri çekilebiliyor "
@@ -5212,6 +5352,34 @@ def poll_arge_commands():
                 except Exception as e:
                     send_telegram_message(f"🎯 RSI21 BIST testi hatası: {e}")
             threading.Thread(target=_arka_plan_rsi21_bist, daemon=True).start()
+        elif text.startswith("/yeni_gosterge_turnuvasi_us"):
+            send_telegram_message(
+                f"🆕 YENİ ABD GÖSTERGE TURNUVASI başlıyor: Stochastic %K, "
+                f"CCI, MFI, Bollinger Bandı dokunuşunu gün içi (15dk) aşırı "
+                f"uç sinyalleriyle, gerçek büyük hedeflerle (%1-5, RSI21/ATR/"
+                f"Hacim Z-Skor ile aynı checkpoint sistemi) test ediyor. "
+                f"ARKA PLANDA çalışıyor, biraz sürebilir, bitince CSV + "
+                f"özet göndereceğim."
+            )
+
+            def _arka_plan_yeni_gosterge_us():
+                try:
+                    dosya_yolu, ozet = yeni_gosterge_turnuvasi_us_calistir()
+                    if dosya_yolu is None:
+                        send_telegram_message(f"🆕 Yeni gösterge turnuvası başarısız: {ozet}")
+                        return
+                    satirlar = ["🆕 Yeni ABD Gösterge Turnuvası Sonucu\n"]
+                    for s in ozet["satirlar"]:
+                        p_str = f", p={s['binom_p']}" if s["binom_p"] is not None else ""
+                        satirlar.append(
+                            f"{s['strateji']}: {s['toplam_sinyal']} sinyal "
+                            f"({s['win']}W/{s['loss']}L/{s['timeout']}T), "
+                            f"%{s['kazanma_orani_pct']} isabet{p_str}, ort R={s['ort_R']}"
+                        )
+                    send_telegram_document(dosya_yolu, caption="\n".join(satirlar))
+                except Exception as e:
+                    send_telegram_message(f"🆕 Yeni gösterge turnuvası hatası: {e}")
+            threading.Thread(target=_arka_plan_yeni_gosterge_us, daemon=True).start()
         elif text.startswith("/ai_model_backtest"):
             send_telegram_message(
                 f"🤖 GERÇEK AI MODEL BACKTEST başlıyor: model.pkl ve "
