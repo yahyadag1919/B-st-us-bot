@@ -49,7 +49,7 @@ import threading
 # mesajlarında görünür kılmak için (2026-08-17: 3 kez üst üste "aynı
 # sonuç geldi" şüphesi sonrası eklendi - deploy'un gerçekten güncel
 # olup olmadığını KANITLA göstermek için).
-ARGE_KOD_SURUMU = "v41-nihai-kor-kiyasi-2026-08-19"
+ARGE_KOD_SURUMU = "v42-gosterge-cephaneligi-2026-08-19"
 import warnings
 from datetime import datetime, timezone
 
@@ -4618,6 +4618,295 @@ def tum_abd_gostergeleri_kor_kiyasi_calistir(max_hisse: int = 30) -> tuple:
 
 
 # =============================================================================
+# ÖRTÜŞME TESTİ + GENİŞ TREND/MOMENTUM TURNUVASI — 2026-08-19
+# =============================================================================
+# GEREKÇE: Kullanıcı ABD için tam bir "cephanelik" istiyor. Elimizdeki 4
+# güçlü sinyal (Bollinger, Stochastic, CCI, RSI21) hepsi AYNI AİLEDEN
+# (tersine dönüş/mean-reversion - aşırı uçta ters yöne bahis). Bu dosya
+# İKİ ŞEYİ BİRDEN yapıyor:
+# (1) ÖRTÜŞME: bu 4 güçlü sinyalden 2+'si aynı gün aynı yönde tetiklenirse
+#     ekstra avantaj var mı (daha önce ATR+Hacim'de yoktu, ama bunlar
+#     daha güçlü sinyaller, tekrar bakmaya değer).
+# (2) GENİŞ TREND/MOMENTUM TURNUVASI: eksik olan kategori - "hareket
+#     devam eder" mantığıyla çalışan, mean-reversion AİLESİNDEN OLMAYAN
+#     onlarca aday: EMA kesişimi, MACD kesişimi, Donchian kırılımı, ADX+DI
+#     yön, ROC sıfır kesişimi, RSI orta-hat (50) kesişimi, Parabolic SAR
+#     dönüşü, hacim-onaylı kırılım. Hepsi AYNI checkpoint çıkış sistemiyle
+#     ve AYNI kör temel çizgiyle (LONG %64.01/SHORT %59.01, önceki
+#     turdan) kıyaslanabilir.
+
+EMA_HIZLI, EMA_YAVAS = 9, 21
+MACD_HIZLI, MACD_YAVAS, MACD_SINYAL = 12, 26, 9
+DONCHIAN_KISA, DONCHIAN_UZUN = 20, 50
+ADX_PERIOD = 14
+ROC_PERIOD = 10
+PSAR_HIZLANMA, PSAR_MAX = 0.02, 0.2
+
+
+def _ema_hesapla(close, n):
+    return close.ewm(span=n, adjust=False).mean()
+
+
+def _macd_hesapla(close, hizli=12, yavas=26, sinyal=9):
+    macd_line = _ema_hesapla(close, hizli) - _ema_hesapla(close, yavas)
+    sinyal_line = _ema_hesapla(macd_line, sinyal)
+    return macd_line, sinyal_line
+
+
+def _adx_di_hesapla(high, low, close, n=14):
+    up_move = high.diff()
+    down_move = -low.diff()
+    plus_dm = pd.Series(np.where((up_move > down_move) & (up_move > 0), up_move, 0), index=high.index)
+    minus_dm = pd.Series(np.where((down_move > up_move) & (down_move > 0), down_move, 0), index=high.index)
+    tr = pd.concat([(high - low), (high - close.shift()).abs(), (low - close.shift()).abs()], axis=1).max(axis=1)
+    atr = tr.ewm(alpha=1 / n, adjust=False).mean()
+    plus_di = 100 * plus_dm.ewm(alpha=1 / n, adjust=False).mean() / atr.replace(0, np.nan)
+    minus_di = 100 * minus_dm.ewm(alpha=1 / n, adjust=False).mean() / atr.replace(0, np.nan)
+    dx = 100 * (plus_di - minus_di).abs() / (plus_di + minus_di).replace(0, np.nan)
+    adx = dx.ewm(alpha=1 / n, adjust=False).mean()
+    return adx, plus_di, minus_di
+
+
+def _psar_hesapla(high, low, close, hizlanma=0.02, maks=0.2):
+    """Basitleştirilmiş Parabolic SAR - trend yönü döner (True=yukarı)."""
+    n = len(close)
+    sar = close.copy() * 0
+    trend_yukari = pd.Series([True] * n, index=close.index)
+    if n < 2:
+        return sar, trend_yukari
+    sar.iloc[0] = low.iloc[0]
+    ep = high.iloc[0]
+    af = hizlanma
+    yukari = True
+    for i in range(1, n):
+        onceki_sar = sar.iloc[i - 1]
+        yeni_sar = onceki_sar + af * (ep - onceki_sar)
+        if yukari:
+            if low.iloc[i] < yeni_sar:
+                yukari = False
+                yeni_sar = ep
+                ep = low.iloc[i]
+                af = hizlanma
+            else:
+                if high.iloc[i] > ep:
+                    ep = high.iloc[i]
+                    af = min(af + hizlanma, maks)
+        else:
+            if high.iloc[i] > yeni_sar:
+                yukari = True
+                yeni_sar = ep
+                ep = high.iloc[i]
+                af = hizlanma
+            else:
+                if low.iloc[i] < ep:
+                    ep = low.iloc[i]
+                    af = min(af + hizlanma, maks)
+        sar.iloc[i] = yeni_sar
+        trend_yukari.iloc[i] = yukari
+    return sar, trend_yukari
+
+
+def gosterge_cephaneligi_calistir(max_hisse: int = 25) -> tuple:
+    """(1) 4 güçlü sinyalin (Bollinger/Stochastic/CCI/RSI21) örtüşmesini,
+    (2) 8 yeni trend/momentum adayını (EMA kesişimi, MACD kesişimi,
+    Donchian kırılımı x2, ADX+DI yön, ROC sıfır kesişimi, RSI50 kesişimi,
+    PSAR dönüşü, hacim-onaylı kırılım) TEK taramada test eder, hepsini
+    kör temel çizgiyle kıyaslar. Döner: (dosya_yolu, özet_dict) ya da
+    (None, hata_mesajı)."""
+    import yfinance as yf
+
+    hisseler = US_INSIDER_TICKERS[:max_hisse]
+    guclu_isimler = ["Bollinger dokunuşu", "Stochastic %K", "CCI", "RSI21 gün içi"]
+    yeni_isimler = ["EMA9/21 kesişimi", "MACD kesişimi", "Donchian-20 kırılımı",
+                     "Donchian-50 kırılımı", "ADX+DI yön", "ROC-10 sıfır kesişimi",
+                     "RSI orta-hat (50) kesişimi", "Parabolic SAR dönüşü",
+                     "Hacim-onaylı kırılım (10 bar)"]
+    tum_sonuclar = {isim: [] for isim in guclu_isimler + yeni_isimler}
+    tum_sonuclar["[ÖRTÜŞME] 2+ güçlü sinyal aynı yön"] = []
+    tum_sonuclar["[KÖR] Koşulsuz LONG"] = []
+    tum_sonuclar["[KÖR] Koşulsuz SHORT"] = []
+
+    for n_i, ticker in enumerate(hisseler, 1):
+        try:
+            print(f"[Gösterge Cephaneliği {n_i}/{len(hisseler)}] {ticker}...", flush=True)
+            gunluk = yf.Ticker(ticker).history(period="2y", interval="1d", timeout=20)
+            barlar_15dk = yf.Ticker(ticker).history(period="60d", interval="15m", timeout=20)
+            if gunluk is None or gunluk.empty or barlar_15dk is None or barlar_15dk.empty:
+                continue
+            gunluk = gunluk.rename(columns={"Close": "close", "High": "high", "Low": "low",
+                                             "Open": "open", "Volume": "volume"})
+            gunluk.index = pd.to_datetime(gunluk.index).tz_localize(None)
+            tarihler = gunluk.index
+            gunluk_pos = gunluk.reset_index(drop=True)
+
+            # KOR CIZGI (gunluk bazli, ayni checkpoint sistemi)
+            for idx in range(20, len(gunluk_pos) - 11):
+                tum_sonuclar["[KÖR] Koşulsuz LONG"].append(
+                    _kanit_us_checkpoint_sonuc(gunluk_pos, idx, "LONG"))
+                tum_sonuclar["[KÖR] Koşulsuz SHORT"].append(
+                    _kanit_us_checkpoint_sonuc(gunluk_pos, idx, "SHORT"))
+
+            barlar_15dk = barlar_15dk.reset_index().rename(columns={
+                "Datetime": "ts", "Open": "open", "High": "high", "Low": "low",
+                "Close": "close", "Volume": "volume"})
+            if "ts" not in barlar_15dk.columns:
+                barlar_15dk = barlar_15dk.rename(columns={barlar_15dk.columns[0]: "ts"})
+            barlar_15dk["ts"] = pd.to_datetime(barlar_15dk["ts"]).dt.tz_localize(None)
+            barlar_15dk["gun"] = barlar_15dk["ts"].dt.date
+
+            # --- GUCLU 4'lu (mean-reversion) ---
+            barlar_15dk["rsi21"] = _rsi_hesapla(barlar_15dk["close"], RSI21_PERIOD)
+            barlar_15dk["stoch"] = _stochastic_hesapla(barlar_15dk["high"], barlar_15dk["low"],
+                                                        barlar_15dk["close"], STOCH_PERIOD)
+            barlar_15dk["cci"] = _cci_hesapla(barlar_15dk["high"], barlar_15dk["low"],
+                                               barlar_15dk["close"], CCI_PERIOD)
+            alt_bant, ust_bant = _bollinger_hesapla(barlar_15dk["close"], BOLL_PERIOD, BOLL_STD)
+            barlar_15dk["boll_alt"], barlar_15dk["boll_ust"] = alt_bant, ust_bant
+
+            # --- YENI 8'li (trend/momentum) ---
+            barlar_15dk["ema_hizli"] = _ema_hesapla(barlar_15dk["close"], EMA_HIZLI)
+            barlar_15dk["ema_yavas"] = _ema_hesapla(barlar_15dk["close"], EMA_YAVAS)
+            macd_line, macd_sinyal = _macd_hesapla(barlar_15dk["close"], MACD_HIZLI, MACD_YAVAS, MACD_SINYAL)
+            barlar_15dk["macd_line"], barlar_15dk["macd_sinyal"] = macd_line, macd_sinyal
+            barlar_15dk["donchian_ust20"] = barlar_15dk["high"].rolling(DONCHIAN_KISA).max()
+            barlar_15dk["donchian_alt20"] = barlar_15dk["low"].rolling(DONCHIAN_KISA).min()
+            barlar_15dk["donchian_ust50"] = barlar_15dk["high"].rolling(DONCHIAN_UZUN).max()
+            barlar_15dk["donchian_alt50"] = barlar_15dk["low"].rolling(DONCHIAN_UZUN).min()
+            adx, plus_di, minus_di = _adx_di_hesapla(barlar_15dk["high"], barlar_15dk["low"],
+                                                      barlar_15dk["close"], ADX_PERIOD)
+            barlar_15dk["adx"], barlar_15dk["plus_di"], barlar_15dk["minus_di"] = adx, plus_di, minus_di
+            barlar_15dk["roc"] = barlar_15dk["close"].pct_change(ROC_PERIOD) * 100
+            barlar_15dk["rsi14_trend"] = _rsi_hesapla(barlar_15dk["close"], 14)
+            _, trend_yukari = _psar_hesapla(barlar_15dk["high"], barlar_15dk["low"],
+                                             barlar_15dk["close"], PSAR_HIZLANMA, PSAR_MAX)
+            barlar_15dk["psar_yukari"] = trend_yukari
+            barlar_15dk["hacim_ort10"] = barlar_15dk["volume"].rolling(10).mean()
+            barlar_15dk["bar_ust10"] = barlar_15dk["high"].rolling(10).max().shift(1)
+            barlar_15dk["bar_alt10"] = barlar_15dk["low"].rolling(10).min().shift(1)
+
+            tum_isimler = guclu_isimler + yeni_isimler
+            tetiklenen = {isim: set() for isim in tum_isimler}
+            baslangic_konum = max(RSI21_PERIOD, STOCH_PERIOD, CCI_PERIOD, BOLL_PERIOD,
+                                   EMA_YAVAS, MACD_YAVAS, DONCHIAN_UZUN, ADX_PERIOD, ROC_PERIOD) + 5
+
+            for konum in range(baslangic_konum, len(barlar_15dk)):
+                bar = barlar_15dk.iloc[konum]
+                onceki = barlar_15dk.iloc[konum - 1]
+                gun = bar["gun"]
+                adaylar = []
+                guclu_bugun = []  # (isim, yon) - orusme icin
+
+                # guclu 4'lu
+                if gun not in tetiklenen["Bollinger dokunuşu"] and pd.notna(bar["boll_alt"]):
+                    if bar["close"] <= bar["boll_alt"]:
+                        adaylar.append(("Bollinger dokunuşu", "LONG")); guclu_bugun.append(("Bollinger", "LONG"))
+                    elif bar["close"] >= bar["boll_ust"]:
+                        adaylar.append(("Bollinger dokunuşu", "SHORT")); guclu_bugun.append(("Bollinger", "SHORT"))
+                if gun not in tetiklenen["Stochastic %K"] and pd.notna(bar["stoch"]):
+                    if bar["stoch"] <= STOCH_OS:
+                        adaylar.append(("Stochastic %K", "LONG")); guclu_bugun.append(("Stochastic", "LONG"))
+                    elif bar["stoch"] >= STOCH_OB:
+                        adaylar.append(("Stochastic %K", "SHORT")); guclu_bugun.append(("Stochastic", "SHORT"))
+                if gun not in tetiklenen["CCI"] and pd.notna(bar["cci"]):
+                    if bar["cci"] <= -CCI_ESIK:
+                        adaylar.append(("CCI", "LONG")); guclu_bugun.append(("CCI", "LONG"))
+                    elif bar["cci"] >= CCI_ESIK:
+                        adaylar.append(("CCI", "SHORT")); guclu_bugun.append(("CCI", "SHORT"))
+                if gun not in tetiklenen["RSI21 gün içi"] and pd.notna(bar["rsi21"]):
+                    if bar["rsi21"] <= RSI21_OS:
+                        adaylar.append(("RSI21 gün içi", "LONG")); guclu_bugun.append(("RSI21", "LONG"))
+                    elif bar["rsi21"] >= RSI21_OB:
+                        adaylar.append(("RSI21 gün içi", "SHORT")); guclu_bugun.append(("RSI21", "SHORT"))
+
+                # yeni 8'li (trend/momentum - kesisim/kirilim TETIKLEME ANINDA)
+                if gun not in tetiklenen["EMA9/21 kesişimi"] and pd.notna(bar["ema_hizli"]) and pd.notna(onceki["ema_hizli"]):
+                    if onceki["ema_hizli"] <= onceki["ema_yavas"] and bar["ema_hizli"] > bar["ema_yavas"]:
+                        adaylar.append(("EMA9/21 kesişimi", "LONG"))
+                    elif onceki["ema_hizli"] >= onceki["ema_yavas"] and bar["ema_hizli"] < bar["ema_yavas"]:
+                        adaylar.append(("EMA9/21 kesişimi", "SHORT"))
+                if gun not in tetiklenen["MACD kesişimi"] and pd.notna(bar["macd_line"]) and pd.notna(onceki["macd_line"]):
+                    if onceki["macd_line"] <= onceki["macd_sinyal"] and bar["macd_line"] > bar["macd_sinyal"]:
+                        adaylar.append(("MACD kesişimi", "LONG"))
+                    elif onceki["macd_line"] >= onceki["macd_sinyal"] and bar["macd_line"] < bar["macd_sinyal"]:
+                        adaylar.append(("MACD kesişimi", "SHORT"))
+                if gun not in tetiklenen["Donchian-20 kırılımı"] and pd.notna(bar["donchian_ust20"]):
+                    if bar["close"] >= bar["donchian_ust20"]:
+                        adaylar.append(("Donchian-20 kırılımı", "LONG"))
+                    elif bar["close"] <= bar["donchian_alt20"]:
+                        adaylar.append(("Donchian-20 kırılımı", "SHORT"))
+                if gun not in tetiklenen["Donchian-50 kırılımı"] and pd.notna(bar["donchian_ust50"]):
+                    if bar["close"] >= bar["donchian_ust50"]:
+                        adaylar.append(("Donchian-50 kırılımı", "LONG"))
+                    elif bar["close"] <= bar["donchian_alt50"]:
+                        adaylar.append(("Donchian-50 kırılımı", "SHORT"))
+                if gun not in tetiklenen["ADX+DI yön"] and pd.notna(bar["adx"]) and bar["adx"] >= 25:
+                    if onceki["plus_di"] <= onceki["minus_di"] and bar["plus_di"] > bar["minus_di"]:
+                        adaylar.append(("ADX+DI yön", "LONG"))
+                    elif onceki["plus_di"] >= onceki["minus_di"] and bar["plus_di"] < bar["minus_di"]:
+                        adaylar.append(("ADX+DI yön", "SHORT"))
+                if gun not in tetiklenen["ROC-10 sıfır kesişimi"] and pd.notna(bar["roc"]) and pd.notna(onceki["roc"]):
+                    if onceki["roc"] <= 0 and bar["roc"] > 0:
+                        adaylar.append(("ROC-10 sıfır kesişimi", "LONG"))
+                    elif onceki["roc"] >= 0 and bar["roc"] < 0:
+                        adaylar.append(("ROC-10 sıfır kesişimi", "SHORT"))
+                if gun not in tetiklenen["RSI orta-hat (50) kesişimi"] and pd.notna(bar["rsi14_trend"]) and pd.notna(onceki["rsi14_trend"]):
+                    if onceki["rsi14_trend"] <= 50 and bar["rsi14_trend"] > 50:
+                        adaylar.append(("RSI orta-hat (50) kesişimi", "LONG"))
+                    elif onceki["rsi14_trend"] >= 50 and bar["rsi14_trend"] < 50:
+                        adaylar.append(("RSI orta-hat (50) kesişimi", "SHORT"))
+                if gun not in tetiklenen["Parabolic SAR dönüşü"] and pd.notna(bar["psar_yukari"]):
+                    if bar["psar_yukari"] and not onceki["psar_yukari"]:
+                        adaylar.append(("Parabolic SAR dönüşü", "LONG"))
+                    elif not bar["psar_yukari"] and onceki["psar_yukari"]:
+                        adaylar.append(("Parabolic SAR dönüşü", "SHORT"))
+                if gun not in tetiklenen["Hacim-onaylı kırılım (10 bar)"] and pd.notna(bar["bar_ust10"]) and pd.notna(bar["hacim_ort10"]):
+                    hacim_yuksek = bar["volume"] >= 1.5 * bar["hacim_ort10"]
+                    if hacim_yuksek and bar["close"] > bar["bar_ust10"]:
+                        adaylar.append(("Hacim-onaylı kırılım (10 bar)", "LONG"))
+                    elif hacim_yuksek and bar["close"] < bar["bar_alt10"]:
+                        adaylar.append(("Hacim-onaylı kırılım (10 bar)", "SHORT"))
+
+                for isim, yon in adaylar:
+                    tetiklenen[isim].add(gun)
+                    gun_ts = pd.Timestamp(gun)
+                    gunluk_idx = tarihler.get_indexer([gun_ts], method="nearest")[0]
+                    if gunluk_idx < 0:
+                        continue
+                    if abs((tarihler[gunluk_idx].date() - gun).days) > 3:
+                        continue
+                    tum_sonuclar[isim].append(_kanit_us_checkpoint_sonuc(gunluk_pos, gunluk_idx, yon))
+
+                # ORTUSME: bugun ates eden guclu sinyaller arasinda 2+ ayni yonde mi
+                if len(guclu_bugun) >= 2:
+                    yonler = [y for _, y in guclu_bugun]
+                    if yonler.count("LONG") >= 2 or yonler.count("SHORT") >= 2:
+                        ortusme_yon = "LONG" if yonler.count("LONG") >= 2 else "SHORT"
+                        gun_ts = pd.Timestamp(gun)
+                        gunluk_idx = tarihler.get_indexer([gun_ts], method="nearest")[0]
+                        if gunluk_idx >= 0 and abs((tarihler[gunluk_idx].date() - gun).days) <= 3:
+                            tum_sonuclar["[ÖRTÜŞME] 2+ güçlü sinyal aynı yön"].append(
+                                _kanit_us_checkpoint_sonuc(gunluk_pos, gunluk_idx, ortusme_yon))
+        except Exception as e:
+            print(f"[Gösterge Cephaneliği] {ticker} hata: {e}", flush=True)
+        time.sleep(0.5)
+
+    satirlar = _kanit_ozet_tablosu(tum_sonuclar)
+    if not satirlar:
+        return None, "Hiçbir strateji için yeterli veri üretilemedi."
+
+    kor_long = next((s["kazanma_orani_pct"] for s in satirlar if s["strateji"] == "[KÖR] Koşulsuz LONG"), None)
+    kor_long_r = next((s["ort_R"] for s in satirlar if s["strateji"] == "[KÖR] Koşulsuz LONG"), None)
+    for s in satirlar:
+        s["kor_isabet_farki"] = round(s["kazanma_orani_pct"] - kor_long, 2) if kor_long is not None and s["kazanma_orani_pct"] is not None else None
+        s["kor_R_farki"] = round(s["ort_R"] - kor_long_r, 4) if kor_long_r is not None and s["ort_R"] is not None else None
+
+    tablo = pd.DataFrame(satirlar).sort_values("kor_R_farki", ascending=False)
+    dosya_yolu = _data_path("gosterge_cephaneligi.csv")
+    tablo.to_csv(dosya_yolu, index=False, encoding="utf-8-sig")
+    return dosya_yolu, {"satirlar": satirlar}
+
+
+# =============================================================================
 # EKŞİ SÖZLÜK BAĞLANTI TESTİ — 2026-08-19
 # =============================================================================
 # GEREKÇE: Ekşi Sözlük'ün resmi bir API'si yok - sadece web sayfası
@@ -4729,6 +5018,9 @@ def send_startup_message():
         "/nihai_kor_kiyasi — 7 ABD stratejisinin (ATR, Hacim, RSI21, "
         "Stochastic, CCI, MFI, Bollinger) HEPSİNİ tek taramada kör temel "
         "çizgiye karşı kıyaslar, gerçek edge'i (kör'den fark) gösterir\n"
+        "/gosterge_cephaneligi — 4 güçlü sinyalin örtüşmesi + 8 yeni "
+        "trend/momentum adayı (EMA/MACD kesişimi, Donchian, ADX+DI, ROC, "
+        "RSI50, PSAR, hacim-onaylı kırılım), kör çizgiyle birlikte\n"
         "/wiki_dogrulama — /wiki_testi'nin bulgusunu (yüksek izlenme -> "
         "LONG) izole, gerçek R:R çıkışıyla yeniden doğrular\n"
         "/eksisozluk_test [BAŞLIK] — Ekşi Sözlük'ten veri çekilebiliyor "
@@ -5575,6 +5867,36 @@ def poll_arge_commands():
                 except Exception as e:
                     send_telegram_message(f"⚖️ Nihai kör kıyas hatası: {e}")
             threading.Thread(target=_arka_plan_nihai_kor, daemon=True).start()
+        elif text.startswith("/gosterge_cephaneligi"):
+            send_telegram_message(
+                f"🏹 GÖSTERGE CEPHANELİĞİ başlıyor: (1) 4 güçlü sinyalin "
+                f"(Bollinger/Stochastic/CCI/RSI21) örtüşmesini, (2) 8 yeni "
+                f"trend/momentum adayını (EMA/MACD kesişimi, Donchian "
+                f"kırılımı x2, ADX+DI, ROC, RSI50, PSAR, hacim-onaylı "
+                f"kırılım) kör temel çizgiyle birlikte TEK taramada test "
+                f"ediyor. Bu ÇOK UZUN sürecek (13 strateji + kör çizgi, "
+                f"muhtemelen 30-40+ dakika). ARKA PLANDA çalışıyor, bitince "
+                f"CSV + özet göndereceğim."
+            )
+
+            def _arka_plan_cephanelik():
+                try:
+                    dosya_yolu, ozet = gosterge_cephaneligi_calistir()
+                    if dosya_yolu is None:
+                        send_telegram_message(f"🏹 Gösterge cephaneliği başarısız: {ozet}")
+                        return
+                    satirlar = ["🏹 Gösterge Cephaneliği Sonucu (R farkına göre sıralı)\n"]
+                    for s in ozet["satirlar"]:
+                        fark_str = f", kör R farkı: {s['kor_R_farki']:+.4f}" \
+                            if s.get("kor_R_farki") is not None else ""
+                        satirlar.append(
+                            f"{s['strateji']}: n={s['toplam_sinyal']}, "
+                            f"%{s['kazanma_orani_pct']} isabet, ort R={s['ort_R']}{fark_str}"
+                        )
+                    send_telegram_document(dosya_yolu, caption="\n".join(satirlar))
+                except Exception as e:
+                    send_telegram_message(f"🏹 Gösterge cephaneliği hatası: {e}")
+            threading.Thread(target=_arka_plan_cephanelik, daemon=True).start()
         elif text.startswith("/ai_model_backtest"):
             send_telegram_message(
                 f"🤖 GERÇEK AI MODEL BACKTEST başlıyor: model.pkl ve "
