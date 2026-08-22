@@ -49,7 +49,7 @@ import threading
 # mesajlarında görünür kılmak için (2026-08-17: 3 kez üst üste "aynı
 # sonuç geldi" şüphesi sonrası eklendi - deploy'un gerçekten güncel
 # olup olmadığını KANITLA göstermek için).
-ARGE_KOD_SURUMU = "v36-rsi21-high-low-kolon-duzeltmesi-2026-08-19"
+ARGE_KOD_SURUMU = "v37-rsi21-bist-testi-2026-08-19"
 import warnings
 from datetime import datetime, timezone
 
@@ -4237,6 +4237,88 @@ def rsi21_hedef_kiyasi_testi_calistir(max_hisse: int = 30) -> tuple:
 
 
 # =============================================================================
+# RSI21 GÜN İÇİ — BIST'TE TEST — 2026-08-19
+# =============================================================================
+# GEREKÇE: ABD'de RSI21 (büyük hedefle) gerçek bir kenar gösterdi
+# (%70.04, ort_R=+0.73) - bunu BIST'te hiç denemedik. Aynı giriş
+# mantığı (RSI21≤25/≥75, 15dk bar, günde ilk tetiklenme), ama BIST'in
+# GERÇEK çıkış mantığıyla (1.5R kısmi TP + breakeven + ATR trailing -
+# _kanit_bist_rr_sonuc, kanit_dogrulama'da doğrulanan aynı mekanik).
+# DÜRÜST NOT: ABD'de böyle bir canlı sistem zaten vardı (küçük
+# hedeflerle) - BIST'te böyle bir canlı sistem hiç yok, o yüzden burada
+# "küçük vs büyük" kıyası değil, doğrudan "işe yarıyor mu" testi.
+
+def rsi21_bist_testi_calistir(max_hisse: int = 29) -> tuple:
+    """RSI21 gün içi (15dk) sinyalini BIST hisselerinde, BIST'in gerçek
+    çıkış mantığıyla test eder. Döner: (dosya_yolu, özet_dict) ya da
+    (None, hata_mesajı)."""
+    import yfinance as yf
+
+    hisseler = BIST_TICKERS[:max_hisse]
+    tum_sonuclar = {"[BIST] RSI21 gün içi (gerçek çıkış)": []}
+
+    for n_i, ticker in enumerate(hisseler, 1):
+        try:
+            print(f"[RSI21 BIST {n_i}/{len(hisseler)}] {ticker}...", flush=True)
+            raw = yf.Ticker(ticker).history(period="2y", interval="1d", timeout=20)
+            barlar_15dk = yf.Ticker(ticker).history(period="60d", interval="15m", timeout=20)
+            if raw is None or raw.empty or barlar_15dk is None or barlar_15dk.empty:
+                continue
+            raw = raw.rename(columns={"Open": "open", "High": "high", "Low": "low",
+                                       "Close": "close", "Volume": "volume"})
+            raw = raw[["open", "high", "low", "close", "volume"]].copy()
+            raw.index = pd.to_datetime(raw.index).tz_localize(None)
+            tarihler = raw.index
+            gunluk = raw.reset_index(drop=True)
+            gunluk = _kanit_compute_indicators(gunluk)
+
+            barlar_15dk = barlar_15dk.reset_index().rename(columns={
+                "Datetime": "ts", "Open": "open", "High": "high", "Low": "low",
+                "Close": "close", "Volume": "volume"})
+            if "ts" not in barlar_15dk.columns:
+                barlar_15dk = barlar_15dk.rename(columns={barlar_15dk.columns[0]: "ts"})
+            barlar_15dk["ts"] = pd.to_datetime(barlar_15dk["ts"]).dt.tz_localize(None)
+            barlar_15dk["gun"] = barlar_15dk["ts"].dt.date
+            barlar_15dk["rsi21"] = _rsi_hesapla(barlar_15dk["close"], RSI21_PERIOD)
+
+            tetiklenen_gunler = set()
+            for konum in range(RSI21_PERIOD + 5, len(barlar_15dk)):
+                bar = barlar_15dk.iloc[konum]
+                gun = bar["gun"]
+                if gun in tetiklenen_gunler:
+                    continue
+                rsi = bar["rsi21"]
+                if pd.isna(rsi):
+                    continue
+                yon = "LONG" if rsi <= RSI21_OS else ("SHORT" if rsi >= RSI21_OB else None)
+                if yon is None:
+                    continue
+                tetiklenen_gunler.add(gun)
+
+                gun_ts = pd.Timestamp(gun)
+                gunluk_idx = tarihler.get_indexer([gun_ts], method="nearest")[0]
+                if gunluk_idx < 0:
+                    continue
+                fark_gun = abs((tarihler[gunluk_idx].date() - gun).days)
+                if fark_gun > 3:
+                    continue
+                sonuc = _kanit_bist_rr_sonuc(gunluk, gunluk_idx, yon)
+                if sonuc is not None:
+                    tum_sonuclar["[BIST] RSI21 gün içi (gerçek çıkış)"].append(sonuc)
+        except Exception as e:
+            print(f"[RSI21 BIST] {ticker} hata: {e}", flush=True)
+        time.sleep(0.5)
+
+    satirlar = _kanit_ozet_tablosu(tum_sonuclar)
+    if not satirlar:
+        return None, "Hiçbir grup için yeterli veri üretilemedi."
+    tablo = pd.DataFrame(satirlar)
+    dosya_yolu = _data_path("rsi21_bist_testi.csv")
+    tablo.to_csv(dosya_yolu, index=False, encoding="utf-8-sig")
+    return dosya_yolu, {"satirlar": satirlar}
+
+
+# =============================================================================
 # EKŞİ SÖZLÜK BAĞLANTI TESTİ — 2026-08-19
 # =============================================================================
 # GEREKÇE: Ekşi Sözlük'ün resmi bir API'si yok - sadece web sayfası
@@ -4341,6 +4423,8 @@ def send_startup_message():
         "/rsi21_hedef_kiyasi — RSI21 gün içi sinyalini canlının küçük "
         "hedefleriyle (%0.15-0.90) ve gerçekten anlamlı büyük hedeflerle "
         "(%1-5) karşılaştırır\n"
+        "/rsi21_bist_testi — RSI21 gün içi sinyalini BIST hisselerinde, "
+        "BIST'in gerçek çıkış mantığıyla (1.5R kısmi TP + trailing) test eder\n"
         "/wiki_dogrulama — /wiki_testi'nin bulgusunu (yüksek izlenme -> "
         "LONG) izole, gerçek R:R çıkışıyla yeniden doğrular\n"
         "/eksisozluk_test [BAŞLIK] — Ekşi Sözlük'ten veri çekilebiliyor "
@@ -5102,6 +5186,32 @@ def poll_arge_commands():
                 except Exception as e:
                     send_telegram_message(f"🎯 RSI21 hedef kıyası hatası: {e}")
             threading.Thread(target=_arka_plan_rsi21_kiyas, daemon=True).start()
+        elif text.startswith("/rsi21_bist_testi"):
+            send_telegram_message(
+                f"🎯 RSI21 BIST TESTİ başlıyor: aynı gün-içi RSI21 sinyalini "
+                f"(≤25/≥75) BIST hisselerinde, BIST'in gerçek çıkış "
+                f"mantığıyla (1.5R kısmi TP + trailing) test ediyor. ARKA "
+                f"PLANDA çalışıyor, bitince CSV + özet göndereceğim."
+            )
+
+            def _arka_plan_rsi21_bist():
+                try:
+                    dosya_yolu, ozet = rsi21_bist_testi_calistir()
+                    if dosya_yolu is None:
+                        send_telegram_message(f"🎯 RSI21 BIST testi başarısız: {ozet}")
+                        return
+                    satirlar = ["🎯 RSI21 BIST Testi Sonucu\n"]
+                    for s in ozet["satirlar"]:
+                        p_str = f", p={s['binom_p']}" if s["binom_p"] is not None else ""
+                        satirlar.append(
+                            f"{s['strateji']}: {s['toplam_sinyal']} sinyal "
+                            f"({s['win']}W/{s['loss']}L/{s['timeout']}T), "
+                            f"%{s['kazanma_orani_pct']} isabet{p_str}, ort R={s['ort_R']}"
+                        )
+                    send_telegram_document(dosya_yolu, caption="\n".join(satirlar))
+                except Exception as e:
+                    send_telegram_message(f"🎯 RSI21 BIST testi hatası: {e}")
+            threading.Thread(target=_arka_plan_rsi21_bist, daemon=True).start()
         elif text.startswith("/ai_model_backtest"):
             send_telegram_message(
                 f"🤖 GERÇEK AI MODEL BACKTEST başlıyor: model.pkl ve "
