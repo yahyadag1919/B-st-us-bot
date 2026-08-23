@@ -49,7 +49,7 @@ import threading
 # mesajlarında görünür kılmak için (2026-08-17: 3 kez üst üste "aynı
 # sonuç geldi" şüphesi sonrası eklendi - deploy'un gerçekten güncel
 # olup olmadığını KANITLA göstermek için).
-ARGE_KOD_SURUMU = "v43-cephanelik-5-yeni-gosterge-2026-08-19"
+ARGE_KOD_SURUMU = "v44-cephanelik-nihai-suzme-2026-08-19"
 import warnings
 from datetime import datetime, timezone
 
@@ -4739,23 +4739,63 @@ def _awesome_oscillator_hesapla(high, low, kisa=5, uzun=34):
     return medyan.rolling(kisa).mean() - medyan.rolling(uzun).mean()
 
 
-def gosterge_cephaneligi_calistir(max_hisse: int = 25) -> tuple:
+ICHIMOKU_TENKAN, ICHIMOKU_KIJUN = 9, 26
+CHAIKIN_KISA, CHAIKIN_UZUN = 3, 10
+STOCH_RSI_PERIOD, STOCH_RSI_OS, STOCH_RSI_OB = 14, 20, 80
+VORTEX_PERIOD = 14
+
+
+def _ichimoku_tenkan_kijun_hesapla(high, low, tenkan_n=9, kijun_n=26):
+    tenkan = (high.rolling(tenkan_n).max() + low.rolling(tenkan_n).min()) / 2
+    kijun = (high.rolling(kijun_n).max() + low.rolling(kijun_n).min()) / 2
+    return tenkan, kijun
+
+
+def _chaikin_osilator_hesapla(high, low, close, volume, kisa=3, uzun=10):
+    rng = (high - low).replace(0, np.nan)
+    mfm = ((close - low) - (high - close)) / rng
+    mfv = mfm * volume
+    adl = mfv.fillna(0).cumsum()
+    return _ema_hesapla(adl, kisa) - _ema_hesapla(adl, uzun)
+
+
+def _stochastic_rsi_hesapla(close, n=14):
+    rsi = _rsi_hesapla(close, n)
+    en_dusuk = rsi.rolling(n).min()
+    en_yuksek = rsi.rolling(n).max()
+    return 100 * (rsi - en_dusuk) / (en_yuksek - en_dusuk).replace(0, np.nan)
+
+
+def _vortex_hesapla(high, low, close, n=14):
+    vm_plus = (high - low.shift()).abs()
+    vm_minus = (low - high.shift()).abs()
+    tr = pd.concat([(high - low), (high - close.shift()).abs(), (low - close.shift()).abs()], axis=1).max(axis=1)
+    vi_plus = vm_plus.rolling(n).sum() / tr.rolling(n).sum().replace(0, np.nan)
+    vi_minus = vm_minus.rolling(n).sum() / tr.rolling(n).sum().replace(0, np.nan)
+    return vi_plus, vi_minus
+
+
+def gosterge_cephaneligi_calistir(max_hisse: int = 60) -> tuple:
     """(1) 4 güçlü sinyalin (Bollinger/Stochastic/CCI/RSI21) örtüşmesini,
-    (2) 8 yeni trend/momentum adayını (EMA kesişimi, MACD kesişimi,
-    Donchian kırılımı x2, ADX+DI yön, ROC sıfır kesişimi, RSI50 kesişimi,
-    PSAR dönüşü, hacim-onaylı kırılım) TEK taramada test eder, hepsini
-    kör temel çizgiyle kıyaslar. Döner: (dosya_yolu, özet_dict) ya da
-    (None, hata_mesajı)."""
+    (2) trend/momentum + yeni adayları TEK taramada test eder, hepsini
+    kör temel çizgiyle kıyaslar. 2026-08-19: Williams %R çıkarıldı
+    (Stochastic %K ile birebir aynı sonucu veriyordu - gereksiz), MFI
+    geri eklendi, 4 yeni aday eklendi (Ichimoku, Chaikin, Stochastic RSI,
+    Vortex), varsayılan hisse sayısı büyütüldü (Donchian'ın küçük
+    örneklemini daha güvenilir doğrulamak için). Döner: (dosya_yolu,
+    özet_dict) ya da (None, hata_mesajı)."""
     import yfinance as yf
 
     hisseler = US_INSIDER_TICKERS[:max_hisse]
-    guclu_isimler = ["Bollinger dokunuşu", "Stochastic %K", "CCI", "RSI21 gün içi"]
+    guclu_isimler = ["Bollinger dokunuşu", "Stochastic %K", "CCI", "RSI21 gün içi", "MFI"]
     yeni_isimler = ["EMA9/21 kesişimi", "MACD kesişimi", "Donchian-20 kırılımı",
                      "Donchian-50 kırılımı", "ADX+DI yön", "ROC-10 sıfır kesişimi",
                      "RSI orta-hat (50) kesişimi", "Parabolic SAR dönüşü",
                      "Hacim-onaylı kırılım (10 bar)", "Keltner Kanalı kırılımı",
-                     "Williams %R", "VWAP sapması", "Üçlü EMA hizalanması",
-                     "Awesome Oscillator sıfır kesişimi"]
+                     "VWAP sapması", "Üçlü EMA hizalanması",
+                     "Awesome Oscillator sıfır kesişimi", "Ichimoku Tenkan/Kijun kesişimi",
+                     "Chaikin Osilatörü sıfır kesişimi", "Stochastic RSI",
+                     "Vortex Göstergesi kesişimi"]
     tum_sonuclar = {isim: [] for isim in guclu_isimler + yeni_isimler}
     tum_sonuclar["[ÖRTÜŞME] 2+ güçlü sinyal aynı yön"] = []
     tum_sonuclar["[KÖR] Koşulsuz LONG"] = []
@@ -4823,8 +4863,8 @@ def gosterge_cephaneligi_calistir(max_hisse: int = 25) -> tuple:
                                                           barlar_15dk["close"], KELTNER_EMA_PERIOD,
                                                           KELTNER_ATR_PERIOD, KELTNER_MULT)
             barlar_15dk["keltner_alt"], barlar_15dk["keltner_ust"] = keltner_alt, keltner_ust
-            barlar_15dk["williams_r"] = _williams_r_hesapla(barlar_15dk["high"], barlar_15dk["low"],
-                                                             barlar_15dk["close"], WILLIAMS_R_PERIOD)
+            barlar_15dk["mfi"] = _mfi_hesapla(barlar_15dk["high"], barlar_15dk["low"],
+                                               barlar_15dk["close"], barlar_15dk["volume"], MFI_PERIOD)
             barlar_15dk["vwap"] = _vwap_gun_ici_hesapla(barlar_15dk["high"], barlar_15dk["low"],
                                                          barlar_15dk["close"], barlar_15dk["volume"],
                                                          barlar_15dk["gun"])
@@ -4834,12 +4874,23 @@ def gosterge_cephaneligi_calistir(max_hisse: int = 25) -> tuple:
             barlar_15dk["ema_uzun3"] = _ema_hesapla(barlar_15dk["close"], EMA_UCLU_UZUN)
             barlar_15dk["ao"] = _awesome_oscillator_hesapla(barlar_15dk["high"], barlar_15dk["low"],
                                                              AO_KISA, AO_UZUN)
+            tenkan, kijun = _ichimoku_tenkan_kijun_hesapla(barlar_15dk["high"], barlar_15dk["low"],
+                                                            ICHIMOKU_TENKAN, ICHIMOKU_KIJUN)
+            barlar_15dk["tenkan"], barlar_15dk["kijun"] = tenkan, kijun
+            barlar_15dk["chaikin_osc"] = _chaikin_osilator_hesapla(
+                barlar_15dk["high"], barlar_15dk["low"], barlar_15dk["close"],
+                barlar_15dk["volume"], CHAIKIN_KISA, CHAIKIN_UZUN)
+            barlar_15dk["stoch_rsi"] = _stochastic_rsi_hesapla(barlar_15dk["close"], STOCH_RSI_PERIOD)
+            vi_plus, vi_minus = _vortex_hesapla(barlar_15dk["high"], barlar_15dk["low"],
+                                                 barlar_15dk["close"], VORTEX_PERIOD)
+            barlar_15dk["vi_plus"], barlar_15dk["vi_minus"] = vi_plus, vi_minus
 
             tum_isimler = guclu_isimler + yeni_isimler
             tetiklenen = {isim: set() for isim in tum_isimler}
             baslangic_konum = max(RSI21_PERIOD, STOCH_PERIOD, CCI_PERIOD, BOLL_PERIOD,
                                    EMA_YAVAS, MACD_YAVAS, DONCHIAN_UZUN, ADX_PERIOD, ROC_PERIOD,
-                                   KELTNER_EMA_PERIOD, WILLIAMS_R_PERIOD, EMA_UCLU_UZUN, AO_UZUN) + 5
+                                   KELTNER_EMA_PERIOD, MFI_PERIOD, EMA_UCLU_UZUN, AO_UZUN,
+                                   ICHIMOKU_KIJUN, CHAIKIN_UZUN, STOCH_RSI_PERIOD * 2, VORTEX_PERIOD) + 5
 
             for konum in range(baslangic_konum, len(barlar_15dk)):
                 bar = barlar_15dk.iloc[konum]
@@ -4922,11 +4973,11 @@ def gosterge_cephaneligi_calistir(max_hisse: int = 25) -> tuple:
                         adaylar.append(("Keltner Kanalı kırılımı", "LONG"))
                     elif bar["close"] <= bar["keltner_alt"]:
                         adaylar.append(("Keltner Kanalı kırılımı", "SHORT"))
-                if gun not in tetiklenen["Williams %R"] and pd.notna(bar["williams_r"]):
-                    if bar["williams_r"] <= WILLIAMS_OS:
-                        adaylar.append(("Williams %R", "LONG"))
-                    elif bar["williams_r"] >= WILLIAMS_OB:
-                        adaylar.append(("Williams %R", "SHORT"))
+                if gun not in tetiklenen["MFI"] and pd.notna(bar["mfi"]):
+                    if bar["mfi"] <= MFI_OS:
+                        adaylar.append(("MFI", "LONG"))
+                    elif bar["mfi"] >= MFI_OB:
+                        adaylar.append(("MFI", "SHORT"))
                 if gun not in tetiklenen["VWAP sapması"] and pd.notna(bar["vwap_sapma_pct"]):
                     if bar["vwap_sapma_pct"] <= -1.0:
                         adaylar.append(("VWAP sapması", "LONG"))
@@ -4946,6 +4997,26 @@ def gosterge_cephaneligi_calistir(max_hisse: int = 25) -> tuple:
                         adaylar.append(("Awesome Oscillator sıfır kesişimi", "LONG"))
                     elif onceki["ao"] >= 0 and bar["ao"] < 0:
                         adaylar.append(("Awesome Oscillator sıfır kesişimi", "SHORT"))
+                if gun not in tetiklenen["Ichimoku Tenkan/Kijun kesişimi"] and pd.notna(bar["tenkan"]) and pd.notna(onceki["tenkan"]):
+                    if onceki["tenkan"] <= onceki["kijun"] and bar["tenkan"] > bar["kijun"]:
+                        adaylar.append(("Ichimoku Tenkan/Kijun kesişimi", "LONG"))
+                    elif onceki["tenkan"] >= onceki["kijun"] and bar["tenkan"] < bar["kijun"]:
+                        adaylar.append(("Ichimoku Tenkan/Kijun kesişimi", "SHORT"))
+                if gun not in tetiklenen["Chaikin Osilatörü sıfır kesişimi"] and pd.notna(bar["chaikin_osc"]) and pd.notna(onceki["chaikin_osc"]):
+                    if onceki["chaikin_osc"] <= 0 and bar["chaikin_osc"] > 0:
+                        adaylar.append(("Chaikin Osilatörü sıfır kesişimi", "LONG"))
+                    elif onceki["chaikin_osc"] >= 0 and bar["chaikin_osc"] < 0:
+                        adaylar.append(("Chaikin Osilatörü sıfır kesişimi", "SHORT"))
+                if gun not in tetiklenen["Stochastic RSI"] and pd.notna(bar["stoch_rsi"]):
+                    if bar["stoch_rsi"] <= STOCH_RSI_OS:
+                        adaylar.append(("Stochastic RSI", "LONG"))
+                    elif bar["stoch_rsi"] >= STOCH_RSI_OB:
+                        adaylar.append(("Stochastic RSI", "SHORT"))
+                if gun not in tetiklenen["Vortex Göstergesi kesişimi"] and pd.notna(bar["vi_plus"]) and pd.notna(onceki["vi_plus"]):
+                    if onceki["vi_plus"] <= onceki["vi_minus"] and bar["vi_plus"] > bar["vi_minus"]:
+                        adaylar.append(("Vortex Göstergesi kesişimi", "LONG"))
+                    elif onceki["vi_plus"] >= onceki["vi_minus"] and bar["vi_plus"] < bar["vi_minus"]:
+                        adaylar.append(("Vortex Göstergesi kesişimi", "SHORT"))
 
                 for isim, yon in adaylar:
                     tetiklenen[isim].add(gun)
@@ -5952,16 +6023,20 @@ def poll_arge_commands():
             threading.Thread(target=_arka_plan_nihai_kor, daemon=True).start()
         elif text.startswith("/gosterge_cephaneligi"):
             parcalar = text.split()
-            hisse_sayisi = int(parcalar[1]) if len(parcalar) > 1 else 25
+            hisse_sayisi = int(parcalar[1]) if len(parcalar) > 1 else 60
             send_telegram_message(
-                f"🏹 GÖSTERGE CEPHANELİĞİ başlıyor ({hisse_sayisi} hisse): (1) 4 "
-                f"güçlü sinyalin örtüşmesini, (2) 13 trend/momentum adayını "
-                f"(EMA/MACD kesişimi, Donchian x2, ADX+DI, ROC, RSI50, PSAR, "
-                f"hacim-onaylı kırılım, Keltner, Williams %R, VWAP sapması, "
-                f"Üçlü EMA, Awesome Oscillator) kör temel çizgiyle birlikte "
-                f"TEK taramada test ediyor. Bu ÇOK UZUN sürecek (18 strateji "
-                f"+ kör çizgi), hisse sayısına göre değişir. ARKA PLANDA "
-                f"çalışıyor, bitince CSV + özet göndereceğim."
+                f"🏹 GÖSTERGE CEPHANELİĞİ başlıyor ({hisse_sayisi} hisse - "
+                f"Donchian'ı büyük örneklemde doğrulamak için varsayılan "
+                f"60'a çıkarıldı): (1) 4 güçlü sinyalin örtüşmesini, (2) 21 "
+                f"trend/momentum adayını (EMA/MACD kesişimi, Donchian x2, "
+                f"ADX+DI, ROC, RSI50, PSAR, hacim-onaylı kırılım, Keltner, "
+                f"MFI, VWAP sapması, Üçlü EMA, Awesome Oscillator, Ichimoku, "
+                f"Chaikin, Stochastic RSI, Vortex - Williams %R çıkarıldı, "
+                f"Stochastic'le birebir aynıydı) kör temel çizgiyle birlikte "
+                f"TEK taramada test ediyor. Bu ÇOK UZUN sürecek (21 strateji "
+                f"+ kör çizgi, {hisse_sayisi} hisseyle muhtemelen 45-60+ "
+                f"dakika). ARKA PLANDA çalışıyor, bitince CSV + özet "
+                f"göndereceğim."
             )
 
             def _arka_plan_cephanelik(hs):
