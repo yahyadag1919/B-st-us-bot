@@ -1,40 +1,14 @@
-# Render ücretsiz Web Service — bağımlılıklar (2026-08-19)
-# ccxt KALDIRILDI: yalnızca kripto botu kullanıyordu, o da sistemden çıkarıldı.
+# us_sinyal_botu.py — TEMİZ, MİNİMAL BAĞIMLILIKLAR (2026-08-19)
+# Eski projenin AI/ML kütüphaneleri (xgboost, scikit-learn, joblib),
+# KAP/pykap, Google Trends/pytrends bağımlılıkları TAMAMEN KALDIRILDI -
+# yeni sistem bunların hiçbirini kullanmıyor.
 
 flask>=3.0                # /health endpoint'i (Render'ın PORT'u dinlemesi için)
-requests>=2.32            # Telegram API + futbol botunun HTTP çağrıları
+requests>=2.32             # Telegram API çağrıları
 
-# DERS (2026-08-04): eskiden yfinance==0.2.44 sabitliydi ve Render'dan HİÇ veri
-# gelmiyordu (BIST/ABD listeleri komple boş dönüyordu). Sebep: Yahoo korumasını
-# sıkılaştırdı; 0.2.5x'ten itibaren yfinance curl_cffi ile tarayıcı TLS
-# parmak izini taklit ederek bunu aşıyor. Eski sürüm düz requests kullandığı
-# için veri merkezi IP'lerinden engelleniyordu. Sürümü sabitlemek yerine
-# alt sınır veriyoruz ki Yahoo bir daha değiştirdiğinde yeniden deploy
-# etmek düzeltmeyi getirsin.
-yfinance>=0.2.65          # BIST/ABD hisse verisi (curl_cffi ile gelir)
+# yfinance>=0.2.65 gerekli - eski sürümler Yahoo'nun TLS korumasını
+# aşamıyor (curl_cffi kullanan yeni sürümler gerekli)
+yfinance>=0.2.65
 
-pandas>=2.2               # veri işleme
-numpy>=1.26               # gösterge hesapları
-scipy>=1.11                # arge_botu.py'de binom anlamlılık testi (kanit_dogrulama vb.) için - 2026-08-18
-
-# AI Radar (2026-08-10) — model.pkl'yi yükleyip skor üretmek için
-xgboost>=2.0.0             # model.pkl'nin eğitildiği algoritma
-scikit-learn>=1.3.0        # train/test ayrımı, doğruluk metrikleri
-joblib>=1.3.0              # model.pkl'yi diskten yüklemek için
-
-# Ar-Ge Botu (2026-08-15) — Gemini API'ye hipotez sormak için resmi SDK.
-# Ham REST istegi (?key=... veya header) Google'in yeni "AQ." formatli
-# anahtarlariyla calismiyordu (Google'in kendi bilinen, cozulmemis sorunu) -
-# resmi SDK kimlik dogrulamayi kendi icinde farkli ele alabiliyor.
-google-genai>=0.3.0
-
-# BIST içeriden işlem (KAP "Pay Alım Satım Bildirimi") testi (2026-08-19) —
-# DÜRÜST NOT: bu kütüphane en son Aralık 2022'de güncellenmiş, KAP'ın arka
-# planı o zamandan beri değişmiş olabilir. /pykap_test komutu bunu doğrular.
-pykap
-
-# Perakende yatırımcı ilgisi (Google Trends) testi (2026-08-19) — resmi
-# olmayan/ters mühendislik API, Google zaman zaman hız sınırlıyor - bu da
-# yfinance'te yaşadığımız sorunun bir benzeri, /trend_testi komutu
-# çalışmazsa bu kütüphanenin engellenmiş olması muhtemel sebep.
-pytrends>=4.9
+pandas>=2.2
+numpy>=1.26
