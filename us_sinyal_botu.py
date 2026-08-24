@@ -51,7 +51,7 @@ DATA_DIR = os.environ.get("DATA_DIR", ".")
 PORT = int(os.environ.get("PORT", "10000"))
 TARAMA_ARALIGI_SANIYE = int(os.environ.get("TARAMA_ARALIGI_SANIYE", "900"))  # 15 dk
 
-BOT_KOD_SURUMU = "v1-tam-yeniden-kurulum-2026-08-19"
+BOT_KOD_SURUMU = "v2-konsolide-bildirim-celiski-saatlik-kontrol-2026-08-19"
 
 US_TICKERS = [
     "AAPL", "MSFT", "GOOGL", "AMZN", "NVDA", "META", "TSLA", "BRK-B", "JPM",
@@ -259,16 +259,19 @@ def gostergeleri_kontrol_et(bar, onceki) -> list:
 # =============================================================================
 # TAKİP (bugün kim tetiklendi) + PENDING (checkpoint) YÖNETİMİ
 # =============================================================================
+# 2026-08-19 DÜZELTME: kullanıcının canlı geri bildirimiyle - artık HİSSE
+# BAŞINA (gösterge başına değil) günde bir kez tetikleniyor, tüm
+# destekleyen göstergeler TEK bir bildirimde birleştiriliyor.
 
-_bugun_tetiklenenler = {}  # {(ticker, gosterge): tarih}
+_bugun_tetiklenenler = {}  # {ticker: tarih}
 
 
-def _bugun_tetiklendi_mi(ticker, gosterge, bugun) -> bool:
-    return _bugun_tetiklenenler.get((ticker, gosterge)) == bugun
+def _bugun_tetiklendi_mi(ticker, bugun) -> bool:
+    return _bugun_tetiklenenler.get(ticker) == bugun
 
 
-def _bugun_tetiklendi_isaretle(ticker, gosterge, bugun):
-    _bugun_tetiklenenler[(ticker, gosterge)] = bugun
+def _bugun_tetiklendi_isaretle(ticker, bugun):
+    _bugun_tetiklenenler[ticker] = bugun
 
 
 def _pending_oku() -> list:
@@ -418,19 +421,43 @@ def tek_hisse_tara(ticker: str):
         onceki = df.iloc[-2]
         bugun = bar["gun"]
 
+        if _bugun_tetiklendi_mi(ticker, bugun):
+            return  # bu hisse icin bugun zaten bir bildirim gonderildi
+
         tetiklenenler = gostergeleri_kontrol_et(bar, onceki)
-        for gosterge, yon in tetiklenenler:
-            if _bugun_tetiklendi_mi(ticker, gosterge, bugun):
-                continue
-            _bugun_tetiklendi_isaretle(ticker, gosterge, bugun)
-            giris_fiyat = float(bar["close"])
-            sinyal_kaydet(ticker, gosterge, yon, giris_fiyat, bugun)
+        if not tetiklenenler:
+            return
+
+        long_gostergeler = [g for g, y in tetiklenenler if y == "LONG"]
+        short_gostergeler = [g for g, y in tetiklenenler if y == "SHORT"]
+        giris_fiyat = float(bar["close"])
+
+        if long_gostergeler and short_gostergeler:
+            # CELISEN SINYAL: gostergeler ayni anda ters yonde - pozisyon
+            # KAYDETMİYORUZ (hangi yon takip edilecek belirsiz), sadece
+            # bilgilendirme yapiyoruz.
+            _bugun_tetiklendi_isaretle(ticker, bugun)
             send_telegram_message(
-                f"🔔 YENİ SİNYAL: {ticker} — {gosterge} → {yon}\n"
-                f"Giriş fiyatı: {giris_fiyat:.2f}\n"
-                f"Hedefler: 1g(+%1) / 3g(+%2) / 5g(+%3) / 10g(+%5) - "
-                f"herhangi biri tutarsa isabet"
+                f"⚠️ ÇELİŞEN SİNYAL: {ticker}\n"
+                f"LONG diyor: {', '.join(long_gostergeler)}\n"
+                f"SHORT diyor: {', '.join(short_gostergeler)}\n"
+                f"Fiyat: {giris_fiyat:.2f}\n"
+                f"Göstergeler anlaşamıyor - bu hisseyi şimdilik atlamanı öneririm."
             )
+            return
+
+        yon = "LONG" if long_gostergeler else "SHORT"
+        destekleyenler = long_gostergeler or short_gostergeler
+        _bugun_tetiklendi_isaretle(ticker, bugun)
+        sinyal_kaydet(ticker, ", ".join(destekleyenler), yon, giris_fiyat, bugun)
+        destek_sayisi = f" ({len(destekleyenler)} gösterge)" if len(destekleyenler) > 1 else ""
+        send_telegram_message(
+            f"🔔 YENİ SİNYAL: {ticker} → {yon}{destek_sayisi}\n"
+            f"Destekleyen: {', '.join(destekleyenler)}\n"
+            f"Giriş fiyatı: {giris_fiyat:.2f}\n"
+            f"Hedefler: 1g(+%1) / 3g(+%2) / 5g(+%3) / 10g(+%5) - "
+            f"herhangi biri tutarsa isabet"
+        )
     except Exception as e:
         print(f"[Tarama] {ticker} hata: {e}", flush=True)
 
@@ -447,14 +474,18 @@ def tam_tarama_calistir():
 
 
 def arka_plan_dongusu():
-    son_checkpoint_kontrol = None
+    # 2026-08-19 DÜZELTME: kullanıcı günde-bir checkpoint kontrolünü az
+    # buldu - artık SAATTE BİR kontrol ediliyor (aynı gün içinde bile
+    # hedefin tuttuğu daha erken fark edilebilsin diye).
+    CHECKPOINT_KONTROL_ARALIGI_SANIYE = 3600  # 1 saat
+    son_checkpoint_kontrol_zamani = 0.0
     while True:
         try:
             tam_tarama_calistir()
-            bugun = date.today()
-            if son_checkpoint_kontrol != bugun:
+            simdi = time.time()
+            if simdi - son_checkpoint_kontrol_zamani >= CHECKPOINT_KONTROL_ARALIGI_SANIYE:
                 checkpointleri_kontrol_et()
-                son_checkpoint_kontrol = bugun
+                son_checkpoint_kontrol_zamani = simdi
         except Exception as e:
             print(f"[Arka plan döngüsü] Hata: {e}", flush=True)
         time.sleep(TARAMA_ARALIGI_SANIYE)
@@ -549,6 +580,11 @@ def send_startup_message():
         f"🎯 Hedefler: 1g(+%1) / 3g(+%2) / 5g(+%3) / 10g(+%5) - herhangi "
         f"biri tutarsa isabet sayılır.\n"
         f"📊 {len(US_TICKERS)} ABD hissesi taranıyor.\n"
+        f"🔔 Bir hissede birden fazla gösterge AYNI yönde tetiklenirse TEK "
+        f"bir bildirimde birleştirilir. TERS yönde tetiklenirse "
+        f"'ÇELİŞEN SİNYAL' olarak ayrı işaretlenir, pozisyon takibe "
+        f"alınmaz.\n"
+        f"⏱️ Hedef kontrolü artık saatte bir yapılıyor (günde bir yerine).\n"
         f"🔁 Kendi kendine ping: 10 dk'da bir (Render uyku moduna girmesin diye)\n\n"
         f"Komutlar:\n/durum — açık/kapalı sinyal özeti\n"
         f"/liste — tüm kayıtları CSV olarak gönderir\n\n"
