@@ -49,7 +49,7 @@ import threading
 # mesajlarında görünür kılmak için (2026-08-17: 3 kez üst üste "aynı
 # sonuç geldi" şüphesi sonrası eklendi - deploy'un gerçekten güncel
 # olup olmadığını KANITLA göstermek için).
-ARGE_KOD_SURUMU = "v44-cephanelik-nihai-suzme-2026-08-19"
+ARGE_KOD_SURUMU = "v45-sikisma-turnuvasi-2026-08-19"
 import warnings
 from datetime import datetime, timezone
 
@@ -5059,6 +5059,169 @@ def gosterge_cephaneligi_calistir(max_hisse: int = 60) -> tuple:
 
 
 # =============================================================================
+# HAREKET-ÖNCESİ SIKIŞMA TURNUVASI (PRE-BREAKOUT) — 2026-08-19
+# =============================================================================
+# GEREKÇE: Kullanıcının fikri - bugüne kadarki 8 gösterge hep TEPKİSEL
+# (hareket zaten başlamışken tetikleniyor). Kullanıcı, fiyat yatay/
+# sıkışıkken, büyük hareket BAŞLAMADAN ÖNCE yakalayan bir sinyal istiyor
+# (örnek: SUPX'in %21 sıçramadan önceki yatay bandı). Bu, teknik
+# analizde "volatilite sıkışması / pre-breakout" diye bilinen gerçek bir
+# kavram. 5 farklı aday TEK dosyada, hepsi AYNI checkpoint çıkışı ve kör
+# çizgiyle test ediliyor:
+#   1. NR7 - son 7 mumun en dar aralığı (Toby Crabel klasiği)
+#   2. İç Mum (Inside Bar) - bugünün aralığı dünkünün içinde
+#   3. Bollinger Bant Genişliği Sıkışması - bantlar kendi 60-günlük
+#      tarihinde en dar noktasında
+#   4. TTM Squeeze - Keltner Kanalı Bollinger'ı içine alıyor
+#   5. ATR Persentil Sıkışması - volatilite kendi 100-günlük tarihinde
+#      en düşük noktasında
+# DÜRÜST NOT: Tüm testler AYNI 106 büyük/sakin ABD hissesi evreninde -
+# kullanıcının SUPX örneği gibi küçük/volatil bir hisse değil. Burada
+# bulunacak bir kenar, volatil hisselerde muhtemelen DAHA GÜÇLÜ çıkar
+# (ama onu ayrıca test etmemiz gerekir, farklı bir hisse evreni ile).
+
+NR7_PENCERE = 7
+BOLL_GENISLIK_PENCERE = 60
+BOLL_GENISLIK_PERSENTIL = 0.10
+KELTNER_SQUEEZE_EMA, KELTNER_SQUEEZE_ATR, KELTNER_SQUEEZE_MULT = 20, 10, 1.5
+ATR_PERSENTIL_PENCERE = 100
+ATR_PERSENTIL_ESIK = 0.10
+YON_BELIRLEME_EMA = 20  # sikisma anindaki fiyat bu EMA'nin uzerinde/altinda mi -> yon tahmini
+
+
+def _nr7_tespit(high, low, n=7):
+    aralik = high - low
+    en_dar = aralik.rolling(n).min()
+    return aralik <= en_dar * 1.001  # kendisi en dar olan gun
+
+
+def _ic_mum_tespit(high, low):
+    onceki_high = high.shift(1)
+    onceki_low = low.shift(1)
+    return (high <= onceki_high) & (low >= onceki_low)
+
+
+def _boll_genislik_sikisma_tespit(close, n=20, k=2.0, pencere=60, persentil=0.10):
+    orta = close.rolling(n).mean()
+    std = close.rolling(n).std()
+    genislik = (2 * k * std) / orta.replace(0, np.nan)
+    esik = genislik.rolling(pencere).quantile(persentil)
+    return genislik <= esik
+
+
+def _ttm_squeeze_tespit(high, low, close, ema_n=20, atr_n=10, kc_mult=1.5, bb_n=20, bb_k=2.0):
+    # 2026-08-19 DUZELTME: Keltner ve Bollinger AYNI merkezi (SMA) kullanmali -
+    # farkli merkez (EMA vs SMA) kullanmak, genislik dar olsa bile bantlarin
+    # kaymasina ve "icinde" testinin yanlislikla False donmesine yol aciyordu.
+    bb_orta = close.rolling(bb_n).mean()
+    tr = pd.concat([(high - low), (high - close.shift()).abs(), (low - close.shift()).abs()], axis=1).max(axis=1)
+    atr = tr.rolling(atr_n).mean()
+    kc_alt, kc_ust = bb_orta - kc_mult * atr, bb_orta + kc_mult * atr
+    bb_std = close.rolling(bb_n).std()
+    bb_alt, bb_ust = bb_orta - bb_k * bb_std, bb_orta + bb_k * bb_std
+    # squeeze ON: Bollinger bantlari Keltner Kanali'nin ICINDE
+    return (bb_alt >= kc_alt) & (bb_ust <= kc_ust)
+
+
+def _atr_persentil_sikisma_tespit(high, low, close, pencere=100, esik_persentil=0.10):
+    tr = pd.concat([(high - low), (high - close.shift()).abs(), (low - close.shift()).abs()], axis=1).max(axis=1)
+    atr = tr.rolling(14).mean()
+    esik = atr.rolling(pencere).quantile(esik_persentil)
+    return atr <= esik
+
+
+def hareket_oncesi_sikisma_turnuvasi_calistir(max_hisse: int = 60) -> tuple:
+    """5 farklı sıkışma/pre-breakout adayını, günde ilk tetiklenme
+    kuralıyla, gerçek checkpoint çıkışıyla ve kör temel çizgiyle test
+    eder. Yön, sıkışma anındaki fiyatın 20-günlük EMA'ya göre konumuyla
+    tahmin ediliyor (üstündeyse LONG, altındaysa SHORT) - NR7/İç Mum
+    için ise ertesi barın kırılma yönü kullanılıyor (daha objektif).
+    Döner: (dosya_yolu, özet_dict) ya da (None, hata_mesajı)."""
+    import yfinance as yf
+
+    hisseler = US_INSIDER_TICKERS[:max_hisse]
+    isimler = ["NR7 (dar aralık)", "İç Mum (Inside Bar)", "Bollinger Genişlik Sıkışması",
+               "TTM Squeeze", "ATR Persentil Sıkışması"]
+    tum_sonuclar = {isim: [] for isim in isimler}
+    tum_sonuclar["[KÖR] Koşulsuz LONG"] = []
+    tum_sonuclar["[KÖR] Koşulsuz SHORT"] = []
+
+    for n_i, ticker in enumerate(hisseler, 1):
+        try:
+            print(f"[Sıkışma Turnuvası {n_i}/{len(hisseler)}] {ticker}...", flush=True)
+            gunluk = yf.Ticker(ticker).history(period="2y", interval="1d", timeout=20)
+            if gunluk is None or gunluk.empty or len(gunluk) < 150:
+                continue
+            gunluk = gunluk.rename(columns={"Close": "close", "High": "high", "Low": "low",
+                                             "Open": "open", "Volume": "volume"})
+            gunluk.index = pd.to_datetime(gunluk.index).tz_localize(None)
+            gunluk = gunluk.reset_index(drop=True)
+
+            gunluk["nr7"] = _nr7_tespit(gunluk["high"], gunluk["low"], NR7_PENCERE)
+            gunluk["ic_mum"] = _ic_mum_tespit(gunluk["high"], gunluk["low"])
+            gunluk["boll_sikisma"] = _boll_genislik_sikisma_tespit(
+                gunluk["close"], 20, 2.0, BOLL_GENISLIK_PENCERE, BOLL_GENISLIK_PERSENTIL)
+            gunluk["ttm_squeeze"] = _ttm_squeeze_tespit(
+                gunluk["high"], gunluk["low"], gunluk["close"],
+                KELTNER_SQUEEZE_EMA, KELTNER_SQUEEZE_ATR, KELTNER_SQUEEZE_MULT)
+            gunluk["atr_sikisma"] = _atr_persentil_sikisma_tespit(
+                gunluk["high"], gunluk["low"], gunluk["close"],
+                ATR_PERSENTIL_PENCERE, ATR_PERSENTIL_ESIK)
+            gunluk["ema_yon"] = _ema_hesapla(gunluk["close"], YON_BELIRLEME_EMA)
+
+            baslangic = max(NR7_PENCERE, BOLL_GENISLIK_PENCERE, ATR_PERSENTIL_PENCERE, YON_BELIRLEME_EMA) + 5
+            for idx in range(baslangic, len(gunluk) - 11):
+                row = gunluk.iloc[idx]
+
+                # KOR CIZGI - her gun kosulsuz
+                tum_sonuclar["[KÖR] Koşulsuz LONG"].append(_kanit_us_checkpoint_sonuc(gunluk, idx, "LONG"))
+                tum_sonuclar["[KÖR] Koşulsuz SHORT"].append(_kanit_us_checkpoint_sonuc(gunluk, idx, "SHORT"))
+
+                # yon tahmini: EMA'ya gore
+                yon_tahmin = "LONG" if row["close"] >= row["ema_yon"] else "SHORT"
+
+                if row["nr7"]:
+                    # NR7 icin: ERTESI barin kirilma yonu (daha objektif)
+                    sonraki = gunluk.iloc[idx + 1]
+                    if sonraki["close"] > row["high"]:
+                        tum_sonuclar["NR7 (dar aralık)"].append(_kanit_us_checkpoint_sonuc(gunluk, idx + 1, "LONG"))
+                    elif sonraki["close"] < row["low"]:
+                        tum_sonuclar["NR7 (dar aralık)"].append(_kanit_us_checkpoint_sonuc(gunluk, idx + 1, "SHORT"))
+                if row["ic_mum"]:
+                    sonraki = gunluk.iloc[idx + 1]
+                    if sonraki["close"] > row["high"]:
+                        tum_sonuclar["İç Mum (Inside Bar)"].append(_kanit_us_checkpoint_sonuc(gunluk, idx + 1, "LONG"))
+                    elif sonraki["close"] < row["low"]:
+                        tum_sonuclar["İç Mum (Inside Bar)"].append(_kanit_us_checkpoint_sonuc(gunluk, idx + 1, "SHORT"))
+                if row["boll_sikisma"]:
+                    tum_sonuclar["Bollinger Genişlik Sıkışması"].append(
+                        _kanit_us_checkpoint_sonuc(gunluk, idx, yon_tahmin))
+                if row["ttm_squeeze"]:
+                    tum_sonuclar["TTM Squeeze"].append(_kanit_us_checkpoint_sonuc(gunluk, idx, yon_tahmin))
+                if row["atr_sikisma"]:
+                    tum_sonuclar["ATR Persentil Sıkışması"].append(
+                        _kanit_us_checkpoint_sonuc(gunluk, idx, yon_tahmin))
+        except Exception as e:
+            print(f"[Sıkışma Turnuvası] {ticker} hata: {e}", flush=True)
+        time.sleep(0.3)
+
+    satirlar = _kanit_ozet_tablosu(tum_sonuclar)
+    if not satirlar:
+        return None, "Hiçbir strateji için yeterli veri üretilemedi."
+
+    kor_long = next((s["kazanma_orani_pct"] for s in satirlar if s["strateji"] == "[KÖR] Koşulsuz LONG"), None)
+    kor_long_r = next((s["ort_R"] for s in satirlar if s["strateji"] == "[KÖR] Koşulsuz LONG"), None)
+    for s in satirlar:
+        s["kor_isabet_farki"] = round(s["kazanma_orani_pct"] - kor_long, 2) if kor_long is not None and s["kazanma_orani_pct"] is not None else None
+        s["kor_R_farki"] = round(s["ort_R"] - kor_long_r, 4) if kor_long_r is not None and s["ort_R"] is not None else None
+
+    tablo = pd.DataFrame(satirlar).sort_values("kor_R_farki", ascending=False)
+    dosya_yolu = _data_path("hareket_oncesi_sikisma_turnuvasi.csv")
+    tablo.to_csv(dosya_yolu, index=False, encoding="utf-8-sig")
+    return dosya_yolu, {"satirlar": satirlar}
+
+
+# =============================================================================
 # EKŞİ SÖZLÜK BAĞLANTI TESTİ — 2026-08-19
 # =============================================================================
 # GEREKÇE: Ekşi Sözlük'ün resmi bir API'si yok - sadece web sayfası
@@ -5175,6 +5338,9 @@ def send_startup_message():
         "PSAR, hacim-onaylı kırılım, Keltner, Williams %R, VWAP sapması, "
         "Üçlü EMA, Awesome Oscillator), kör çizgiyle birlikte (varsayılan "
         "25 hisse, daha büyük örneklem için sayı belirt)\n"
+        "/sikisma_turnuvasi [HİSSE_SAYISI] — NR7/İç Mum/Bollinger Genişlik/"
+        "TTM Squeeze/ATR Persentil - hareket başlamadan önce yakalayan "
+        "sıkışma sinyalleri, kör çizgiyle birlikte\n"
         "/wiki_dogrulama — /wiki_testi'nin bulgusunu (yüksek izlenme -> "
         "LONG) izole, gerçek R:R çıkışıyla yeniden doğrular\n"
         "/eksisozluk_test [BAŞLIK] — Ekşi Sözlük'ten veri çekilebiliyor "
@@ -6057,6 +6223,36 @@ def poll_arge_commands():
                 except Exception as e:
                     send_telegram_message(f"🏹 Gösterge cephaneliği hatası: {e}")
             threading.Thread(target=_arka_plan_cephanelik, args=(hisse_sayisi,), daemon=True).start()
+        elif text.startswith("/sikisma_turnuvasi"):
+            parcalar = text.split()
+            hisse_sayisi = int(parcalar[1]) if len(parcalar) > 1 else 60
+            send_telegram_message(
+                f"🌀 HAREKET-ÖNCESİ SIKIŞMA TURNUVASI başlıyor ({hisse_sayisi} "
+                f"hisse): NR7, İç Mum, Bollinger Genişlik Sıkışması, TTM "
+                f"Squeeze, ATR Persentil Sıkışması - hepsi 'hareket "
+                f"başlamadan önce yakala' mantığında, kör temel çizgiyle "
+                f"birlikte test ediliyor. ARKA PLANDA çalışıyor, biraz "
+                f"sürebilir, bitince CSV + özet göndereceğim."
+            )
+
+            def _arka_plan_sikisma(hs):
+                try:
+                    dosya_yolu, ozet = hareket_oncesi_sikisma_turnuvasi_calistir(hs)
+                    if dosya_yolu is None:
+                        send_telegram_message(f"🌀 Sıkışma turnuvası başarısız: {ozet}")
+                        return
+                    satirlar = ["🌀 Hareket-Öncesi Sıkışma Turnuvası Sonucu (R farkına göre sıralı)\n"]
+                    for s in ozet["satirlar"]:
+                        fark_str = f", kör R farkı: {s['kor_R_farki']:+.4f}" \
+                            if s.get("kor_R_farki") is not None else ""
+                        satirlar.append(
+                            f"{s['strateji']}: n={s['toplam_sinyal']}, "
+                            f"%{s['kazanma_orani_pct']} isabet, ort R={s['ort_R']}{fark_str}"
+                        )
+                    send_telegram_document(dosya_yolu, caption="\n".join(satirlar))
+                except Exception as e:
+                    send_telegram_message(f"🌀 Sıkışma turnuvası hatası: {e}")
+            threading.Thread(target=_arka_plan_sikisma, args=(hisse_sayisi,), daemon=True).start()
         elif text.startswith("/ai_model_backtest"):
             send_telegram_message(
                 f"🤖 GERÇEK AI MODEL BACKTEST başlıyor: model.pkl ve "
