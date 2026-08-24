@@ -521,6 +521,21 @@ def health():
     return "OK", 200
 
 
+def kendi_kendine_ping():
+    """Render'ın ücretsiz katmanı 15 dk hareketsizlikte servisi uyutuyor -
+    bu, botun kendi /health endpoint'ine düzenli istek atıp uyanık
+    kalmasını sağlıyor. 2026-08-19: bu, önceki sistemde vardı ama yeni
+    botta unutulmuştu - ilk canlı denemede servis uykuya dalıp hiç
+    tarama yapmadı, bu yüzden eklendi."""
+    time.sleep(30)  # once uygulamanin tam ayaga kalkmasini bekle
+    while True:
+        try:
+            requests.get(f"http://127.0.0.1:{PORT}/health", timeout=10)
+        except Exception as e:
+            print(f"[Kendi kendine ping] Hata: {e}", flush=True)
+        time.sleep(600)  # 10 dakika
+
+
 def send_startup_message():
     gosterge_listesi = "\n".join(f"  • {g}" for g in GOSTERGE_ISIMLERI)
     send_telegram_message(
@@ -533,7 +548,8 @@ def send_startup_message():
         f"TR saati), {TARAMA_ARALIGI_SANIYE // 60} dakikada bir tarama.\n"
         f"🎯 Hedefler: 1g(+%1) / 3g(+%2) / 5g(+%3) / 10g(+%5) - herhangi "
         f"biri tutarsa isabet sayılır.\n"
-        f"📊 {len(US_TICKERS)} ABD hissesi taranıyor.\n\n"
+        f"📊 {len(US_TICKERS)} ABD hissesi taranıyor.\n"
+        f"🔁 Kendi kendine ping: 10 dk'da bir (Render uyku moduna girmesin diye)\n\n"
         f"Komutlar:\n/durum — açık/kapalı sinyal özeti\n"
         f"/liste — tüm kayıtları CSV olarak gönderir\n\n"
         f"⚠️ Bu bot SADECE sinyal üretir, otomatik emir vermez."
@@ -544,4 +560,5 @@ if __name__ == "__main__":
     send_startup_message()
     threading.Thread(target=arka_plan_dongusu, daemon=True).start()
     threading.Thread(target=poll_telegram_commands, daemon=True).start()
+    threading.Thread(target=kendi_kendine_ping, daemon=True).start()
     app.run(host="0.0.0.0", port=PORT)
