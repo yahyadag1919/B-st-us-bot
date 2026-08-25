@@ -51,7 +51,7 @@ DATA_DIR = os.environ.get("DATA_DIR", ".")
 PORT = int(os.environ.get("PORT", "10000"))
 TARAMA_ARALIGI_SANIYE = int(os.environ.get("TARAMA_ARALIGI_SANIYE", "900"))  # 15 dk
 
-BOT_KOD_SURUMU = "v4-arge-baslangic-mesaji-2026-08-19"
+BOT_KOD_SURUMU = "v6-arge-komut-arastirma-ayrildi-2026-08-19"
 
 US_TICKERS = [
     "AAPL", "MSFT", "GOOGL", "AMZN", "NVDA", "META", "TSLA", "BRK-B", "JPM",
@@ -604,6 +604,8 @@ def send_startup_message():
 # hiçbir yerden çağrılmaz oldu - dosya repo'da duruyordu ama hiç
 # çalışmıyordu. Şimdi us_sinyal_botu.py'ye AYNI şekilde bağlanıyor.
 try:
+    print("[BAŞLANGIÇ] arge_botu.py import ediliyor (bu bir modül-seviyesi "
+          "işlem, __main__'den ÖNCE, dosyanın en tepesinde çalışır)...", flush=True)
     import arge_botu
     _ARGE_MODUL_YUKLENDI = True
     print("[Ar-Ge Entegrasyonu] arge_botu.py başarıyla yüklendi.", flush=True)
@@ -612,33 +614,68 @@ except Exception as e:
     print(f"[Ar-Ge Entegrasyonu] arge_botu.py yüklenemedi: {e}", flush=True)
 
 
-def arge_botu_dongusu():
-    """arge_botu.py'nin komut dinleme + kendi kendine hipotez üretme
-    döngüsünü çalıştırır - kendi try/except'i, ana botun sinyal
-    taramasını hiç etkilemez."""
+def arge_botu_baslangic():
+    """arge_botu.py'nin başlangıç mesajını gönderir - bu fonksiyon
+    kendi thread'inde bir kez çalışır, komut dinleme/araştırma
+    döngülerinden bağımsız."""
     if not _ARGE_MODUL_YUKLENDI:
-        print("[Ar-Ge Entegrasyonu] Devre dışı - modül yüklenemedi, döngü başlamıyor.", flush=True)
+        print("[Ar-Ge Entegrasyonu] Devre dışı - modül yüklenemedi.", flush=True)
         return
-    # 2026-08-19 EKLENDİ: arge_botu.py'nin KENDİ başlangıç mesajını da
-    # gönder - kullanıcı bunun eksik olduğunu fark etti, öncesinde sadece
-    # ana botun mesajındaki tek satırlık not vardı.
     try:
         arge_botu.send_startup_message()
     except Exception as e:
         print(f"[Ar-Ge Entegrasyonu] Başlangıç mesajı gönderilemedi: {e}", flush=True)
+
+
+def arge_botu_komut_dongusu():
+    """SADECE Telegram komutlarını dinler - araştırma döngüsünden
+    (yavaş/tıkanabilen yfinance çağrıları içeriyor) TAMAMEN AYRI bir
+    thread'de çalışır. 2026-08-19 DÜZELTME: eskiden bu ve araştırma
+    döngüsü AYNI thread'de sırayla çalışıyordu - araştırma bir yfinance
+    isteğinde zaman aşımı olmadan takılırsa, komut dinleme de hiç
+    sırasına gelmiyordu (kullanıcının yaşadığı 'komut hiç yanıt vermiyor'
+    sorununun kök sebebi muhtemelen buydu). Artık ayrı, birbirini asla
+    bloklamıyorlar."""
+    if not _ARGE_MODUL_YUKLENDI:
+        return
     while True:
         try:
             arge_botu.poll_arge_commands()
+        except Exception as e:
+            print(f"[Ar-Ge Komut Döngüsü] Hata: {e}", flush=True)
+        time.sleep(3)
+
+
+def arge_botu_arastirma_dongusu():
+    """SADECE kendi kendine hipotez araştırma döngüsünü çalıştırır -
+    komut dinlemeden TAMAMEN AYRI. Bu yavaş olabilir/nadiren takılabilir
+    (yfinance rate limit vb.) ama artık komutları etkilemiyor."""
+    if not _ARGE_MODUL_YUKLENDI:
+        return
+    while True:
+        try:
             arge_botu.maybe_run_research()
         except Exception as e:
-            print(f"[Ar-Ge Entegrasyonu] Döngü hatası: {e}", flush=True)
+            print(f"[Ar-Ge Araştırma Döngüsü] Hata: {e}", flush=True)
         time.sleep(5)
 
 
 if __name__ == "__main__":
+    print("[BAŞLANGIÇ] us_sinyal_botu.py çalışmaya başladı.", flush=True)
+    print("[BAŞLANGIÇ] Ana bot başlangıç mesajı gönderiliyor...", flush=True)
     send_startup_message()
+    print("[BAŞLANGIÇ] Ana bot başlangıç mesajı gönderildi (ya da atlandı).", flush=True)
     threading.Thread(target=arka_plan_dongusu, daemon=True).start()
+    print("[BAŞLANGIÇ] Tarama thread'i başlatıldı.", flush=True)
     threading.Thread(target=poll_telegram_commands, daemon=True).start()
+    print("[BAŞLANGIÇ] Telegram komut dinleme thread'i başlatıldı.", flush=True)
     threading.Thread(target=kendi_kendine_ping, daemon=True).start()
-    threading.Thread(target=arge_botu_dongusu, daemon=True).start()
+    print("[BAŞLANGIÇ] Kendi kendine ping thread'i başlatıldı.", flush=True)
+    threading.Thread(target=arge_botu_baslangic, daemon=True).start()
+    print("[BAŞLANGIÇ] Ar-Ge botu başlangıç mesajı thread'i başlatıldı.", flush=True)
+    threading.Thread(target=arge_botu_komut_dongusu, daemon=True).start()
+    print("[BAŞLANGIÇ] Ar-Ge botu KOMUT dinleme thread'i başlatıldı (ayrı).", flush=True)
+    threading.Thread(target=arge_botu_arastirma_dongusu, daemon=True).start()
+    print("[BAŞLANGIÇ] Ar-Ge botu ARAŞTIRMA thread'i başlatıldı (ayrı, komutları asla bloklamaz).", flush=True)
+    print("[BAŞLANGIÇ] Flask sunucusu başlatılıyor...", flush=True)
     app.run(host="0.0.0.0", port=PORT)
