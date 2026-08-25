@@ -51,7 +51,7 @@ DATA_DIR = os.environ.get("DATA_DIR", ".")
 PORT = int(os.environ.get("PORT", "10000"))
 TARAMA_ARALIGI_SANIYE = int(os.environ.get("TARAMA_ARALIGI_SANIYE", "900"))  # 15 dk
 
-BOT_KOD_SURUMU = "v3-arge-botu-entegrasyonu-2026-08-19"
+BOT_KOD_SURUMU = "v4-arge-baslangic-mesaji-2026-08-19"
 
 US_TICKERS = [
     "AAPL", "MSFT", "GOOGL", "AMZN", "NVDA", "META", "TSLA", "BRK-B", "JPM",
@@ -619,6 +619,13 @@ def arge_botu_dongusu():
     if not _ARGE_MODUL_YUKLENDI:
         print("[Ar-Ge Entegrasyonu] Devre dışı - modül yüklenemedi, döngü başlamıyor.", flush=True)
         return
+    # 2026-08-19 EKLENDİ: arge_botu.py'nin KENDİ başlangıç mesajını da
+    # gönder - kullanıcı bunun eksik olduğunu fark etti, öncesinde sadece
+    # ana botun mesajındaki tek satırlık not vardı.
+    try:
+        arge_botu.send_startup_message()
+    except Exception as e:
+        print(f"[Ar-Ge Entegrasyonu] Başlangıç mesajı gönderilemedi: {e}", flush=True)
     while True:
         try:
             arge_botu.poll_arge_commands()
