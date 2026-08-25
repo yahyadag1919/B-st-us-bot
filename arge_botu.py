@@ -50,7 +50,7 @@ import socket
 # mesajlarında görünür kılmak için (2026-08-17: 3 kez üst üste "aynı
 # sonuç geldi" şüphesi sonrası eklendi - deploy'un gerçekten güncel
 # olup olmadığını KANITLA göstermek için).
-ARGE_KOD_SURUMU = "v54-soket-seviyesi-zaman-asimi-2026-08-19"
+ARGE_KOD_SURUMU = "v55-bagimsiz-calisma-modu-2026-08-19"
 import warnings
 from datetime import datetime, timezone
 
@@ -7091,3 +7091,63 @@ def poll_arge_commands():
                 f.write(str(offset))
         except Exception:
             pass
+
+
+# =============================================================================
+# BAĞIMSIZ ÇALIŞMA MODU (standalone) — 2026-08-19
+# =============================================================================
+# GEREKÇE: Kullanıcı, us_sinyal_botu.py ile tek bir process'te birleştirme
+# sonrası ağır EDGAR taramalarında tekrarlayan tam-süreç donmaları yaşadı.
+# Bunun kesin sebebi tam doğrulanamasa da (muhtemelen Render'ın kısıtlı
+# ücretsiz kaynaklarıyla ilgili), kullanıcının kendi önerisi mantıklı:
+# ihtiyaca göre Render'ın Start Command'ını değiştirerek Ar-Ge botunu
+# TAMAMEN AYRI bir süreç olarak çalıştırmak - canlı sinyal botunu hiç
+# etkilemeden. Bu blok, arge_botu.py'yi TEK BAŞINA çalıştırılabilir hale
+# getiriyor (kendi Flask health-check'i + kendi döngüleri).
+#
+# KULLANIM: Render'da Start Command'ı geçici olarak
+#   python arge_botu.py
+# yapıp Ar-Ge testlerini çalıştır, bitince
+#   python us_sinyal_botu.py
+# olarak geri al - canlı ABD sinyal sistemi bu sürede DURUR (bunu bil).
+
+if __name__ == "__main__":
+    from flask import Flask as _StandaloneFlask
+    import threading as _standalone_threading
+
+    _PORT = int(os.environ.get("PORT", "10000"))
+    _standalone_app = _StandaloneFlask(__name__)
+
+    @_standalone_app.route("/health")
+    def _standalone_health():
+        return "OK (arge_botu bağımsız modda)", 200
+
+    def _standalone_komut_dongusu():
+        while True:
+            try:
+                poll_arge_commands()
+            except Exception as e:
+                print(f"[Ar-Ge Bağımsız] Komut döngüsü hatası: {e}", flush=True)
+            time.sleep(3)
+
+    def _standalone_arastirma_dongusu():
+        while True:
+            try:
+                maybe_run_research()
+            except Exception as e:
+                print(f"[Ar-Ge Bağımsız] Araştırma döngüsü hatası: {e}", flush=True)
+            time.sleep(5)
+
+    print(f"[BAŞLANGIÇ] arge_botu.py BAĞIMSIZ modda çalışıyor — {ARGE_KOD_SURUMU}", flush=True)
+    send_telegram_message(
+        f"🔬 Ar-Ge Botu BAĞIMSIZ modda başlatıldı — {ARGE_KOD_SURUMU}\n\n"
+        f"Bu bot şu an ana ABD sinyal sisteminden TAMAMEN AYRI, kendi "
+        f"başına çalışıyor (Start Command geçici olarak değiştirildi).\n"
+        f"⚠️ Ana ABD sinyal botu bu sürede ÇALIŞMIYOR - test bitince "
+        f"Start Command'ı 'python us_sinyal_botu.py' olarak geri almayı "
+        f"unutma.\n\n"
+        f"/arge_yardim yazarak komutları görebilirsin."
+    )
+    _standalone_threading.Thread(target=_standalone_komut_dongusu, daemon=True).start()
+    _standalone_threading.Thread(target=_standalone_arastirma_dongusu, daemon=True).start()
+    _standalone_app.run(host="0.0.0.0", port=_PORT)
