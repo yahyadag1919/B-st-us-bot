@@ -49,7 +49,7 @@ import threading
 # mesajlarında görünür kılmak için (2026-08-17: 3 kez üst üste "aynı
 # sonuç geldi" şüphesi sonrası eklendi - deploy'un gerçekten güncel
 # olup olmadığını KANITLA göstermek için).
-ARGE_KOD_SURUMU = "v50-hacim-daralma-percent-b-2026-08-19"
+ARGE_KOD_SURUMU = "v51-tum-yfinance-timeout-duzeltmesi-2026-08-19"
 import warnings
 from datetime import datetime, timezone
 
@@ -361,7 +361,7 @@ def _compute_gece_hedef(ticker: str, df_daily: pd.DataFrame) -> pd.Series:
     hedef = ((df_daily["high"].shift(-1) - entry) / entry * 100)  # gunluk-yaklasik (varsayilan)
 
     try:
-        df15 = yf.Ticker(ticker).history(period="60d", interval="15m")
+        df15 = yf.Ticker(ticker).history(period="60d", interval="15m", timeout=20)
         if df15 is not None and not df15.empty:
             df15 = df15.rename(columns={"High": "high"})
             idx15 = pd.to_datetime(df15.index)
@@ -394,7 +394,7 @@ def fetch_all_data():
     import yfinance as yf
     print("[ARGE] Veri çekiliyor (SADECE BIST — gece radarı hedefi: "
           "ertesi gün 10:00-12:00 arası +%2'ye ulaşıyor mu?)...", flush=True)
-    index_df = yf.Ticker("XU100.IS").history(period="2y", interval="1d")
+    index_df = yf.Ticker("XU100.IS").history(period="2y", interval="1d", timeout=20)
     index_pct = None
     if index_df is not None and not index_df.empty:
         index_df.index = pd.to_datetime(index_df.index).tz_localize(None)
@@ -403,7 +403,7 @@ def fetch_all_data():
     parcalar = []
     for ticker in ALL_TICKERS:
         try:
-            df = yf.Ticker(ticker).history(period="2y", interval="1d")
+            df = yf.Ticker(ticker).history(period="2y", interval="1d", timeout=20)
             if df is None or df.empty or len(df) < 100:
                 continue
             df = df.rename(columns={"Open": "open", "High": "high", "Low": "low",
@@ -481,7 +481,7 @@ def augment_with_closing_features(df: pd.DataFrame) -> pd.DataFrame:
 
     for ticker in df["ticker"].unique():
         try:
-            df15 = yf.Ticker(ticker).history(period="60d", interval="15m")
+            df15 = yf.Ticker(ticker).history(period="60d", interval="15m", timeout=20)
             if df15 is None or df15.empty:
                 continue
             df15 = df15.rename(columns={"Open": "open", "High": "high",
@@ -780,13 +780,13 @@ def hesap_makinesi_debug(ticker: str, tarih_str: str) -> str:
     hedef_tarih = pd.Timestamp(tarih_str)
 
     try:
-        index_df = yf.Ticker("XU100.IS").history(period="2y", interval="1d")
+        index_df = yf.Ticker("XU100.IS").history(period="2y", interval="1d", timeout=20)
         index_pct = None
         if index_df is not None and not index_df.empty:
             index_df.index = pd.to_datetime(index_df.index).tz_localize(None)
             index_pct = (index_df["Close"] - index_df["Close"].shift(1)) / index_df["Close"].shift(1) * 100
 
-        df = yf.Ticker(ticker).history(period="2y", interval="1d")
+        df = yf.Ticker(ticker).history(period="2y", interval="1d", timeout=20)
         if df is None or df.empty:
             return f"🔬 {ticker}: veri yok."
         df = df.rename(columns={"Open": "open", "High": "high", "Low": "low",
@@ -833,7 +833,7 @@ def hesap_makinesi_tam_yil_testi(baslangic_str: str = "2026-01-01", bitis_str: s
     bitis_str = bitis_str or datetime.now(timezone.utc).date().isoformat()
     baslangic, bitis = pd.Timestamp(baslangic_str), pd.Timestamp(bitis_str)
 
-    index_df = yf.Ticker("XU100.IS").history(period="2y", interval="1d")
+    index_df = yf.Ticker("XU100.IS").history(period="2y", interval="1d", timeout=20)
     if index_df is None or index_df.empty:
         return None, "XU100 endeks verisi çekilemedi."
     index_df.index = pd.to_datetime(index_df.index).tz_localize(None)
@@ -848,7 +848,7 @@ def hesap_makinesi_tam_yil_testi(baslangic_str: str = "2026-01-01", bitis_str: s
     tum_satirlar = []
     for ticker in BIST_TICKERS:
         try:
-            df = yf.Ticker(ticker).history(period="2y", interval="1d")
+            df = yf.Ticker(ticker).history(period="2y", interval="1d", timeout=20)
             if df is None or df.empty or len(df) < 100:
                 continue
             df = df.rename(columns={"Open": "open", "High": "high", "Low": "low",
@@ -1029,7 +1029,7 @@ def gosterge_turnuvasi_calistir(baslangic_str: str = "2026-01-01", bitis_str: st
     bitis_str = bitis_str or datetime.now(timezone.utc).date().isoformat()
     baslangic, bitis = pd.Timestamp(baslangic_str), pd.Timestamp(bitis_str)
 
-    index_df = yf.Ticker("XU100.IS").history(period="2y", interval="1d")
+    index_df = yf.Ticker("XU100.IS").history(period="2y", interval="1d", timeout=20)
     if index_df is None or index_df.empty:
         return None, "XU100 endeks verisi çekilemedi."
     index_df.index = pd.to_datetime(index_df.index).tz_localize(None)
@@ -1044,7 +1044,7 @@ def gosterge_turnuvasi_calistir(baslangic_str: str = "2026-01-01", bitis_str: st
     parcalar = []
     for ticker in BIST_TICKERS:
         try:
-            df = yf.Ticker(ticker).history(period="2y", interval="1d")
+            df = yf.Ticker(ticker).history(period="2y", interval="1d", timeout=20)
             if df is None or df.empty or len(df) < 100:
                 continue
             df = df.rename(columns={"Open": "open", "High": "high", "Low": "low",
@@ -1176,13 +1176,13 @@ def kur_sektor_testi_calistir(baslangic_str: str = "2026-01-01", bitis_str: str 
     bitis_str = bitis_str or datetime.now(timezone.utc).date().isoformat()
     baslangic, bitis = pd.Timestamp(baslangic_str), pd.Timestamp(bitis_str)
 
-    index_df = yf.Ticker("XU100.IS").history(period="2y", interval="1d")
+    index_df = yf.Ticker("XU100.IS").history(period="2y", interval="1d", timeout=20)
     if index_df is None or index_df.empty:
         return None, "XU100 endeks verisi çekilemedi."
     index_df.index = pd.to_datetime(index_df.index).tz_localize(None)
     index_pct = (index_df["Close"] - index_df["Close"].shift(1)) / index_df["Close"].shift(1) * 100
 
-    kur_df = yf.Ticker("USDTRY=X").history(period="2y", interval="1d")
+    kur_df = yf.Ticker("USDTRY=X").history(period="2y", interval="1d", timeout=20)
     if kur_df is None or kur_df.empty:
         return None, "USDTRY kur verisi çekilemedi."
     kur_df.index = pd.to_datetime(kur_df.index).tz_localize(None)
@@ -1202,7 +1202,7 @@ def kur_sektor_testi_calistir(baslangic_str: str = "2026-01-01", bitis_str: str 
     parcalar = []
     for ticker in BIST_TICKERS:
         try:
-            df = yf.Ticker(ticker).history(period="2y", interval="1d")
+            df = yf.Ticker(ticker).history(period="2y", interval="1d", timeout=20)
             if df is None or df.empty or len(df) < 100:
                 continue
             df = df.rename(columns={"Open": "open", "High": "high", "Low": "low",
@@ -1544,9 +1544,16 @@ def icgorusel_islem_testi_edgar_calistir(gun_ufku: int = ICGORUSEL_ISLEM_GUN_UFK
         cik = cik_haritasi.get(ticker)
         if not cik:
             continue
+        hisse_baslangic_zamani = time.time()
+        HISSE_ZAMAN_BUTCESI_SANIYE = 90  # 2026-08-19: tek hissede sonsuza
+        # kadar takilmayi ONLEMEK icin sert bir ust sinir - kullanicinin
+        # 106 hisselik taramada AVGO'da (20/106) 50+ dakika donmasi
+        # ustune eklendi.
         try:
             print(f"[EDGAR İçeriden İşlem {n_i}/{len(hisseler)}] {ticker}...", flush=True)
-            fiyat_df = yf.Ticker(ticker).history(period="2y", interval="1d")
+            # 2026-08-19 DUZELTME: bu cagrida timeout HIC yoktu - muhtemel
+            # donma kaynagi buydu, digerlerinde zaten timeout=20 vardi.
+            fiyat_df = yf.Ticker(ticker).history(period="2y", interval="1d", timeout=20)
             if fiyat_df is None or fiyat_df.empty:
                 continue
             fiyat_df = fiyat_df.rename(columns={"Close": "close"})
@@ -1555,6 +1562,11 @@ def icgorusel_islem_testi_edgar_calistir(gun_ufku: int = ICGORUSEL_ISLEM_GUN_UFK
             form4ler = _edgar_form4_listesi(cik, ticker)
             time.sleep(0.15)
             for f in form4ler[:30]:  # her hisse icin en fazla 30 son dosyalama
+                if time.time() - hisse_baslangic_zamani > HISSE_ZAMAN_BUTCESI_SANIYE:
+                    print(f"[EDGAR İçeriden İşlem] {ticker}: zaman bütçesi "
+                          f"({HISSE_ZAMAN_BUTCESI_SANIYE}sn) aşıldı, sonraki "
+                          f"hisseye geçiliyor.", flush=True)
+                    break
                 detaylar = _edgar_form4_detay(cik, f["accession"])
                 time.sleep(0.15)
                 for d in detaylar:
@@ -1626,7 +1638,7 @@ def kanit_ters_islem_testi_calistir() -> tuple:
     for n_i, ticker in enumerate(BIST_TICKERS, 1):
         try:
             print(f"[Ters İşlem Testi {n_i}/{len(BIST_TICKERS)}] {ticker}...", flush=True)
-            df = yf.Ticker(ticker).history(period="2y", interval="1d")
+            df = yf.Ticker(ticker).history(period="2y", interval="1d", timeout=20)
             if df is None or df.empty or len(df) < 60:
                 continue
             df = df.rename(columns={"Open": "open", "High": "high", "Low": "low",
@@ -1847,7 +1859,7 @@ def kanit_dogrula_bist() -> dict:
     for n_i, ticker in enumerate(BIST_TICKERS, 1):
         try:
             print(f"[Kanıt Doğrulama BIST {n_i}/{len(BIST_TICKERS)}] {ticker}...", flush=True)
-            df = yf.Ticker(ticker).history(period="2y", interval="1d")
+            df = yf.Ticker(ticker).history(period="2y", interval="1d", timeout=20)
             if df is None or df.empty or len(df) < 60:
                 continue
             df = df.rename(columns={"Open": "open", "High": "high", "Low": "low",
@@ -1887,7 +1899,7 @@ def kanit_dogrula_us() -> dict:
     for n_i, ticker in enumerate(US_INSIDER_TICKERS, 1):
         try:
             print(f"[Kanıt Doğrulama US {n_i}/{len(US_INSIDER_TICKERS)}] {ticker}...", flush=True)
-            df = yf.Ticker(ticker).history(period="2y", interval="1d")
+            df = yf.Ticker(ticker).history(period="2y", interval="1d", timeout=20)
             if df is None or df.empty or len(df) < 60:
                 continue
             df = df.rename(columns={"Open": "open", "High": "high", "Low": "low",
@@ -1970,7 +1982,7 @@ def kanit_dogrula_abd_stratejileri_bistte() -> dict:
     for n_i, ticker in enumerate(BIST_TICKERS, 1):
         try:
             print(f"[ABD→BIST Transfer {n_i}/{len(BIST_TICKERS)}] {ticker}...", flush=True)
-            df = yf.Ticker(ticker).history(period="2y", interval="1d")
+            df = yf.Ticker(ticker).history(period="2y", interval="1d", timeout=20)
             if df is None or df.empty or len(df) < 60:
                 continue
             df = df.rename(columns={"Open": "open", "High": "high", "Low": "low",
@@ -2029,7 +2041,7 @@ def kanit_dogrulama_transfer_calistir() -> tuple:
                          f"— BIST o gün kapalı. En yakın önceki işlem gününe "
                          f"({hedef_tarih.date()}) kaydırıldı.\n\n")
 
-    index_df = yf.Ticker("XU100.IS").history(period="2y", interval="1d")
+    index_df = yf.Ticker("XU100.IS").history(period="2y", interval="1d", timeout=20)
     index_pct = None
     if index_df is not None and not index_df.empty:
         index_df.index = pd.to_datetime(index_df.index).tz_localize(None)
@@ -2055,7 +2067,7 @@ def kanit_dogrulama_transfer_calistir() -> tuple:
     ticker_df_cache = {}
     for ticker in BIST_TICKERS:
         try:
-            df = yf.Ticker(ticker).history(period="2y", interval="1d")
+            df = yf.Ticker(ticker).history(period="2y", interval="1d", timeout=20)
             if df is None or df.empty or len(df) < 100:
                 continue
             df = df.rename(columns={"Open": "open", "High": "high", "Low": "low",
@@ -2648,7 +2660,7 @@ def _trend_haftalik_fiyat(ticker: str) -> pd.DataFrame:
     """Haftalık kapanış fiyatlarını çeker (Google Trends'in haftalık
     çözünürlüğüyle eşleştirmek için)."""
     import yfinance as yf
-    df = yf.Ticker(ticker).history(period="2y", interval="1wk")
+    df = yf.Ticker(ticker).history(period="2y", interval="1wk", timeout=20)
     if df is None or df.empty:
         return pd.DataFrame()
     df = df.rename(columns={"Close": "close"})
@@ -2923,7 +2935,7 @@ def wiki_testi_calistir() -> tuple:
             wiki_df["izlenme_ort30"] = wiki_df["izlenme"].rolling(30, min_periods=15).mean()
             wiki_df["izlenme_orani"] = wiki_df["izlenme"] / wiki_df["izlenme_ort30"].replace(0, np.nan)
 
-            fiyat_df = yf.Ticker(ticker).history(period="2y", interval="1d")
+            fiyat_df = yf.Ticker(ticker).history(period="2y", interval="1d", timeout=20)
             if fiyat_df is None or fiyat_df.empty:
                 time.sleep(0.5)
                 continue
@@ -3004,7 +3016,7 @@ def wiki_dogrulama_calistir() -> tuple:
     for n_i, (ticker, makale) in enumerate(BIST_WIKI_MAKALE.items(), 1):
         try:
             print(f"[Wiki Doğrulama {n_i}/{len(BIST_WIKI_MAKALE)}] {ticker}...", flush=True)
-            df = yf.Ticker(ticker).history(period="2y", interval="1d")
+            df = yf.Ticker(ticker).history(period="2y", interval="1d", timeout=20)
             if df is None or df.empty or len(df) < 60:
                 time.sleep(0.5)
                 continue
@@ -3122,7 +3134,7 @@ def wiki_kanit_dogrulama_calistir() -> tuple:
     for n_i, (ticker, wiki_df) in enumerate(ticker_wiki.items(), 1):
         try:
             print(f"[Wiki Kanıt 2/2 - {n_i}/{len(ticker_wiki)}] {ticker}...", flush=True)
-            raw = yf.Ticker(ticker).history(period="2y", interval="1d")
+            raw = yf.Ticker(ticker).history(period="2y", interval="1d", timeout=20)
             if raw is None or raw.empty or len(raw) < 60:
                 continue
             raw = raw.rename(columns={"Open": "open", "High": "high", "Low": "low",
@@ -3188,9 +3200,9 @@ def makro_gurultu_testi_calistir() -> tuple:
     özet_dict) ya da (None, hata_mesajı)."""
     import yfinance as yf
 
-    sp500 = yf.Ticker("^GSPC").history(period="2y", interval="1d")
-    usdtry = yf.Ticker("USDTRY=X").history(period="2y", interval="1d")
-    xu100 = yf.Ticker("XU100.IS").history(period="2y", interval="1d")
+    sp500 = yf.Ticker("^GSPC").history(period="2y", interval="1d", timeout=20)
+    usdtry = yf.Ticker("USDTRY=X").history(period="2y", interval="1d", timeout=20)
+    xu100 = yf.Ticker("XU100.IS").history(period="2y", interval="1d", timeout=20)
     if sp500 is None or sp500.empty or usdtry is None or usdtry.empty or xu100 is None or xu100.empty:
         return None, "S&P500/USDTRY/XU100 verisi çekilemedi."
 
@@ -3267,7 +3279,7 @@ def makro_gurultu_testi_calistir() -> tuple:
     hisse_getirileri = []
     for ticker in BIST_TICKERS:
         try:
-            df = yf.Ticker(ticker).history(period="2y", interval="1d")
+            df = yf.Ticker(ticker).history(period="2y", interval="1d", timeout=20)
             if df is None or df.empty:
                 continue
             df.index = pd.to_datetime(df.index).tz_localize(None)
@@ -5932,7 +5944,7 @@ def build_hesap_makinesi(ticker: str) -> str:
         ticker = ticker.upper()
 
     try:
-        df = yf.Ticker(ticker).history(period="6mo", interval="1d")
+        df = yf.Ticker(ticker).history(period="6mo", interval="1d", timeout=20)
         if df is None or df.empty or len(df) < 60:
             return f"🧮 {ticker}: yeterli geçmiş veri yok (en az ~60 gün gerekli)."
         df = df.rename(columns={"Open": "open", "High": "high", "Low": "low",
@@ -5942,7 +5954,7 @@ def build_hesap_makinesi(ticker: str) -> str:
 
         index_pct = None
         try:
-            idf = yf.Ticker("XU100.IS").history(period="6mo", interval="1d")
+            idf = yf.Ticker("XU100.IS").history(period="6mo", interval="1d", timeout=20)
             if idf is not None and not idf.empty:
                 idf.index = pd.to_datetime(idf.index).tz_localize(None)
                 index_pct = (idf["Close"] - idf["Close"].shift(1)) / idf["Close"].shift(1) * 100
@@ -6015,7 +6027,7 @@ def check_hesap_makinesi_sonuclari():
         if now_ist.date() <= gun:
             continue  # ertesi gun henuz gelmedi
         try:
-            df15 = yf.Ticker(r["ticker"]).history(period="60d", interval="15m")
+            df15 = yf.Ticker(r["ticker"]).history(period="60d", interval="15m", timeout=20)
             if df15 is None or df15.empty:
                 continue
             idx = pd.to_datetime(df15.index)
