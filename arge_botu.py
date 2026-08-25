@@ -49,7 +49,7 @@ import threading
 # mesajlarında görünür kılmak için (2026-08-17: 3 kez üst üste "aynı
 # sonuç geldi" şüphesi sonrası eklendi - deploy'un gerçekten güncel
 # olup olmadığını KANITLA göstermek için).
-ARGE_KOD_SURUMU = "v47-sikisma-v2-ve-teshis-birlesik-2026-08-19"
+ARGE_KOD_SURUMU = "v48-komut-cakismasi-duzeltildi-2026-08-19"
 import warnings
 from datetime import datetime, timezone
 
@@ -5795,6 +5795,22 @@ def poll_arge_commands():
                 threading.Thread(target=_arka_plan_debug, args=(parcalar[1], parcalar[2]), daemon=True).start()
         elif text.startswith("/hesap_sonuclari"):
             send_telegram_message(build_hesap_sonuclari())
+        elif text.startswith("/hesap_test_seri"):
+            parcalar = text.split()[1:]
+            if not parcalar:
+                send_telegram_message(f"Kullanım: /hesap_test_seri 2026-06-01 2026-06-08 2026-06-15 "
+                                       f"(en fazla {MAX_SERI_TARIH} tarih, boşlukla ayrılmış)")
+            else:
+                send_telegram_message(f"🧮 {len(parcalar)} tarih sırayla test edilecek "
+                                       f"(ARKA PLANDA, ana botu bloklamadan), her biri ayrı mesaj "
+                                       f"olarak gelecek — birkaç dakika sürebilir...")
+
+                def _arka_plan_seri(tarihler):
+                    try:
+                        hesap_makinesi_backtest_seri(tarihler)
+                    except Exception as e:
+                        send_telegram_message(f"🧮 Seri test hatası: {e}")
+                threading.Thread(target=_arka_plan_seri, args=(parcalar,), daemon=True).start()
         elif text.startswith("/hesap_test"):
             parcalar = text.split()
             if len(parcalar) < 2:
@@ -5812,22 +5828,6 @@ def poll_arge_commands():
                 threading.Thread(target=_arka_plan_test, args=(parcalar[1],), daemon=True).start()
         elif text.startswith("/hesap_rapor"):
             send_telegram_message(build_hesap_rapor())
-        elif text.startswith("/hesap_test_seri"):
-            parcalar = text.split()[1:]
-            if not parcalar:
-                send_telegram_message(f"Kullanım: /hesap_test_seri 2026-06-01 2026-06-08 2026-06-15 "
-                                       f"(en fazla {MAX_SERI_TARIH} tarih, boşlukla ayrılmış)")
-            else:
-                send_telegram_message(f"🧮 {len(parcalar)} tarih sırayla test edilecek "
-                                       f"(ARKA PLANDA, ana botu bloklamadan), her biri ayrı mesaj "
-                                       f"olarak gelecek — birkaç dakika sürebilir...")
-
-                def _arka_plan_seri(tarihler):
-                    try:
-                        hesap_makinesi_backtest_seri(tarihler)
-                    except Exception as e:
-                        send_telegram_message(f"🧮 Seri test hatası: {e}")
-                threading.Thread(target=_arka_plan_seri, args=(parcalar,), daemon=True).start()
         elif text.startswith("/hesap_tam_test"):
             parcalar = text.split()
             baslangic = parcalar[1] if len(parcalar) > 1 else "2026-01-01"
@@ -6397,36 +6397,6 @@ def poll_arge_commands():
                 except Exception as e:
                     send_telegram_message(f"🏹 Gösterge cephaneliği hatası: {e}")
             threading.Thread(target=_arka_plan_cephanelik, args=(hisse_sayisi,), daemon=True).start()
-        elif text.startswith("/sikisma_turnuvasi"):
-            parcalar = text.split()
-            hisse_sayisi = int(parcalar[1]) if len(parcalar) > 1 else 60
-            send_telegram_message(
-                f"🌀 HAREKET-ÖNCESİ SIKIŞMA TURNUVASI başlıyor ({hisse_sayisi} "
-                f"hisse): NR7, İç Mum, Bollinger Genişlik Sıkışması, TTM "
-                f"Squeeze, ATR Persentil Sıkışması - hepsi 'hareket "
-                f"başlamadan önce yakala' mantığında, kör temel çizgiyle "
-                f"birlikte test ediliyor. ARKA PLANDA çalışıyor, biraz "
-                f"sürebilir, bitince CSV + özet göndereceğim."
-            )
-
-            def _arka_plan_sikisma(hs):
-                try:
-                    dosya_yolu, ozet = hareket_oncesi_sikisma_turnuvasi_calistir(hs)
-                    if dosya_yolu is None:
-                        send_telegram_message(f"🌀 Sıkışma turnuvası başarısız: {ozet}")
-                        return
-                    satirlar = ["🌀 Hareket-Öncesi Sıkışma Turnuvası Sonucu (R farkına göre sıralı)\n"]
-                    for s in ozet["satirlar"]:
-                        fark_str = f", kör R farkı: {s['kor_R_farki']:+.4f}" \
-                            if s.get("kor_R_farki") is not None else ""
-                        satirlar.append(
-                            f"{s['strateji']}: n={s['toplam_sinyal']}, "
-                            f"%{s['kazanma_orani_pct']} isabet, ort R={s['ort_R']}{fark_str}"
-                        )
-                    send_telegram_document(dosya_yolu, caption="\n".join(satirlar))
-                except Exception as e:
-                    send_telegram_message(f"🌀 Sıkışma turnuvası hatası: {e}")
-            threading.Thread(target=_arka_plan_sikisma, args=(hisse_sayisi,), daemon=True).start()
         elif text.startswith("/sikisma_turnuvasi_v2"):
             parcalar = text.split()
             liste = parcalar[1] if len(parcalar) > 1 and parcalar[1] in ("volatil", "buyuk") else "volatil"
@@ -6458,6 +6428,36 @@ def poll_arge_commands():
                 except Exception as e:
                     send_telegram_message(f"🌀 Sıkışma turnuvası v2 hatası: {e}")
             threading.Thread(target=_arka_plan_sikisma_v2, args=(liste, hisse_sayisi2), daemon=True).start()
+        elif text.startswith("/sikisma_turnuvasi"):
+            parcalar = text.split()
+            hisse_sayisi = int(parcalar[1]) if len(parcalar) > 1 else 60
+            send_telegram_message(
+                f"🌀 HAREKET-ÖNCESİ SIKIŞMA TURNUVASI başlıyor ({hisse_sayisi} "
+                f"hisse): NR7, İç Mum, Bollinger Genişlik Sıkışması, TTM "
+                f"Squeeze, ATR Persentil Sıkışması - hepsi 'hareket "
+                f"başlamadan önce yakala' mantığında, kör temel çizgiyle "
+                f"birlikte test ediliyor. ARKA PLANDA çalışıyor, biraz "
+                f"sürebilir, bitince CSV + özet göndereceğim."
+            )
+
+            def _arka_plan_sikisma(hs):
+                try:
+                    dosya_yolu, ozet = hareket_oncesi_sikisma_turnuvasi_calistir(hs)
+                    if dosya_yolu is None:
+                        send_telegram_message(f"🌀 Sıkışma turnuvası başarısız: {ozet}")
+                        return
+                    satirlar = ["🌀 Hareket-Öncesi Sıkışma Turnuvası Sonucu (R farkına göre sıralı)\n"]
+                    for s in ozet["satirlar"]:
+                        fark_str = f", kör R farkı: {s['kor_R_farki']:+.4f}" \
+                            if s.get("kor_R_farki") is not None else ""
+                        satirlar.append(
+                            f"{s['strateji']}: n={s['toplam_sinyal']}, "
+                            f"%{s['kazanma_orani_pct']} isabet, ort R={s['ort_R']}{fark_str}"
+                        )
+                    send_telegram_document(dosya_yolu, caption="\n".join(satirlar))
+                except Exception as e:
+                    send_telegram_message(f"🌀 Sıkışma turnuvası hatası: {e}")
+            threading.Thread(target=_arka_plan_sikisma, args=(hisse_sayisi,), daemon=True).start()
         elif text.startswith("/ai_model_backtest"):
             send_telegram_message(
                 f"🤖 GERÇEK AI MODEL BACKTEST başlıyor: model.pkl ve "
