@@ -49,7 +49,7 @@ import threading
 # mesajlarında görünür kılmak için (2026-08-17: 3 kez üst üste "aynı
 # sonuç geldi" şüphesi sonrası eklendi - deploy'un gerçekten güncel
 # olup olmadığını KANITLA göstermek için).
-ARGE_KOD_SURUMU = "v49-atr-olcekli-sikisma-v3-2026-08-19"
+ARGE_KOD_SURUMU = "v50-hacim-daralma-percent-b-2026-08-19"
 import warnings
 from datetime import datetime, timezone
 
@@ -5575,6 +5575,143 @@ def sikisma_turnuvasi_v3_calistir(hisse_listesi: str = "volatil", max_hisse: int
 
 
 # =============================================================================
+# SIKIŞMA TURNUVASI v4 — HACİM DARALMA ÖRÜNTÜSÜ + %B STABİLİZASYONU
+# =============================================================================
+# 2026-08-19 - GEREKÇE: Kullanıcı Bollinger Bandı Yürüyüşü'nü (v3'ün en
+# iyisi) reddetti - o "hareket zaten başladı, devam ediyor mu" sorusuna
+# cevap veriyordu, "hareket henüz başlamadan" değil. İki YENİ, daha
+# sofistike sıkışma kavramı:
+# (1) HACİM DARALMA ÖRÜNTÜSÜ (Volume Contraction Pattern - Minervini'nin
+#     tanıdığı bir yöntem): fiyat aralığı ART ARDA birkaç "dalga" boyunca
+#     HER SEFERINDE daha dar hale geliyor VE hacim de AYNI ANDA azalıyor -
+#     tek günlük NR7/İç Mum'dan daha güçlü, çok-periyotlu bir "sessizlik
+#     birikiyor" hikayesi.
+# (2) BOLLINGER %B STABİLİZASYONU: ham bant genişliği yerine, fiyatın
+#     KENDİ bandı İÇİNDEKİ konumunun (%B) ne kadar İSTİKRARLI kaldığına
+#     bakıyor - farklı bir sıkışma ölçüsü.
+# AYNI kanıtlanmış metodoloji: volatil hisse evreni + ATR-ölçekli
+# hedefler + release+AO yön mantığı (v3'te doğrulanan).
+
+HACIM_DARALMA_PENCERE = 5
+HACIM_DARALMA_DALGA_SAYISI = 3
+PERCENT_B_STAB_PENCERE = 10
+PERCENT_B_STAB_PERSENTIL = 0.15
+
+
+def _hacim_daralma_orintusu_tespit(high, low, volume, n=5, dalga_sayisi=3):
+    """Ardışık `dalga_sayisi` adet `n`-günlük pencerede hem fiyat aralığı
+    hem hacim HER SEFERINDE (gecmisten bugune) daralıyor mu - Minervini
+    tarzı 'Volume Contraction Pattern'."""
+    aralik_ort = (high - low).rolling(n).mean()
+    hacim_ort = volume.rolling(n).mean()
+    daralma = pd.Series(True, index=high.index)
+    hacim_azalis = pd.Series(True, index=high.index)
+    for i in range(dalga_sayisi - 1):
+        daralma = daralma & (aralik_ort.shift(i * n) < aralik_ort.shift((i + 1) * n))
+        hacim_azalis = hacim_azalis & (hacim_ort.shift(i * n) < hacim_ort.shift((i + 1) * n))
+    return daralma & hacim_azalis
+
+
+def _percent_b_hesapla(close, n=20, k=2.0):
+    orta = close.rolling(n).mean()
+    std = close.rolling(n).std()
+    alt, ust = orta - k * std, orta + k * std
+    return (close - alt) / (ust - alt).replace(0, np.nan)
+
+
+def _percent_b_stabilizasyon_tespit(percent_b, pencere=10, esik_persentil=0.15):
+    """%B'nin KENDİ oynaklığı (rolling std) kendi 60-günlük tarihinde en
+    düşük noktasında mı - farklı bir sıkışma ölçüsü (ham bant genişliği
+    değil, fiyatın bant İÇİNDEKİ konum istikrarı)."""
+    pb_std = percent_b.rolling(pencere).std()
+    esik = pb_std.rolling(60).quantile(esik_persentil)
+    return pb_std <= esik
+
+
+def sikisma_turnuvasi_v4_calistir(hisse_listesi: str = "volatil", max_hisse: int = 40) -> tuple:
+    """Hacim Daralma Örüntüsü + %B Stabilizasyonu'nu, v3'ün AYNI
+    metodolojisiyle (ATR-ölçekli hedef, release+AO yön, volatil hisse
+    evreni) test eder. Döner: (dosya_yolu, özet_dict) ya da (None,
+    hata_mesajı)."""
+    import yfinance as yf
+
+    hisseler = (US_VOLATIL_TICKERS if hisse_listesi == "volatil" else US_INSIDER_TICKERS)[:max_hisse]
+    isimler = ["Hacim Daralma Örüntüsü (release+AO)", "%B Stabilizasyonu (release+AO)"]
+    tum_sonuclar = {isim: [] for isim in isimler}
+    tum_sonuclar["[KÖR] Koşulsuz LONG"] = []
+    tum_sonuclar["[KÖR] Koşulsuz SHORT"] = []
+
+    for n_i, ticker in enumerate(hisseler, 1):
+        try:
+            print(f"[Sıkışma v4 {n_i}/{len(hisseler)}] {ticker}...", flush=True)
+            gunluk = yf.Ticker(ticker).history(period="2y", interval="1d", timeout=20)
+            if gunluk is None or gunluk.empty or len(gunluk) < 120:
+                print(f"[Sıkışma v4] {ticker}: yetersiz veri, atlanıyor.", flush=True)
+                continue
+            gunluk = gunluk.rename(columns={"Close": "close", "High": "high", "Low": "low",
+                                             "Open": "open", "Volume": "volume"})
+            gunluk.index = pd.to_datetime(gunluk.index).tz_localize(None)
+            gunluk = gunluk.reset_index(drop=True)
+
+            tr = pd.concat([(gunluk["high"] - gunluk["low"]),
+                             (gunluk["high"] - gunluk["close"].shift()).abs(),
+                             (gunluk["low"] - gunluk["close"].shift()).abs()], axis=1).max(axis=1)
+            gunluk["atr14"] = tr.rolling(14).mean()
+            gunluk["ao"] = _awesome_oscillator_hesapla(gunluk["high"], gunluk["low"])
+
+            gunluk["hacim_daralma"] = _hacim_daralma_orintusu_tespit(
+                gunluk["high"], gunluk["low"], gunluk["volume"],
+                HACIM_DARALMA_PENCERE, HACIM_DARALMA_DALGA_SAYISI)
+            gunluk["percent_b"] = _percent_b_hesapla(gunluk["close"])
+            gunluk["pb_stabil"] = _percent_b_stabilizasyon_tespit(
+                gunluk["percent_b"], PERCENT_B_STAB_PENCERE, PERCENT_B_STAB_PERSENTIL)
+
+            baslangic = max(HACIM_DARALMA_PENCERE * HACIM_DARALMA_DALGA_SAYISI, 60, 20) + 5
+            for idx in range(baslangic, len(gunluk) - 11):
+                row = gunluk.iloc[idx]
+                onceki = gunluk.iloc[idx - 1]
+
+                kor_long = _kanit_us_checkpoint_sonuc_atr_olcekli(gunluk, idx, "LONG")
+                if kor_long is not None:
+                    tum_sonuclar["[KÖR] Koşulsuz LONG"].append(kor_long)
+                kor_short = _kanit_us_checkpoint_sonuc_atr_olcekli(gunluk, idx, "SHORT")
+                if kor_short is not None:
+                    tum_sonuclar["[KÖR] Koşulsuz SHORT"].append(kor_short)
+
+                yon_ao = "LONG" if row["ao"] > 0 else ("SHORT" if row["ao"] < 0 else None)
+                if not yon_ao:
+                    continue
+
+                if bool(onceki["hacim_daralma"]) and not bool(row["hacim_daralma"]):
+                    sonuc = _kanit_us_checkpoint_sonuc_atr_olcekli(gunluk, idx, yon_ao)
+                    if sonuc is not None:
+                        tum_sonuclar["Hacim Daralma Örüntüsü (release+AO)"].append(sonuc)
+                if bool(onceki["pb_stabil"]) and not bool(row["pb_stabil"]):
+                    sonuc = _kanit_us_checkpoint_sonuc_atr_olcekli(gunluk, idx, yon_ao)
+                    if sonuc is not None:
+                        tum_sonuclar["%B Stabilizasyonu (release+AO)"].append(sonuc)
+        except Exception as e:
+            print(f"[Sıkışma v4] {ticker} hata: {e}", flush=True)
+        time.sleep(0.3)
+
+    satirlar = _kanit_ozet_tablosu(tum_sonuclar)
+    if not satirlar:
+        return None, "Hiçbir strateji için yeterli veri üretilemedi."
+
+    kor_long = next((s["kazanma_orani_pct"] for s in satirlar if s["strateji"] == "[KÖR] Koşulsuz LONG"), None)
+    kor_long_r = next((s["ort_R"] for s in satirlar if s["strateji"] == "[KÖR] Koşulsuz LONG"), None)
+    for s in satirlar:
+        s["kor_isabet_farki"] = round(s["kazanma_orani_pct"] - kor_long, 2) if kor_long is not None and s["kazanma_orani_pct"] is not None else None
+        s["kor_R_farki"] = round(s["ort_R"] - kor_long_r, 4) if kor_long_r is not None and s["ort_R"] is not None else None
+
+    tablo = pd.DataFrame(satirlar).sort_values("kor_R_farki", ascending=False)
+    dosya_yolu = _data_path("sikisma_turnuvasi_v4.csv")
+    tablo.to_csv(dosya_yolu, index=False, encoding="utf-8-sig")
+    return dosya_yolu, {"satirlar": satirlar, "hisse_listesi": hisse_listesi,
+                         "denenen_hisse_sayisi": len(hisseler)}
+
+
+# =============================================================================
 # EKŞİ SÖZLÜK BAĞLANTI TESTİ — 2026-08-19
 # =============================================================================
 # GEREKÇE: Ekşi Sözlük'ün resmi bir API'si yok - sadece web sayfası
@@ -5701,6 +5838,9 @@ def send_startup_message():
         "ama ATR-ÖLÇEKLİ hedeflerle (sabit %1-5 yerine hissenin kendi "
         "volatilitesine göre) - volatil hisselerde sabit hedefin "
         "anlamsızlaşma sorununu çözmek için\n"
+        "/sikisma_turnuvasi_v4 [volatil|buyuk] [HİSSE_SAYISI] — Hacim "
+        "Daralma Örüntüsü (çok-periyotlu, Minervini tarzı) + %B "
+        "Stabilizasyonu, v3'ün aynı metodolojisiyle\n"
         "/wiki_dogrulama — /wiki_testi'nin bulgusunu (yüksek izlenme -> "
         "LONG) izole, gerçek R:R çıkışıyla yeniden doğrular\n"
         "/eksisozluk_test [BAŞLIK] — Ekşi Sözlük'ten veri çekilebiliyor "
@@ -6585,6 +6725,37 @@ def poll_arge_commands():
                 except Exception as e:
                     send_telegram_message(f"🏹 Gösterge cephaneliği hatası: {e}")
             threading.Thread(target=_arka_plan_cephanelik, args=(hisse_sayisi,), daemon=True).start()
+        elif text.startswith("/sikisma_turnuvasi_v4"):
+            parcalar = text.split()
+            liste4 = parcalar[1] if len(parcalar) > 1 and parcalar[1] in ("volatil", "buyuk") else "volatil"
+            hisse_sayisi4 = int(parcalar[2]) if len(parcalar) > 2 else 40
+            send_telegram_message(
+                f"🌀 SIKIŞMA TURNUVASI v4 başlıyor (liste: {liste4}, {hisse_sayisi4} "
+                f"hisse): Hacim Daralma Örüntüsü (çok-periyotlu, Minervini "
+                f"tarzı) + %B Stabilizasyonu - v3'ün AYNI kanıtlanmış "
+                f"metodolojisiyle (ATR-ölçekli hedef, release+AO yön). ARKA "
+                f"PLANDA çalışıyor, bitince CSV + özet göndereceğim."
+            )
+
+            def _arka_plan_sikisma_v4(l, hs):
+                try:
+                    dosya_yolu, ozet = sikisma_turnuvasi_v4_calistir(l, hs)
+                    if dosya_yolu is None:
+                        send_telegram_message(f"🌀 Sıkışma turnuvası v4 başarısız: {ozet}")
+                        return
+                    satirlar = [f"🌀 Sıkışma Turnuvası v4 Sonucu (liste: {ozet['hisse_listesi']}, "
+                                f"{ozet['denenen_hisse_sayisi']} hisse)\n"]
+                    for s in ozet["satirlar"]:
+                        fark_str = f", kör R farkı: {s['kor_R_farki']:+.4f}" \
+                            if s.get("kor_R_farki") is not None else ""
+                        satirlar.append(
+                            f"{s['strateji']}: n={s['toplam_sinyal']}, "
+                            f"%{s['kazanma_orani_pct']} isabet, ort R={s['ort_R']}{fark_str}"
+                        )
+                    send_telegram_document(dosya_yolu, caption="\n".join(satirlar))
+                except Exception as e:
+                    send_telegram_message(f"🌀 Sıkışma turnuvası v4 hatası: {e}")
+            threading.Thread(target=_arka_plan_sikisma_v4, args=(liste4, hisse_sayisi4), daemon=True).start()
         elif text.startswith("/sikisma_turnuvasi_v3"):
             parcalar = text.split()
             liste3 = parcalar[1] if len(parcalar) > 1 and parcalar[1] in ("volatil", "buyuk") else "volatil"
