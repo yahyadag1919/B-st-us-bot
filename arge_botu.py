@@ -49,7 +49,7 @@ import threading
 # mesajlarında görünür kılmak için (2026-08-17: 3 kez üst üste "aynı
 # sonuç geldi" şüphesi sonrası eklendi - deploy'un gerçekten güncel
 # olup olmadığını KANITLA göstermek için).
-ARGE_KOD_SURUMU = "v51-tum-yfinance-timeout-duzeltmesi-2026-08-19"
+ARGE_KOD_SURUMU = "v52-sert-thread-zaman-asimi-2026-08-19"
 import warnings
 from datetime import datetime, timezone
 
@@ -1522,6 +1522,42 @@ def _edgar_form4_detay(cik: str, accession: str) -> list:
         return []
 
 
+def _edgar_tek_hisse_isle(ticker: str, cik: str, gun_ufku: int) -> list:
+    """Bir hissenin TÜM EDGAR işlemesini yapar (fiyat çekme + Form4 listesi
+    + detaylar) - ThreadPoolExecutor ile SERT bir zaman aşımına sarılacak,
+    bu yüzden fonksiyonun İÇİNDE NEREDE takılırsa takılsın (fiyat çekme,
+    form4 listesi, form4 detayı - hepsi) dışarıdan zorla durdurulabilir."""
+    import yfinance as yf
+    kayitlar = []
+    fiyat_df = yf.Ticker(ticker).history(period="2y", interval="1d", timeout=20)
+    if fiyat_df is None or fiyat_df.empty:
+        return kayitlar
+    fiyat_df = fiyat_df.rename(columns={"Close": "close"})
+    fiyat_df.index = pd.to_datetime(fiyat_df.index).tz_localize(None)
+
+    form4ler = _edgar_form4_listesi(cik, ticker)
+    time.sleep(0.15)
+    for f in form4ler[:30]:
+        detaylar = _edgar_form4_detay(cik, f["accession"])
+        time.sleep(0.15)
+        for d in detaylar:
+            try:
+                islem_tarihi = pd.to_datetime(d["tarih"]).tz_localize(None)
+            except Exception:
+                continue
+            giris_konum = fiyat_df.index.get_indexer([islem_tarihi], method="nearest")[0]
+            if giris_konum < 0 or giris_konum + gun_ufku >= len(fiyat_df):
+                continue
+            giris_fiyat = fiyat_df.iloc[giris_konum]["close"]
+            cikis_fiyat = fiyat_df.iloc[giris_konum + gun_ufku]["close"]
+            if giris_fiyat == 0 or pd.isna(giris_fiyat) or pd.isna(cikis_fiyat):
+                continue
+            getiri = (cikis_fiyat - giris_fiyat) / giris_fiyat * 100
+            kayitlar.append({"ticker": ticker, "tarih": d["tarih"],
+                              "tur": d["tur"], "getiri_pct": round(getiri, 3)})
+    return kayitlar
+
+
 def icgorusel_islem_testi_edgar_calistir(gun_ufku: int = ICGORUSEL_ISLEM_GUN_UFKU,
                                           max_hisse: int = None) -> tuple:
     """yfinance yerine SEC EDGAR'ı kullanan versiyon. max_hisse=None ise
@@ -1532,60 +1568,48 @@ def icgorusel_islem_testi_edgar_calistir(gun_ufku: int = ICGORUSEL_ISLEM_GUN_UFK
     satış yapınca) - bu, örneklemi YAPAY şişiriyordu (AAPL'de aynı gün
     aynı getiri 8 kez tekrarlanmıştı). Artık istatistik HESAPLANMADAN
     ÖNCE (ticker, tarih, tür) bazında tekilleştiriliyor - CSV'ye ham hali
-    yazılıyor (şeffaflık için) ama özet/anlamlılık TEKİL veriden."""
-    import yfinance as yf
+    yazılıyor (şeffaflık için) ama özet/anlamlılık TEKİL veriden.
+    2026-08-19 İKİNCİ DÜZELTME: kullanıcı iki ayrı denemede iki farklı
+    hissede (AVGO 20/106, sonra AMD 27/106) saatlerce donma yaşadı - ilk
+    düzeltme (yfinance timeout + iç döngü zaman bütçesi) yetersiz kaldı
+    çünkü _edgar_form4_listesi() çağrısının KENDİSİ korumasızdı. Artık
+    HER HİSSENİN TÜM işlemesi ThreadPoolExecutor ile SERT bir zaman
+    aşımına (120sn) sarılı - fonksiyonun içinde NEREDE takılırsa takılsın
+    (hangi çağrı olursa olsun) 120sn sonra zorla vazgeçilip sonraki
+    hisseye geçiliyor, bir daha sonsuza kadar donma OLAMAZ."""
+    import concurrent.futures
     cik_haritasi = _edgar_cik_haritasi()
     if not cik_haritasi:
         return None, "SEC CIK haritası çekilemedi."
 
+    HISSE_SERT_ZAMAN_ASIMI_SANIYE = 120
     kayitlar = []
     hisseler = US_INSIDER_TICKERS if max_hisse is None else US_INSIDER_TICKERS[:max_hisse]
     for n_i, ticker in enumerate(hisseler, 1):
         cik = cik_haritasi.get(ticker)
         if not cik:
             continue
-        hisse_baslangic_zamani = time.time()
-        HISSE_ZAMAN_BUTCESI_SANIYE = 90  # 2026-08-19: tek hissede sonsuza
-        # kadar takilmayi ONLEMEK icin sert bir ust sinir - kullanicinin
-        # 106 hisselik taramada AVGO'da (20/106) 50+ dakika donmasi
-        # ustune eklendi.
+        print(f"[EDGAR İçeriden İşlem {n_i}/{len(hisseler)}] {ticker}...", flush=True)
+        # 2026-08-19 KRİTİK DÜZELTME: `with ThreadPoolExecutor(...)` kalıbı
+        # KULLANILMIYOR bilerek - `with` bloğu çıkışta executor.shutdown(wait=True)
+        # çağırır, bu da SIKIŞMIŞ thread'in bitmesini BEKLER, yani
+        # .result(timeout=...) zaman aşımına uğrasa bile with bloğunun
+        # kendisi yine sonsuza kadar takılırdı. shutdown(wait=False) ile
+        # takılan thread arka planda "sızdırılıyor" (zararsız, tek
+        # seferlik) ama ana döngü ASLA beklemeden ilerliyor.
+        executor = concurrent.futures.ThreadPoolExecutor(max_workers=1)
         try:
-            print(f"[EDGAR İçeriden İşlem {n_i}/{len(hisseler)}] {ticker}...", flush=True)
-            # 2026-08-19 DUZELTME: bu cagrida timeout HIC yoktu - muhtemel
-            # donma kaynagi buydu, digerlerinde zaten timeout=20 vardi.
-            fiyat_df = yf.Ticker(ticker).history(period="2y", interval="1d", timeout=20)
-            if fiyat_df is None or fiyat_df.empty:
-                continue
-            fiyat_df = fiyat_df.rename(columns={"Close": "close"})
-            fiyat_df.index = pd.to_datetime(fiyat_df.index).tz_localize(None)
-
-            form4ler = _edgar_form4_listesi(cik, ticker)
-            time.sleep(0.15)
-            for f in form4ler[:30]:  # her hisse icin en fazla 30 son dosyalama
-                if time.time() - hisse_baslangic_zamani > HISSE_ZAMAN_BUTCESI_SANIYE:
-                    print(f"[EDGAR İçeriden İşlem] {ticker}: zaman bütçesi "
-                          f"({HISSE_ZAMAN_BUTCESI_SANIYE}sn) aşıldı, sonraki "
-                          f"hisseye geçiliyor.", flush=True)
-                    break
-                detaylar = _edgar_form4_detay(cik, f["accession"])
-                time.sleep(0.15)
-                for d in detaylar:
-                    try:
-                        islem_tarihi = pd.to_datetime(d["tarih"]).tz_localize(None)
-                    except Exception:
-                        continue
-                    giris_konum = fiyat_df.index.get_indexer([islem_tarihi], method="nearest")[0]
-                    if giris_konum < 0 or giris_konum + gun_ufku >= len(fiyat_df):
-                        continue
-                    giris_fiyat = fiyat_df.iloc[giris_konum]["close"]
-                    cikis_fiyat = fiyat_df.iloc[giris_konum + gun_ufku]["close"]
-                    if giris_fiyat == 0 or pd.isna(giris_fiyat) or pd.isna(cikis_fiyat):
-                        continue
-                    getiri = (cikis_fiyat - giris_fiyat) / giris_fiyat * 100
-                    kayitlar.append({"ticker": ticker, "tarih": d["tarih"],
-                                      "tur": d["tur"], "getiri_pct": round(getiri, 3)})
+            gelecek = executor.submit(_edgar_tek_hisse_isle, ticker, cik, gun_ufku)
+            hisse_kayitlari = gelecek.result(timeout=HISSE_SERT_ZAMAN_ASIMI_SANIYE)
+            kayitlar.extend(hisse_kayitlari)
+        except concurrent.futures.TimeoutError:
+            print(f"[EDGAR İçeriden İşlem] {ticker}: SERT zaman aşımı "
+                  f"({HISSE_SERT_ZAMAN_ASIMI_SANIYE}sn) - zorla vazgeçildi, "
+                  f"sonraki hisseye geçiliyor.", flush=True)
         except Exception as e:
             print(f"[EDGAR İçeriden İşlem] {ticker} hata: {e}", flush=True)
+        finally:
+            executor.shutdown(wait=False)
 
     if not kayitlar:
         return None, "EDGAR'dan hiçbir işlem kaydı üretilemedi."
