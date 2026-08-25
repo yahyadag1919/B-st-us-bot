@@ -1,7 +1,7 @@
-# us_sinyal_botu.py — TEMİZ, MİNİMAL BAĞIMLILIKLAR (2026-08-19)
-# Eski projenin AI/ML kütüphaneleri (xgboost, scikit-learn, joblib),
-# KAP/pykap, Google Trends/pytrends bağımlılıkları TAMAMEN KALDIRILDI -
-# yeni sistem bunların hiçbirini kullanmıyor.
+# us_sinyal_botu.py — BAĞIMLILIKLAR (2026-08-19, arge_botu.py entegrasyonuyla güncellendi)
+# Not: "temiz/minimal" notu artık geçerli değil - arge_botu.py (araştırma
+# botu) us_sinyal_botu.py içine entegre edildiği için onun bağımlılıkları
+# da eklendi.
 
 flask>=3.0                # /health endpoint'i (Render'ın PORT'u dinlemesi için)
 requests>=2.32             # Telegram API çağrıları
@@ -12,3 +12,14 @@ yfinance>=0.2.65
 
 pandas>=2.2
 numpy>=1.26
+
+# --- arge_botu.py (Ar-Ge/araştırma botu) entegrasyonu için gerekli ---
+scipy>=1.11                 # binom anlamlılık testi (kanit_dogrulama, gösterge turnuvaları vb.)
+google-genai>=0.3.0         # AI hipotez üretme döngüsü (Gemini API)
+
+# --- arge_botu.py'nin BAZI komutları için (opsiyonel özellikler) ---
+# Bu üçü olmadan da bot çalışır, sadece ilgili komutlar hata verir:
+pykap                       # /pykap_test (KAP bildirimleri - önceden güncel değil bulunmuştu)
+pytrends>=4.9                # /trend_testi (Google Trends - önceden tutarsız bulunmuştu)
+joblib>=1.3.0                # /ai_model_backtest, /ai_ozellik_onemi (model.pkl yükleme)
+xgboost>=2.0.0               # aynı - model.pkl/overnight_model.pkl'nin kendisi XGBClassifier

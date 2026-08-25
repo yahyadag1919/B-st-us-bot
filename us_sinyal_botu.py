@@ -51,7 +51,7 @@ DATA_DIR = os.environ.get("DATA_DIR", ".")
 PORT = int(os.environ.get("PORT", "10000"))
 TARAMA_ARALIGI_SANIYE = int(os.environ.get("TARAMA_ARALIGI_SANIYE", "900"))  # 15 dk
 
-BOT_KOD_SURUMU = "v2-konsolide-bildirim-celiski-saatlik-kontrol-2026-08-19"
+BOT_KOD_SURUMU = "v3-arge-botu-entegrasyonu-2026-08-19"
 
 US_TICKERS = [
     "AAPL", "MSFT", "GOOGL", "AMZN", "NVDA", "META", "TSLA", "BRK-B", "JPM",
@@ -586,10 +586,46 @@ def send_startup_message():
         f"alınmaz.\n"
         f"⏱️ Hedef kontrolü artık saatte bir yapılıyor (günde bir yerine).\n"
         f"🔁 Kendi kendine ping: 10 dk'da bir (Render uyku moduna girmesin diye)\n\n"
+        f"🔬 Ar-Ge Botu entegre edildi: {'✅ aktif' if _ARGE_MODUL_YUKLENDI else '❌ yüklenemedi'} "
+        f"(ayrı Telegram token/sohbet - araştırma komutları oradan çalışır)\n\n"
         f"Komutlar:\n/durum — açık/kapalı sinyal özeti\n"
         f"/liste — tüm kayıtları CSV olarak gönderir\n\n"
         f"⚠️ Bu bot SADECE sinyal üretir, otomatik emir vermez."
     )
+
+
+# =============================================================================
+# AR-GE BOTU ENTEGRASYONU (arge_botu.py) — 2026-08-19
+# =============================================================================
+# GEREKÇE: arge_botu.py eskiden stock_screener_bot.py'nin içinden (aynı
+# process, arka plan thread'i) çalışıyordu - kendi ARGE_TELEGRAM_TOKEN/
+# ARGE_TELEGRAM_CHAT_ID'siyle (futbol botunun eski entegrasyon deseniyle
+# birebir aynı). stock_screener_bot.py tamamen kaldırılınca arge_botu.py
+# hiçbir yerden çağrılmaz oldu - dosya repo'da duruyordu ama hiç
+# çalışmıyordu. Şimdi us_sinyal_botu.py'ye AYNI şekilde bağlanıyor.
+try:
+    import arge_botu
+    _ARGE_MODUL_YUKLENDI = True
+    print("[Ar-Ge Entegrasyonu] arge_botu.py başarıyla yüklendi.", flush=True)
+except Exception as e:
+    _ARGE_MODUL_YUKLENDI = False
+    print(f"[Ar-Ge Entegrasyonu] arge_botu.py yüklenemedi: {e}", flush=True)
+
+
+def arge_botu_dongusu():
+    """arge_botu.py'nin komut dinleme + kendi kendine hipotez üretme
+    döngüsünü çalıştırır - kendi try/except'i, ana botun sinyal
+    taramasını hiç etkilemez."""
+    if not _ARGE_MODUL_YUKLENDI:
+        print("[Ar-Ge Entegrasyonu] Devre dışı - modül yüklenemedi, döngü başlamıyor.", flush=True)
+        return
+    while True:
+        try:
+            arge_botu.poll_arge_commands()
+            arge_botu.maybe_run_research()
+        except Exception as e:
+            print(f"[Ar-Ge Entegrasyonu] Döngü hatası: {e}", flush=True)
+        time.sleep(5)
 
 
 if __name__ == "__main__":
@@ -597,4 +633,5 @@ if __name__ == "__main__":
     threading.Thread(target=arka_plan_dongusu, daemon=True).start()
     threading.Thread(target=poll_telegram_commands, daemon=True).start()
     threading.Thread(target=kendi_kendine_ping, daemon=True).start()
+    threading.Thread(target=arge_botu_dongusu, daemon=True).start()
     app.run(host="0.0.0.0", port=PORT)
