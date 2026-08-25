@@ -49,7 +49,7 @@ import threading
 # mesajlarında görünür kılmak için (2026-08-17: 3 kez üst üste "aynı
 # sonuç geldi" şüphesi sonrası eklendi - deploy'un gerçekten güncel
 # olup olmadığını KANITLA göstermek için).
-ARGE_KOD_SURUMU = "v52-sert-thread-zaman-asimi-2026-08-19"
+ARGE_KOD_SURUMU = "v53-ince-teshis-izleri-2026-08-19"
 import warnings
 from datetime import datetime, timezone
 
@@ -1526,19 +1526,29 @@ def _edgar_tek_hisse_isle(ticker: str, cik: str, gun_ufku: int) -> list:
     """Bir hissenin TÜM EDGAR işlemesini yapar (fiyat çekme + Form4 listesi
     + detaylar) - ThreadPoolExecutor ile SERT bir zaman aşımına sarılacak,
     bu yüzden fonksiyonun İÇİNDE NEREDE takılırsa takılsın (fiyat çekme,
-    form4 listesi, form4 detayı - hepsi) dışarıdan zorla durdurulabilir."""
+    form4 listesi, form4 detayı - hepsi) dışarıdan zorla durdurulabilir.
+    2026-08-19 EKLENDİ: ince taneli teşhis izleri - kullanıcı 120sn'lik
+    sert zaman aşımına RAĞMEN 40+ dakika donma yaşadı, bu iz satırları
+    hangi ADIMDA (fiyat/liste/detay) gerçekten takıldığını gösterecek."""
     import yfinance as yf
     kayitlar = []
+    print(f"[EDGAR TEŞHİS] {ticker}: fiyat verisi çekiliyor...", flush=True)
     fiyat_df = yf.Ticker(ticker).history(period="2y", interval="1d", timeout=20)
+    print(f"[EDGAR TEŞHİS] {ticker}: fiyat verisi geldi.", flush=True)
     if fiyat_df is None or fiyat_df.empty:
         return kayitlar
     fiyat_df = fiyat_df.rename(columns={"Close": "close"})
     fiyat_df.index = pd.to_datetime(fiyat_df.index).tz_localize(None)
 
+    print(f"[EDGAR TEŞHİS] {ticker}: Form4 listesi çekiliyor...", flush=True)
     form4ler = _edgar_form4_listesi(cik, ticker)
+    print(f"[EDGAR TEŞHİS] {ticker}: Form4 listesi geldi ({len(form4ler)} dosya).", flush=True)
     time.sleep(0.15)
-    for f in form4ler[:30]:
+    for i, f in enumerate(form4ler[:30]):
+        print(f"[EDGAR TEŞHİS] {ticker}: detay {i+1}/{min(30,len(form4ler))} çekiliyor "
+              f"(accession={f.get('accession')})...", flush=True)
         detaylar = _edgar_form4_detay(cik, f["accession"])
+        print(f"[EDGAR TEŞHİS] {ticker}: detay {i+1} geldi.", flush=True)
         time.sleep(0.15)
         for d in detaylar:
             try:
@@ -1555,6 +1565,7 @@ def _edgar_tek_hisse_isle(ticker: str, cik: str, gun_ufku: int) -> list:
             getiri = (cikis_fiyat - giris_fiyat) / giris_fiyat * 100
             kayitlar.append({"ticker": ticker, "tarih": d["tarih"],
                               "tur": d["tur"], "getiri_pct": round(getiri, 3)})
+    print(f"[EDGAR TEŞHİS] {ticker}: TÜM işlem tamamlandı, {len(kayitlar)} kayıt.", flush=True)
     return kayitlar
 
 
@@ -1599,8 +1610,11 @@ def icgorusel_islem_testi_edgar_calistir(gun_ufku: int = ICGORUSEL_ISLEM_GUN_UFK
         # seferlik) ama ana döngü ASLA beklemeden ilerliyor.
         executor = concurrent.futures.ThreadPoolExecutor(max_workers=1)
         try:
+            print(f"[EDGAR TEŞHİS] {ticker}: executor'a gönderiliyor "
+                  f"(sert sınır: {HISSE_SERT_ZAMAN_ASIMI_SANIYE}sn)...", flush=True)
             gelecek = executor.submit(_edgar_tek_hisse_isle, ticker, cik, gun_ufku)
             hisse_kayitlari = gelecek.result(timeout=HISSE_SERT_ZAMAN_ASIMI_SANIYE)
+            print(f"[EDGAR TEŞHİS] {ticker}: sonuç geldi, {len(hisse_kayitlari)} kayıt.", flush=True)
             kayitlar.extend(hisse_kayitlari)
         except concurrent.futures.TimeoutError:
             print(f"[EDGAR İçeriden İşlem] {ticker}: SERT zaman aşımı "
@@ -1610,6 +1624,7 @@ def icgorusel_islem_testi_edgar_calistir(gun_ufku: int = ICGORUSEL_ISLEM_GUN_UFK
             print(f"[EDGAR İçeriden İşlem] {ticker} hata: {e}", flush=True)
         finally:
             executor.shutdown(wait=False)
+            print(f"[EDGAR TEŞHİS] {ticker}: executor kapatıldı, sonraki hisseye geçiliyor.", flush=True)
 
     if not kayitlar:
         return None, "EDGAR'dan hiçbir işlem kaydı üretilemedi."

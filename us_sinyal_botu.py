@@ -51,7 +51,7 @@ DATA_DIR = os.environ.get("DATA_DIR", ".")
 PORT = int(os.environ.get("PORT", "10000"))
 TARAMA_ARALIGI_SANIYE = int(os.environ.get("TARAMA_ARALIGI_SANIYE", "900"))  # 15 dk
 
-BOT_KOD_SURUMU = "v6-arge-komut-arastirma-ayrildi-2026-08-19"
+BOT_KOD_SURUMU = "v7-komut-dongusu-nabiz-2026-08-19"
 
 US_TICKERS = [
     "AAPL", "MSFT", "GOOGL", "AMZN", "NVDA", "META", "TSLA", "BRK-B", "JPM",
@@ -473,6 +473,144 @@ def tam_tarama_calistir():
     print(f"[{datetime.now().strftime('%H:%M:%S')}] Tarama bitti.", flush=True)
 
 
+# =============================================================================
+# İÇERİDEN ALIM SİNYALİ (SEC EDGAR Form 4) — 2026-08-19 EKLENDİ
+# =============================================================================
+# GEREKÇE: arge_botu.py'de doğrulanmıştı - yönetici kendi hissesini
+# satın aldığında (Form 4, "P" kodu) 20 işlem günü sonra %74 isabet,
+# ortalama +%5.72 getiri (n=31, sonra n=194'e büyütülmüş halde de
+# doğrulandı). SADECE ALIM izleniyor (satım sinyali test edilip
+# anlamsız/ters yönlü bulunmuştu). Diğer 8 göstergeden AYRI, net bir
+# emoji ve etiketle bildiriliyor - karıştırılmasın diye.
+# DÜRÜST NOT: bu, günde BİR KEZ taranıyor (Form 4 dosyalamaları teknik
+# göstergeler gibi sık değişmiyor, EDGAR'ın hız sınırını da yormamak
+# için). Her yfinance/EDGAR isteğinde zaman aşımı VAR (bugünkü donma
+# dersi üstüne) - hiçbir hisse sonsuza kadar takılamaz.
+
+EDGAR_HEADERS = {"User-Agent": "us-sinyal-botu contact@example.com"}
+ICIDEN_ALIM_HEDEF_UFKU_GUN = 20
+ICIDEN_ALIM_HISSE_ZAMAN_BUTCESI = 60  # saniye, tek hissede takilmayi onlemek icin
+ICIDEN_ALIM_BILDIRILEN_CSV = os.path.join(DATA_DIR, "icerden_alim_bildirilen.csv")
+
+_icerden_alim_cik_haritasi_cache = None
+
+
+def _icerden_alim_cik_haritasi():
+    global _icerden_alim_cik_haritasi_cache
+    if _icerden_alim_cik_haritasi_cache is not None:
+        return _icerden_alim_cik_haritasi_cache
+    try:
+        resp = requests.get("https://www.sec.gov/files/company_tickers.json",
+                             headers=EDGAR_HEADERS, timeout=20)
+        resp.raise_for_status()
+        veri = resp.json()
+        _icerden_alim_cik_haritasi_cache = {v["ticker"]: str(v["cik_str"]).zfill(10) for v in veri.values()}
+    except Exception as e:
+        print(f"[İçerden Alım] CIK haritası çekilemedi: {e}", flush=True)
+        _icerden_alim_cik_haritasi_cache = {}
+    return _icerden_alim_cik_haritasi_cache
+
+
+def _icerden_alim_form4_listesi(cik):
+    try:
+        resp = requests.get(f"https://data.sec.gov/submissions/CIK{cik}.json",
+                             headers=EDGAR_HEADERS, timeout=20)
+        resp.raise_for_status()
+        veri = resp.json()
+        recent = veri.get("filings", {}).get("recent", {})
+        formlar = recent.get("form", [])
+        tarihler = recent.get("filingDate", [])
+        accessionlar = recent.get("accessionNumber", [])
+        return [{"tarih": t, "accession": a} for f, t, a in zip(formlar, tarihler, accessionlar) if f == "4"][:5]
+    except Exception as e:
+        print(f"[İçerden Alım] Form 4 listesi hatası: {e}", flush=True)
+        return []
+
+
+def _icerden_alim_form4_alim_mi(cik, accession):
+    """Bu Form 4'te GERÇEK BİR ALIM (transactionCode='P') var mı."""
+    acc_no_dash = accession.replace("-", "")
+    try:
+        idx_json = requests.get(
+            f"https://www.sec.gov/Archives/edgar/data/{int(cik)}/{acc_no_dash}/index.json",
+            headers=EDGAR_HEADERS, timeout=20).json()
+        xml_dosya = next((it["name"] for it in idx_json.get("directory", {}).get("item", [])
+                           if it.get("name", "").endswith(".xml") and it["name"] != "primary_doc.xml"), None)
+        if xml_dosya is None:
+            return False
+        xml_resp = requests.get(
+            f"https://www.sec.gov/Archives/edgar/data/{int(cik)}/{acc_no_dash}/{xml_dosya}",
+            headers=EDGAR_HEADERS, timeout=20)
+        import xml.etree.ElementTree as ET
+        root = ET.fromstring(xml_resp.content)
+        for islem in root.iter("nonDerivativeTransaction"):
+            kod_el = islem.find(".//transactionCode")
+            if kod_el is not None and kod_el.text == "P":
+                return True
+        return False
+    except Exception as e:
+        print(f"[İçerden Alım] {accession} detay hatası: {e}", flush=True)
+        return False
+
+
+def _icerden_alim_bildirilen_oku():
+    if not os.path.exists(ICIDEN_ALIM_BILDIRILEN_CSV):
+        return set()
+    with open(ICIDEN_ALIM_BILDIRILEN_CSV, "r", encoding="utf-8-sig") as f:
+        return set(satir.strip() for satir in f if satir.strip())
+
+
+def _icerden_alim_bildirilen_ekle(accession):
+    with open(ICIDEN_ALIM_BILDIRILEN_CSV, "a", encoding="utf-8-sig") as f:
+        f.write(accession + "\n")
+
+
+def icerden_alim_taramasi_calistir():
+    """Günde bir kez: her hisse için son 5 Form 4 dosyalamasına bakar,
+    daha önce bildirilmemiş bir ALIM varsa bildirim gönderir ve
+    checkpoint takibine ekler. Diğer 8 göstergeden TAMAMEN AYRI bir
+    bildirim biçimiyle (💰 emoji, 'İÇERDEN ALIM SİNYALİ' etiketi)."""
+    cik_haritasi = _icerden_alim_cik_haritasi()
+    if not cik_haritasi:
+        return
+    bildirilenler = _icerden_alim_bildirilen_oku()
+    bugun = date.today()
+
+    for ticker in US_TICKERS:
+        cik = cik_haritasi.get(ticker)
+        if not cik:
+            continue
+        hisse_baslangic = time.time()
+        try:
+            form4ler = _icerden_alim_form4_listesi(cik)
+            for f in form4ler:
+                if time.time() - hisse_baslangic > ICIDEN_ALIM_HISSE_ZAMAN_BUTCESI:
+                    print(f"[İçerden Alım] {ticker}: zaman bütçesi aşıldı, sonraki hisseye geçiliyor.", flush=True)
+                    break
+                if f["accession"] in bildirilenler:
+                    continue
+                if _icerden_alim_form4_alim_mi(cik, f["accession"]):
+                    df = yf_history_guvenli(ticker, period="5d", interval="1d")
+                    giris_fiyat = float(df["Close"].iloc[-1]) if df is not None and not df.empty else None
+                    if giris_fiyat:
+                        sinyal_kaydet(ticker, "İçerden Alım (SEC Form 4)", "LONG", giris_fiyat, bugun)
+                        send_telegram_message(
+                            f"💰 İÇERDEN ALIM SİNYALİ: {ticker}\n"
+                            f"Bir yönetici/yönetim kurulu üyesi kendi hissesini satın aldı "
+                            f"(SEC Form 4, {f['tarih']}).\n"
+                            f"Giriş fiyatı: {giris_fiyat:.2f}\n"
+                            f"Hedef ufku: {ICIDEN_ALIM_HEDEF_UFKU_GUN} işlem günü, "
+                            f"1g(+%1)/3g(+%2)/5g(+%3)/10g(+%5)\n"
+                            f"⚠️ Bu, diğer 8 teknik göstergeden FARKLI bir kategori - "
+                            f"gerçek bir içeriden bilgi sinyali, teknik analiz değil."
+                        )
+                _icerden_alim_bildirilen_ekle(f["accession"])
+                time.sleep(0.3)
+        except Exception as e:
+            print(f"[İçerden Alım] {ticker} hata: {e}", flush=True)
+        time.sleep(0.3)
+
+
 def arka_plan_dongusu():
     # 2026-08-19 DÜZELTME: kullanıcı günde-bir checkpoint kontrolünü az
     # buldu - artık SAATTE BİR kontrol ediliyor (aynı gün içinde bile
@@ -638,11 +776,16 @@ def arge_botu_komut_dongusu():
     bloklamıyorlar."""
     if not _ARGE_MODUL_YUKLENDI:
         return
+    dongude_sayac = 0
     while True:
         try:
             arge_botu.poll_arge_commands()
         except Exception as e:
             print(f"[Ar-Ge Komut Döngüsü] Hata: {e}", flush=True)
+        dongude_sayac += 1
+        if dongude_sayac % 20 == 0:  # ~her 60 saniyede bir (3sn * 20)
+            print(f"[Ar-Ge Komut Döngüsü] Nabız: hâlâ çalışıyor "
+                  f"(döngü #{dongude_sayac}).", flush=True)
         time.sleep(3)
 
 
