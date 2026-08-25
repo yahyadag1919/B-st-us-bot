@@ -49,7 +49,7 @@ import threading
 # mesajlarında görünür kılmak için (2026-08-17: 3 kez üst üste "aynı
 # sonuç geldi" şüphesi sonrası eklendi - deploy'un gerçekten güncel
 # olup olmadığını KANITLA göstermek için).
-ARGE_KOD_SURUMU = "v45-sikisma-turnuvasi-2026-08-19"
+ARGE_KOD_SURUMU = "v46-komut-teshis-loglari-2026-08-19"
 import warnings
 from datetime import datetime, timezone
 
@@ -5597,6 +5597,12 @@ def poll_arge_commands():
         msg = u.get("message", {})
         chat_id = str(msg.get("chat", {}).get("id", ""))
         text = msg.get("text", "")
+        # 2026-08-19 TEŞHİS: kullanıcı komut gönderdi ama hiçbir yanıt/hata
+        # gelmedi - bu, GELEN HER MESAJI (eşleşse de eşleşmese de) loglara
+        # yazdırıp gerçek sebebi (chat_id uyuşmazlığı mı, başka bir şey mi)
+        # kesin olarak görmek için eklendi.
+        print(f"[ARGE TEŞHİS] Gelen mesaj: chat_id={chat_id} (beklenen={TELEGRAM_CHAT_ID}) "
+              f"metin='{text}' eşleşiyor_mu={chat_id == str(TELEGRAM_CHAT_ID)}", flush=True)
         if chat_id != str(TELEGRAM_CHAT_ID) or not text.startswith("/"):
             continue
         if text.startswith("/arge_rapor"):
