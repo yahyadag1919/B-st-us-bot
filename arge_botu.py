@@ -49,7 +49,7 @@ import threading
 # mesajlarında görünür kılmak için (2026-08-17: 3 kez üst üste "aynı
 # sonuç geldi" şüphesi sonrası eklendi - deploy'un gerçekten güncel
 # olup olmadığını KANITLA göstermek için).
-ARGE_KOD_SURUMU = "v46-komut-teshis-loglari-2026-08-19"
+ARGE_KOD_SURUMU = "v47-sikisma-v2-ve-teshis-birlesik-2026-08-19"
 import warnings
 from datetime import datetime, timezone
 
@@ -5222,6 +5222,175 @@ def hareket_oncesi_sikisma_turnuvasi_calistir(max_hisse: int = 60) -> tuple:
 
 
 # =============================================================================
+# SIKIŞMA TURNUVASI v2 — VOLATİL HİSSELER + DÜZELTİLMİŞ YÖN + YENİ ADAYLAR
+# =============================================================================
+# 2026-08-19 - GEREKÇE: v1 (hareket_oncesi_sikisma_turnuvasi_calistir),
+# 106 büyük/sakin ABD hissesinde hiçbir sıkışma adayının kör çizgiyi
+# geçemediğini gösterdi. Kullanıcının isteğiyle ÜÇ şey birden düzeltiliyor:
+# (1) YENİ, VOLATİL/KÜÇÜK HİSSE EVRENİ - kullanıcının SUPX örneği gibi
+#     büyük günlük hareketler yapabilen hisseler (mevcut 106'nın aksine).
+#     DÜRÜST NOT: bu liste elimdeki genel bilgiye dayanıyor, canlı bir
+#     tarama/filtreleme değil - bazı tickerlar artık borsada olmayabilir
+#     ya da eskisi kadar volatil olmayabilir, kod bunları otomatik atlar.
+# (2) DÜZELTİLMİŞ YÖN MANTIĞI - v1'de sıkışma SÜRERKEN fiyat/EMA20
+#     konumuna bakıyorduk (zayıf). Şimdi sıkışma BİTTİĞİ ANDA (release)
+#     Awesome Oscillator'ın yönüne bakıyoruz - gerçek TTM Squeeze
+#     sistemlerinin kullandığı yöntem.
+# (3) 3 YENİ ADAY: 52-Hafta Zirve/Dip Kırılımı, Bollinger Bandı Yürüyüşü
+#     (2+ gün üst/alt bandın dışında kapanış - trend devamı), Gap Kırılımı.
+
+US_VOLATIL_TICKERS = [
+    "GME", "AMC", "MARA", "RIOT", "MSTR", "PLTR", "SOFI", "LCID", "RIVN",
+    "NIO", "XPEV", "LI", "SAVA", "OCGN", "INO", "VXRT", "BNGO", "SPCE",
+    "NKLA", "GOEV", "FSR", "RIDE", "CLOV", "WISH", "BB", "IONQ", "RGTI",
+    "SMCI", "UPST", "AFRM", "CVNA", "DKNG", "HOOD", "COIN", "ROKU", "SNAP",
+    "PLUG", "FCEL", "CHPT", "QS",
+]
+
+_52HAFTA_PENCERE = 252
+
+
+def _bollinger_bandi_yurumesi_tespit(close, boll_alt, boll_ust):
+    """2+ gun ust/alt bandin DISINDA kapanis = trend devami (yuruyus)."""
+    ust_disinda = close >= boll_ust
+    alt_disinda = close <= boll_alt
+    ust_yuruyus = ust_disinda & ust_disinda.shift(1).fillna(False)
+    alt_yuruyus = alt_disinda & alt_disinda.shift(1).fillna(False)
+    return ust_yuruyus, alt_yuruyus
+
+
+def _52_hafta_kirilim_tespit(high, low, close, pencere=252):
+    zirve = high.rolling(pencere).max().shift(1)  # bugunu DAHIL ETMEDEN onceki zirve
+    dip = low.rolling(pencere).min().shift(1)
+    yeni_zirve = close >= zirve
+    yeni_dip = close <= dip
+    return yeni_zirve, yeni_dip
+
+
+def _gap_kirilim_tespit(open_, close, prev_close, esik_pct=3.0):
+    gap_pct = (open_ - prev_close) / prev_close.replace(0, np.nan) * 100
+    gap_yukari_devam = (gap_pct >= esik_pct) & (close > open_)
+    gap_asagi_devam = (gap_pct <= -esik_pct) & (close < open_)
+    return gap_yukari_devam, gap_asagi_devam
+
+
+def sikisma_turnuvasi_v2_calistir(hisse_listesi: str = "volatil", max_hisse: int = 40) -> tuple:
+    """v1'in düzeltilmiş hali: release-bazlı yön (AO ile), yeni volatil
+    hisse evreni seçeneği, +3 yeni aday. hisse_listesi='volatil' ya da
+    'buyuk' (mevcut 106'lık liste) olabilir. Döner: (dosya_yolu,
+    özet_dict) ya da (None, hata_mesajı)."""
+    import yfinance as yf
+
+    hisseler = (US_VOLATIL_TICKERS if hisse_listesi == "volatil" else US_INSIDER_TICKERS)[:max_hisse]
+    isimler = ["Bollinger Genişlik Sıkışması (release+AO)", "TTM Squeeze (release+AO)",
+               "ATR Persentil Sıkışması (release+AO)", "NR7 (dar aralık)", "İç Mum (Inside Bar)",
+               "52-Hafta Zirve/Dip Kırılımı", "Bollinger Bandı Yürüyüşü", "Gap Kırılımı"]
+    tum_sonuclar = {isim: [] for isim in isimler}
+    tum_sonuclar["[KÖR] Koşulsuz LONG"] = []
+    tum_sonuclar["[KÖR] Koşulsuz SHORT"] = []
+
+    for n_i, ticker in enumerate(hisseler, 1):
+        try:
+            print(f"[Sıkışma v2 {n_i}/{len(hisseler)}] {ticker}...", flush=True)
+            gunluk = yf.Ticker(ticker).history(period="2y", interval="1d", timeout=20)
+            if gunluk is None or gunluk.empty or len(gunluk) < 280:
+                print(f"[Sıkışma v2] {ticker}: yetersiz veri (2 yıl gerekli, 52-hafta "
+                      f"kırılımı için), atlanıyor.", flush=True)
+                continue
+            gunluk = gunluk.rename(columns={"Close": "close", "High": "high", "Low": "low",
+                                             "Open": "open", "Volume": "volume"})
+            gunluk.index = pd.to_datetime(gunluk.index).tz_localize(None)
+            gunluk = gunluk.reset_index(drop=True)
+
+            gunluk["nr7"] = _nr7_tespit(gunluk["high"], gunluk["low"], NR7_PENCERE)
+            gunluk["ic_mum"] = _ic_mum_tespit(gunluk["high"], gunluk["low"])
+            gunluk["boll_sikisma"] = _boll_genislik_sikisma_tespit(
+                gunluk["close"], 20, 2.0, BOLL_GENISLIK_PENCERE, BOLL_GENISLIK_PERSENTIL)
+            gunluk["ttm_squeeze"] = _ttm_squeeze_tespit(
+                gunluk["high"], gunluk["low"], gunluk["close"],
+                KELTNER_SQUEEZE_EMA, KELTNER_SQUEEZE_ATR, KELTNER_SQUEEZE_MULT)
+            gunluk["atr_sikisma"] = _atr_persentil_sikisma_tespit(
+                gunluk["high"], gunluk["low"], gunluk["close"],
+                ATR_PERSENTIL_PENCERE, ATR_PERSENTIL_ESIK)
+            gunluk["ao"] = _awesome_oscillator_hesapla(gunluk["high"], gunluk["low"])
+
+            boll_orta = gunluk["close"].rolling(20).mean()
+            boll_std = gunluk["close"].rolling(20).std()
+            alt_bant, ust_bant = boll_orta - 2.0 * boll_std, boll_orta + 2.0 * boll_std
+            ust_yuruyus, alt_yuruyus = _bollinger_bandi_yurumesi_tespit(gunluk["close"], alt_bant, ust_bant)
+            yeni_zirve, yeni_dip = _52_hafta_kirilim_tespit(gunluk["high"], gunluk["low"], gunluk["close"], _52HAFTA_PENCERE)
+            gap_yukari, gap_asagi = _gap_kirilim_tespit(gunluk["open"], gunluk["close"], gunluk["close"].shift(1))
+
+            baslangic = max(NR7_PENCERE, BOLL_GENISLIK_PENCERE, ATR_PERSENTIL_PENCERE, _52HAFTA_PENCERE) + 5
+            for idx in range(baslangic, len(gunluk) - 11):
+                row = gunluk.iloc[idx]
+                onceki = gunluk.iloc[idx - 1]
+
+                tum_sonuclar["[KÖR] Koşulsuz LONG"].append(_kanit_us_checkpoint_sonuc(gunluk, idx, "LONG"))
+                tum_sonuclar["[KÖR] Koşulsuz SHORT"].append(_kanit_us_checkpoint_sonuc(gunluk, idx, "SHORT"))
+
+                yon_ao = "LONG" if row["ao"] > 0 else ("SHORT" if row["ao"] < 0 else None)
+
+                # RELEASE tespiti: dun sikisma vardi, bugun yok -> tam bu an
+                if yon_ao and bool(onceki["boll_sikisma"]) and not bool(row["boll_sikisma"]):
+                    tum_sonuclar["Bollinger Genişlik Sıkışması (release+AO)"].append(
+                        _kanit_us_checkpoint_sonuc(gunluk, idx, yon_ao))
+                if yon_ao and bool(onceki["ttm_squeeze"]) and not bool(row["ttm_squeeze"]):
+                    tum_sonuclar["TTM Squeeze (release+AO)"].append(
+                        _kanit_us_checkpoint_sonuc(gunluk, idx, yon_ao))
+                if yon_ao and bool(onceki["atr_sikisma"]) and not bool(row["atr_sikisma"]):
+                    tum_sonuclar["ATR Persentil Sıkışması (release+AO)"].append(
+                        _kanit_us_checkpoint_sonuc(gunluk, idx, yon_ao))
+
+                if row["nr7"]:
+                    sonraki = gunluk.iloc[idx + 1]
+                    if sonraki["close"] > row["high"]:
+                        tum_sonuclar["NR7 (dar aralık)"].append(_kanit_us_checkpoint_sonuc(gunluk, idx + 1, "LONG"))
+                    elif sonraki["close"] < row["low"]:
+                        tum_sonuclar["NR7 (dar aralık)"].append(_kanit_us_checkpoint_sonuc(gunluk, idx + 1, "SHORT"))
+                if row["ic_mum"]:
+                    sonraki = gunluk.iloc[idx + 1]
+                    if sonraki["close"] > row["high"]:
+                        tum_sonuclar["İç Mum (Inside Bar)"].append(_kanit_us_checkpoint_sonuc(gunluk, idx + 1, "LONG"))
+                    elif sonraki["close"] < row["low"]:
+                        tum_sonuclar["İç Mum (Inside Bar)"].append(_kanit_us_checkpoint_sonuc(gunluk, idx + 1, "SHORT"))
+
+                if bool(yeni_zirve.iloc[idx]):
+                    tum_sonuclar["52-Hafta Zirve/Dip Kırılımı"].append(_kanit_us_checkpoint_sonuc(gunluk, idx, "LONG"))
+                elif bool(yeni_dip.iloc[idx]):
+                    tum_sonuclar["52-Hafta Zirve/Dip Kırılımı"].append(_kanit_us_checkpoint_sonuc(gunluk, idx, "SHORT"))
+
+                if bool(ust_yuruyus.iloc[idx]):
+                    tum_sonuclar["Bollinger Bandı Yürüyüşü"].append(_kanit_us_checkpoint_sonuc(gunluk, idx, "LONG"))
+                elif bool(alt_yuruyus.iloc[idx]):
+                    tum_sonuclar["Bollinger Bandı Yürüyüşü"].append(_kanit_us_checkpoint_sonuc(gunluk, idx, "SHORT"))
+
+                if bool(gap_yukari.iloc[idx]):
+                    tum_sonuclar["Gap Kırılımı"].append(_kanit_us_checkpoint_sonuc(gunluk, idx, "LONG"))
+                elif bool(gap_asagi.iloc[idx]):
+                    tum_sonuclar["Gap Kırılımı"].append(_kanit_us_checkpoint_sonuc(gunluk, idx, "SHORT"))
+        except Exception as e:
+            print(f"[Sıkışma v2] {ticker} hata: {e}", flush=True)
+        time.sleep(0.3)
+
+    satirlar = _kanit_ozet_tablosu(tum_sonuclar)
+    if not satirlar:
+        return None, "Hiçbir strateji için yeterli veri üretilemedi."
+
+    kor_long = next((s["kazanma_orani_pct"] for s in satirlar if s["strateji"] == "[KÖR] Koşulsuz LONG"), None)
+    kor_long_r = next((s["ort_R"] for s in satirlar if s["strateji"] == "[KÖR] Koşulsuz LONG"), None)
+    for s in satirlar:
+        s["kor_isabet_farki"] = round(s["kazanma_orani_pct"] - kor_long, 2) if kor_long is not None and s["kazanma_orani_pct"] is not None else None
+        s["kor_R_farki"] = round(s["ort_R"] - kor_long_r, 4) if kor_long_r is not None and s["ort_R"] is not None else None
+
+    tablo = pd.DataFrame(satirlar).sort_values("kor_R_farki", ascending=False)
+    dosya_yolu = _data_path("sikisma_turnuvasi_v2.csv")
+    tablo.to_csv(dosya_yolu, index=False, encoding="utf-8-sig")
+    return dosya_yolu, {"satirlar": satirlar, "hisse_listesi": hisse_listesi,
+                         "denenen_hisse_sayisi": len(hisseler)}
+
+
+# =============================================================================
 # EKŞİ SÖZLÜK BAĞLANTI TESTİ — 2026-08-19
 # =============================================================================
 # GEREKÇE: Ekşi Sözlük'ün resmi bir API'si yok - sadece web sayfası
@@ -5341,6 +5510,9 @@ def send_startup_message():
         "/sikisma_turnuvasi [HİSSE_SAYISI] — NR7/İç Mum/Bollinger Genişlik/"
         "TTM Squeeze/ATR Persentil - hareket başlamadan önce yakalayan "
         "sıkışma sinyalleri, kör çizgiyle birlikte\n"
+        "/sikisma_turnuvasi_v2 [volatil|buyuk] [HİSSE_SAYISI] — düzeltilmiş "
+        "yön mantığı (release+AO) + 3 yeni aday (52-Hafta Kırılımı, Bant "
+        "Yürüyüşü, Gap Kırılımı), volatil küçük-hisse evreni seçeneğiyle\n"
         "/wiki_dogrulama — /wiki_testi'nin bulgusunu (yüksek izlenme -> "
         "LONG) izole, gerçek R:R çıkışıyla yeniden doğrular\n"
         "/eksisozluk_test [BAŞLIK] — Ekşi Sözlük'ten veri çekilebiliyor "
@@ -5597,10 +5769,6 @@ def poll_arge_commands():
         msg = u.get("message", {})
         chat_id = str(msg.get("chat", {}).get("id", ""))
         text = msg.get("text", "")
-        # 2026-08-19 TEŞHİS: kullanıcı komut gönderdi ama hiçbir yanıt/hata
-        # gelmedi - bu, GELEN HER MESAJI (eşleşse de eşleşmese de) loglara
-        # yazdırıp gerçek sebebi (chat_id uyuşmazlığı mı, başka bir şey mi)
-        # kesin olarak görmek için eklendi.
         print(f"[ARGE TEŞHİS] Gelen mesaj: chat_id={chat_id} (beklenen={TELEGRAM_CHAT_ID}) "
               f"metin='{text}' eşleşiyor_mu={chat_id == str(TELEGRAM_CHAT_ID)}", flush=True)
         if chat_id != str(TELEGRAM_CHAT_ID) or not text.startswith("/"):
@@ -6259,6 +6427,37 @@ def poll_arge_commands():
                 except Exception as e:
                     send_telegram_message(f"🌀 Sıkışma turnuvası hatası: {e}")
             threading.Thread(target=_arka_plan_sikisma, args=(hisse_sayisi,), daemon=True).start()
+        elif text.startswith("/sikisma_turnuvasi_v2"):
+            parcalar = text.split()
+            liste = parcalar[1] if len(parcalar) > 1 and parcalar[1] in ("volatil", "buyuk") else "volatil"
+            hisse_sayisi2 = int(parcalar[2]) if len(parcalar) > 2 else 40
+            send_telegram_message(
+                f"🌀 SIKIŞMA TURNUVASI v2 başlıyor (liste: {liste}, {hisse_sayisi2} "
+                f"hisse): düzeltilmiş yön mantığı (sıkışma bitişinde Awesome "
+                f"Oscillator yönü) + 3 yeni aday (52-Hafta Kırılımı, Bollinger "
+                f"Bandı Yürüyüşü, Gap Kırılımı). ARKA PLANDA çalışıyor, "
+                f"bitince CSV + özet göndereceğim."
+            )
+
+            def _arka_plan_sikisma_v2(l, hs):
+                try:
+                    dosya_yolu, ozet = sikisma_turnuvasi_v2_calistir(l, hs)
+                    if dosya_yolu is None:
+                        send_telegram_message(f"🌀 Sıkışma turnuvası v2 başarısız: {ozet}")
+                        return
+                    satirlar = [f"🌀 Sıkışma Turnuvası v2 Sonucu (liste: {ozet['hisse_listesi']}, "
+                                f"{ozet['denenen_hisse_sayisi']} hisse denendi)\n"]
+                    for s in ozet["satirlar"]:
+                        fark_str = f", kör R farkı: {s['kor_R_farki']:+.4f}" \
+                            if s.get("kor_R_farki") is not None else ""
+                        satirlar.append(
+                            f"{s['strateji']}: n={s['toplam_sinyal']}, "
+                            f"%{s['kazanma_orani_pct']} isabet, ort R={s['ort_R']}{fark_str}"
+                        )
+                    send_telegram_document(dosya_yolu, caption="\n".join(satirlar))
+                except Exception as e:
+                    send_telegram_message(f"🌀 Sıkışma turnuvası v2 hatası: {e}")
+            threading.Thread(target=_arka_plan_sikisma_v2, args=(liste, hisse_sayisi2), daemon=True).start()
         elif text.startswith("/ai_model_backtest"):
             send_telegram_message(
                 f"🤖 GERÇEK AI MODEL BACKTEST başlıyor: model.pkl ve "
