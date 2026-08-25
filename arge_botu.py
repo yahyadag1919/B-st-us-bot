@@ -49,7 +49,7 @@ import threading
 # mesajlarında görünür kılmak için (2026-08-17: 3 kez üst üste "aynı
 # sonuç geldi" şüphesi sonrası eklendi - deploy'un gerçekten güncel
 # olup olmadığını KANITLA göstermek için).
-ARGE_KOD_SURUMU = "v48-komut-cakismasi-duzeltildi-2026-08-19"
+ARGE_KOD_SURUMU = "v49-atr-olcekli-sikisma-v3-2026-08-19"
 import warnings
 from datetime import datetime, timezone
 
@@ -5391,6 +5391,190 @@ def sikisma_turnuvasi_v2_calistir(hisse_listesi: str = "volatil", max_hisse: int
 
 
 # =============================================================================
+# SIKIŞMA TURNUVASI v3 — ATR-ÖLÇEKLİ HEDEFLER (VOLATİL HİSSELER İÇİN)
+# =============================================================================
+# 2026-08-19 - GEREKÇE: v2, volatil hisse evreninde kör LONG/SHORT'un
+# ikisinin de %83-85 çıktığını gösterdi - sabit %1-5 hedefler bu kadar
+# oynak hisseler için ANLAMSIZLAŞIYOR (neredeyse her pozisyon "kazanıyor"
+# göründüğü için ayırt edici değil). Çözüm: hedefleri sabit yüzde yerine
+# HER HİSSENİN KENDİ ATR'ına göre ölçeklendirmek - volatil bir hissede
+# hedef de büyük olacak, sakin bir hissede küçük - adil bir kıyas.
+
+ATR_OLCEKLI_CHECKPOINTS = [(1, "1g", 1.0), (3, "3g", 2.0), (5, "5g", 3.0), (10, "10g", 5.0)]  # ATR KATI, yuzde DEGIL
+
+
+def _kanit_us_checkpoint_sonuc_atr_olcekli(df: pd.DataFrame, idx: int, direction: str, atr_col: str = "atr14"):
+    """_kanit_us_checkpoint_sonuc ile AYNI mantık, ama hedef sabit yüzde
+    yerine o ANDAKİ ATR'ın katı - volatilitesi yüksek hissede otomatik
+    olarak daha büyük, düşük hissede daha küçük hedef anlamına gelir."""
+    entry = df.iloc[idx]["close"]
+    atr = df.iloc[idx][atr_col]
+    if pd.isna(atr) or atr == 0:
+        return None
+    for gun_sayisi, etiket, atr_kat in ATR_OLCEKLI_CHECKPOINTS:
+        i = idx + gun_sayisi
+        if i >= len(df):
+            return "TIMEOUT", None
+        gun = df.iloc[i]
+        if direction == "LONG":
+            hedef_fiyat = entry + atr_kat * atr
+            if gun["high"] >= hedef_fiyat:
+                return "WIN", atr_kat
+        else:
+            hedef_fiyat = entry - atr_kat * atr
+            if gun["low"] <= hedef_fiyat:
+                return "WIN", atr_kat
+    return "LOSS", -1.0
+
+
+def sikisma_turnuvasi_v3_calistir(hisse_listesi: str = "volatil", max_hisse: int = 40) -> tuple:
+    """v2 ile AYNI 8 strateji + kör çizgi, ama ATR-ölçekli checkpoint
+    çıkışıyla - volatil hisseler için sabit yüzde hedeflerin anlamsız
+    hale gelme sorununu çözmek için. Döner: (dosya_yolu, özet_dict) ya da
+    (None, hata_mesajı)."""
+    import yfinance as yf
+
+    hisseler = (US_VOLATIL_TICKERS if hisse_listesi == "volatil" else US_INSIDER_TICKERS)[:max_hisse]
+    isimler = ["Bollinger Genişlik Sıkışması (release+AO)", "TTM Squeeze (release+AO)",
+               "ATR Persentil Sıkışması (release+AO)", "NR7 (dar aralık)", "İç Mum (Inside Bar)",
+               "52-Hafta Zirve/Dip Kırılımı", "Bollinger Bandı Yürüyüşü", "Gap Kırılımı"]
+    tum_sonuclar = {isim: [] for isim in isimler}
+    tum_sonuclar["[KÖR] Koşulsuz LONG"] = []
+    tum_sonuclar["[KÖR] Koşulsuz SHORT"] = []
+
+    for n_i, ticker in enumerate(hisseler, 1):
+        try:
+            print(f"[Sıkışma v3 {n_i}/{len(hisseler)}] {ticker}...", flush=True)
+            gunluk = yf.Ticker(ticker).history(period="2y", interval="1d", timeout=20)
+            if gunluk is None or gunluk.empty or len(gunluk) < 280:
+                print(f"[Sıkışma v3] {ticker}: yetersiz veri, atlanıyor.", flush=True)
+                continue
+            gunluk = gunluk.rename(columns={"Close": "close", "High": "high", "Low": "low",
+                                             "Open": "open", "Volume": "volume"})
+            gunluk.index = pd.to_datetime(gunluk.index).tz_localize(None)
+            gunluk = gunluk.reset_index(drop=True)
+
+            # ATR14 - checkpoint hedeflerini olceklemek icin
+            tr = pd.concat([(gunluk["high"] - gunluk["low"]),
+                             (gunluk["high"] - gunluk["close"].shift()).abs(),
+                             (gunluk["low"] - gunluk["close"].shift()).abs()], axis=1).max(axis=1)
+            gunluk["atr14"] = tr.rolling(14).mean()
+
+            gunluk["nr7"] = _nr7_tespit(gunluk["high"], gunluk["low"], NR7_PENCERE)
+            gunluk["ic_mum"] = _ic_mum_tespit(gunluk["high"], gunluk["low"])
+            gunluk["boll_sikisma"] = _boll_genislik_sikisma_tespit(
+                gunluk["close"], 20, 2.0, BOLL_GENISLIK_PENCERE, BOLL_GENISLIK_PERSENTIL)
+            gunluk["ttm_squeeze"] = _ttm_squeeze_tespit(
+                gunluk["high"], gunluk["low"], gunluk["close"],
+                KELTNER_SQUEEZE_EMA, KELTNER_SQUEEZE_ATR, KELTNER_SQUEEZE_MULT)
+            gunluk["atr_sikisma"] = _atr_persentil_sikisma_tespit(
+                gunluk["high"], gunluk["low"], gunluk["close"],
+                ATR_PERSENTIL_PENCERE, ATR_PERSENTIL_ESIK)
+            gunluk["ao"] = _awesome_oscillator_hesapla(gunluk["high"], gunluk["low"])
+
+            boll_orta = gunluk["close"].rolling(20).mean()
+            boll_std = gunluk["close"].rolling(20).std()
+            alt_bant, ust_bant = boll_orta - 2.0 * boll_std, boll_orta + 2.0 * boll_std
+            ust_yuruyus, alt_yuruyus = _bollinger_bandi_yurumesi_tespit(gunluk["close"], alt_bant, ust_bant)
+            yeni_zirve, yeni_dip = _52_hafta_kirilim_tespit(gunluk["high"], gunluk["low"], gunluk["close"], _52HAFTA_PENCERE)
+            gap_yukari, gap_asagi = _gap_kirilim_tespit(gunluk["open"], gunluk["close"], gunluk["close"].shift(1))
+
+            baslangic = max(NR7_PENCERE, BOLL_GENISLIK_PENCERE, ATR_PERSENTIL_PENCERE, _52HAFTA_PENCERE) + 5
+            for idx in range(baslangic, len(gunluk) - 11):
+                row = gunluk.iloc[idx]
+                onceki = gunluk.iloc[idx - 1]
+
+                kor_long = _kanit_us_checkpoint_sonuc_atr_olcekli(gunluk, idx, "LONG")
+                if kor_long is not None:
+                    tum_sonuclar["[KÖR] Koşulsuz LONG"].append(kor_long)
+                kor_short = _kanit_us_checkpoint_sonuc_atr_olcekli(gunluk, idx, "SHORT")
+                if kor_short is not None:
+                    tum_sonuclar["[KÖR] Koşulsuz SHORT"].append(kor_short)
+
+                yon_ao = "LONG" if row["ao"] > 0 else ("SHORT" if row["ao"] < 0 else None)
+
+                if yon_ao and bool(onceki["boll_sikisma"]) and not bool(row["boll_sikisma"]):
+                    sonuc = _kanit_us_checkpoint_sonuc_atr_olcekli(gunluk, idx, yon_ao)
+                    if sonuc is not None:
+                        tum_sonuclar["Bollinger Genişlik Sıkışması (release+AO)"].append(sonuc)
+                if yon_ao and bool(onceki["ttm_squeeze"]) and not bool(row["ttm_squeeze"]):
+                    sonuc = _kanit_us_checkpoint_sonuc_atr_olcekli(gunluk, idx, yon_ao)
+                    if sonuc is not None:
+                        tum_sonuclar["TTM Squeeze (release+AO)"].append(sonuc)
+                if yon_ao and bool(onceki["atr_sikisma"]) and not bool(row["atr_sikisma"]):
+                    sonuc = _kanit_us_checkpoint_sonuc_atr_olcekli(gunluk, idx, yon_ao)
+                    if sonuc is not None:
+                        tum_sonuclar["ATR Persentil Sıkışması (release+AO)"].append(sonuc)
+
+                if row["nr7"]:
+                    sonraki = gunluk.iloc[idx + 1]
+                    if sonraki["close"] > row["high"]:
+                        sonuc = _kanit_us_checkpoint_sonuc_atr_olcekli(gunluk, idx + 1, "LONG")
+                        if sonuc is not None:
+                            tum_sonuclar["NR7 (dar aralık)"].append(sonuc)
+                    elif sonraki["close"] < row["low"]:
+                        sonuc = _kanit_us_checkpoint_sonuc_atr_olcekli(gunluk, idx + 1, "SHORT")
+                        if sonuc is not None:
+                            tum_sonuclar["NR7 (dar aralık)"].append(sonuc)
+                if row["ic_mum"]:
+                    sonraki = gunluk.iloc[idx + 1]
+                    if sonraki["close"] > row["high"]:
+                        sonuc = _kanit_us_checkpoint_sonuc_atr_olcekli(gunluk, idx + 1, "LONG")
+                        if sonuc is not None:
+                            tum_sonuclar["İç Mum (Inside Bar)"].append(sonuc)
+                    elif sonraki["close"] < row["low"]:
+                        sonuc = _kanit_us_checkpoint_sonuc_atr_olcekli(gunluk, idx + 1, "SHORT")
+                        if sonuc is not None:
+                            tum_sonuclar["İç Mum (Inside Bar)"].append(sonuc)
+
+                if bool(yeni_zirve.iloc[idx]):
+                    sonuc = _kanit_us_checkpoint_sonuc_atr_olcekli(gunluk, idx, "LONG")
+                    if sonuc is not None:
+                        tum_sonuclar["52-Hafta Zirve/Dip Kırılımı"].append(sonuc)
+                elif bool(yeni_dip.iloc[idx]):
+                    sonuc = _kanit_us_checkpoint_sonuc_atr_olcekli(gunluk, idx, "SHORT")
+                    if sonuc is not None:
+                        tum_sonuclar["52-Hafta Zirve/Dip Kırılımı"].append(sonuc)
+
+                if bool(ust_yuruyus.iloc[idx]):
+                    sonuc = _kanit_us_checkpoint_sonuc_atr_olcekli(gunluk, idx, "LONG")
+                    if sonuc is not None:
+                        tum_sonuclar["Bollinger Bandı Yürüyüşü"].append(sonuc)
+                elif bool(alt_yuruyus.iloc[idx]):
+                    sonuc = _kanit_us_checkpoint_sonuc_atr_olcekli(gunluk, idx, "SHORT")
+                    if sonuc is not None:
+                        tum_sonuclar["Bollinger Bandı Yürüyüşü"].append(sonuc)
+
+                if bool(gap_yukari.iloc[idx]):
+                    sonuc = _kanit_us_checkpoint_sonuc_atr_olcekli(gunluk, idx, "LONG")
+                    if sonuc is not None:
+                        tum_sonuclar["Gap Kırılımı"].append(sonuc)
+                elif bool(gap_asagi.iloc[idx]):
+                    sonuc = _kanit_us_checkpoint_sonuc_atr_olcekli(gunluk, idx, "SHORT")
+                    if sonuc is not None:
+                        tum_sonuclar["Gap Kırılımı"].append(sonuc)
+        except Exception as e:
+            print(f"[Sıkışma v3] {ticker} hata: {e}", flush=True)
+        time.sleep(0.3)
+
+    satirlar = _kanit_ozet_tablosu(tum_sonuclar)
+    if not satirlar:
+        return None, "Hiçbir strateji için yeterli veri üretilemedi."
+
+    kor_long = next((s["kazanma_orani_pct"] for s in satirlar if s["strateji"] == "[KÖR] Koşulsuz LONG"), None)
+    kor_long_r = next((s["ort_R"] for s in satirlar if s["strateji"] == "[KÖR] Koşulsuz LONG"), None)
+    for s in satirlar:
+        s["kor_isabet_farki"] = round(s["kazanma_orani_pct"] - kor_long, 2) if kor_long is not None and s["kazanma_orani_pct"] is not None else None
+        s["kor_R_farki"] = round(s["ort_R"] - kor_long_r, 4) if kor_long_r is not None and s["ort_R"] is not None else None
+
+    tablo = pd.DataFrame(satirlar).sort_values("kor_R_farki", ascending=False)
+    dosya_yolu = _data_path("sikisma_turnuvasi_v3_atr_olcekli.csv")
+    tablo.to_csv(dosya_yolu, index=False, encoding="utf-8-sig")
+    return dosya_yolu, {"satirlar": satirlar, "hisse_listesi": hisse_listesi,
+                         "denenen_hisse_sayisi": len(hisseler)}
+
+
+# =============================================================================
 # EKŞİ SÖZLÜK BAĞLANTI TESTİ — 2026-08-19
 # =============================================================================
 # GEREKÇE: Ekşi Sözlük'ün resmi bir API'si yok - sadece web sayfası
@@ -5513,6 +5697,10 @@ def send_startup_message():
         "/sikisma_turnuvasi_v2 [volatil|buyuk] [HİSSE_SAYISI] — düzeltilmiş "
         "yön mantığı (release+AO) + 3 yeni aday (52-Hafta Kırılımı, Bant "
         "Yürüyüşü, Gap Kırılımı), volatil küçük-hisse evreni seçeneğiyle\n"
+        "/sikisma_turnuvasi_v3 [volatil|buyuk] [HİSSE_SAYISI] — v2 ile aynı "
+        "ama ATR-ÖLÇEKLİ hedeflerle (sabit %1-5 yerine hissenin kendi "
+        "volatilitesine göre) - volatil hisselerde sabit hedefin "
+        "anlamsızlaşma sorununu çözmek için\n"
         "/wiki_dogrulama — /wiki_testi'nin bulgusunu (yüksek izlenme -> "
         "LONG) izole, gerçek R:R çıkışıyla yeniden doğrular\n"
         "/eksisozluk_test [BAŞLIK] — Ekşi Sözlük'ten veri çekilebiliyor "
@@ -6397,6 +6585,37 @@ def poll_arge_commands():
                 except Exception as e:
                     send_telegram_message(f"🏹 Gösterge cephaneliği hatası: {e}")
             threading.Thread(target=_arka_plan_cephanelik, args=(hisse_sayisi,), daemon=True).start()
+        elif text.startswith("/sikisma_turnuvasi_v3"):
+            parcalar = text.split()
+            liste3 = parcalar[1] if len(parcalar) > 1 and parcalar[1] in ("volatil", "buyuk") else "volatil"
+            hisse_sayisi3 = int(parcalar[2]) if len(parcalar) > 2 else 40
+            send_telegram_message(
+                f"🌀 SIKIŞMA TURNUVASI v3 başlıyor (liste: {liste3}, {hisse_sayisi3} "
+                f"hisse): ATR-ÖLÇEKLİ hedefler - her hissenin kendi volatilitesine "
+                f"göre büyüyen/küçülen checkpoint hedefleri, sabit %1-5'in "
+                f"volatil hisselerde anlamsızlaşma sorununu çözmek için. ARKA "
+                f"PLANDA çalışıyor, bitince CSV + özet göndereceğim."
+            )
+
+            def _arka_plan_sikisma_v3(l, hs):
+                try:
+                    dosya_yolu, ozet = sikisma_turnuvasi_v3_calistir(l, hs)
+                    if dosya_yolu is None:
+                        send_telegram_message(f"🌀 Sıkışma turnuvası v3 başarısız: {ozet}")
+                        return
+                    satirlar = [f"🌀 Sıkışma Turnuvası v3 (ATR-ölçekli) Sonucu (liste: "
+                                f"{ozet['hisse_listesi']}, {ozet['denenen_hisse_sayisi']} hisse)\n"]
+                    for s in ozet["satirlar"]:
+                        fark_str = f", kör R farkı: {s['kor_R_farki']:+.4f}" \
+                            if s.get("kor_R_farki") is not None else ""
+                        satirlar.append(
+                            f"{s['strateji']}: n={s['toplam_sinyal']}, "
+                            f"%{s['kazanma_orani_pct']} isabet, ort R={s['ort_R']}{fark_str}"
+                        )
+                    send_telegram_document(dosya_yolu, caption="\n".join(satirlar))
+                except Exception as e:
+                    send_telegram_message(f"🌀 Sıkışma turnuvası v3 hatası: {e}")
+            threading.Thread(target=_arka_plan_sikisma_v3, args=(liste3, hisse_sayisi3), daemon=True).start()
         elif text.startswith("/sikisma_turnuvasi_v2"):
             parcalar = text.split()
             liste = parcalar[1] if len(parcalar) > 1 and parcalar[1] in ("volatil", "buyuk") else "volatil"
