@@ -50,7 +50,7 @@ import socket
 # mesajlarında görünür kılmak için (2026-08-17: 3 kez üst üste "aynı
 # sonuç geldi" şüphesi sonrası eklendi - deploy'un gerçekten güncel
 # olup olmadığını KANITLA göstermek için).
-ARGE_KOD_SURUMU = "v55-bagimsiz-calisma-modu-2026-08-19"
+ARGE_KOD_SURUMU = "v56-sec-istek-hizi-yavaslatildi-2026-08-19"
 import warnings
 from datetime import datetime, timezone
 
@@ -1557,13 +1557,21 @@ def _edgar_tek_hisse_isle(ticker: str, cik: str, gun_ufku: int) -> list:
     print(f"[EDGAR TEŞHİS] {ticker}: Form4 listesi çekiliyor...", flush=True)
     form4ler = _edgar_form4_listesi(cik, ticker)
     print(f"[EDGAR TEŞHİS] {ticker}: Form4 listesi geldi ({len(form4ler)} dosya).", flush=True)
-    time.sleep(0.15)
-    for i, f in enumerate(form4ler[:30]):
-        print(f"[EDGAR TEŞHİS] {ticker}: detay {i+1}/{min(30,len(form4ler))} çekiliyor "
+    time.sleep(1.0)
+    # 2026-08-19 DÜZELTME: kullanıcı defalarca, ÇOK SAYIDA Form4 dosyası
+    # olan hisselerde (600+ dosya - INTC/WMT/NFLX) döngünün SONLARINA
+    # doğru (25-30. dosya civarı) tam donma yaşadı - hiçbir Python/soket
+    # seviyesi zaman aşımı yardımcı olmadı. Bu örüntü, SEC EDGAR'ın
+    # kendisinin bizi "sert hata" yerine YAVAŞÇA CEZALANDIRDIĞINI
+    # düşündürüyor (bağlantıyı damla damla akıtarak). Çözüm: SEC'e daha
+    # AZ yük bindirmek - hem istek arası bekleme (0.15sn->1sn) hem de
+    # hisse başına en fazla dosya sayısı (30->10) azaltıldı.
+    for i, f in enumerate(form4ler[:10]):
+        print(f"[EDGAR TEŞHİS] {ticker}: detay {i+1}/{min(10,len(form4ler))} çekiliyor "
               f"(accession={f.get('accession')})...", flush=True)
         detaylar = _edgar_form4_detay(cik, f["accession"])
         print(f"[EDGAR TEŞHİS] {ticker}: detay {i+1} geldi.", flush=True)
-        time.sleep(0.15)
+        time.sleep(1.0)
         for d in detaylar:
             try:
                 islem_tarihi = pd.to_datetime(d["tarih"]).tz_localize(None)
@@ -1639,6 +1647,7 @@ def icgorusel_islem_testi_edgar_calistir(gun_ufku: int = ICGORUSEL_ISLEM_GUN_UFK
         finally:
             executor.shutdown(wait=False)
             print(f"[EDGAR TEŞHİS] {ticker}: executor kapatıldı, sonraki hisseye geçiliyor.", flush=True)
+        time.sleep(2.0)  # 2026-08-19: hisseler arasi da ekstra nefes payi
 
     if not kayitlar:
         return None, "EDGAR'dan hiçbir işlem kaydı üretilemedi."
@@ -6317,11 +6326,14 @@ def poll_arge_commands():
             send_telegram_message(
                 f"👤 EDGAR İÇERİDEN İŞLEM TESTİ başlıyor: SEC EDGAR'dan (yfinance "
                 f"yerine) çekiliyor, TÜM {len(US_INSIDER_TICKERS)} hisse taranacak. "
-                f"Bu OLDUKÇA YAVAŞ olabilir (her hisse için onlarca Form 4 dosyası "
-                f"indiriliyor, muhtemelen 20-30+ dakika). ARKA PLANDA çalışıyor, "
-                f"bitince CSV + özet göndereceğim. İstatistik artık aynı gün/aynı "
-                f"türdeki tekrar eden işlem satırları için TEKİLLEŞTİRİLMİŞ veriden "
-                f"hesaplanıyor (önceki şişme sorunu düzeltildi)."
+                f"2026-08-19: tekrarlayan donmalar sonrası SEC'e istek hızı "
+                f"BİLİNÇLİ OLARAK YAVAŞLATILDI (hisse başına en fazla 10 "
+                f"dosya, istekler arası 1sn) - artık daha YAVAŞ (muhtemelen "
+                f"45-60+ dakika) ama daha GÜVENİLİR olması hedefleniyor. "
+                f"ARKA PLANDA çalışıyor, bitince CSV + özet göndereceğim. "
+                f"İstatistik artık aynı gün/aynı türdeki tekrar eden işlem "
+                f"satırları için TEKİLLEŞTİRİLMİŞ veriden hesaplanıyor "
+                f"(önceki şişme sorunu düzeltildi)."
             )
 
             def _arka_plan_icgorusel_edgar(gu):
