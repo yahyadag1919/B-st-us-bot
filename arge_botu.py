@@ -44,12 +44,13 @@ import csv
 import json
 import time
 import threading
+import socket
 
 # SÜRÜM ETİKETİ - Render'da hangi kodun gerçekten çalıştığını Telegram
 # mesajlarında görünür kılmak için (2026-08-17: 3 kez üst üste "aynı
 # sonuç geldi" şüphesi sonrası eklendi - deploy'un gerçekten güncel
 # olup olmadığını KANITLA göstermek için).
-ARGE_KOD_SURUMU = "v53-ince-teshis-izleri-2026-08-19"
+ARGE_KOD_SURUMU = "v54-soket-seviyesi-zaman-asimi-2026-08-19"
 import warnings
 from datetime import datetime, timezone
 
@@ -57,6 +58,19 @@ import numpy as np
 import pandas as pd
 from scipy import stats as _stats
 import requests
+
+# 2026-08-19 KRİTİK EKLEME: kullanıcı, ThreadPoolExecutor'ın SERT zaman
+# aşımına (120sn) RAĞMEN 50+ dakika tam bir donma yaşadı - hatta TAMAMEN
+# BAĞIMSIZ bir thread'in (komut dinleme) "nabız" mesajı bile gelmedi. Bu,
+# EDGAR'a özgü bir şey değil, PYTHON SÜRECİNİN KENDİSİNİN (GIL dahil)
+# donduğu anlamına geliyor - bilinen bir Python davranışı: bazı
+# sistemlerde DNS çözümlemesi (getaddrinfo) GIL'i bırakmadan donabiliyor,
+# ki bu durumda hiçbir Python-seviyesi thread/timeout önlemi işe yaramaz.
+# socket.setdefaulttimeout(), TÜM soket işlemlerine (DNS dahil) işletim
+# sistemi seviyesinde bir üst sınır koyar - requests kütüphanesinin
+# KENDİ timeout parametresinden daha alt seviyede, daha güvenilir bir
+# son çare.
+socket.setdefaulttimeout(30)
 
 warnings.filterwarnings("ignore")
 
