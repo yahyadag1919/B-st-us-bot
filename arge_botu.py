@@ -50,7 +50,7 @@ import socket
 # mesajlarında görünür kılmak için (2026-08-17: 3 kez üst üste "aynı
 # sonuç geldi" şüphesi sonrası eklendi - deploy'un gerçekten güncel
 # olup olmadığını KANITLA göstermek için).
-ARGE_KOD_SURUMU = "v56-sec-istek-hizi-yavaslatildi-2026-08-19"
+ARGE_KOD_SURUMU = "v57-gun-ici-giris-cikis-testi-2026-08-19"
 import warnings
 from datetime import datetime, timezone
 
@@ -5786,6 +5786,250 @@ def sikisma_turnuvasi_v4_calistir(hisse_listesi: str = "volatil", max_hisse: int
 
 
 # =============================================================================
+# GÜN-İÇİ GİRİŞ + GÜN-İÇİ ÇIKIŞ TURNUVASI (GERÇEK DAY-TRADE) — 2026-08-19
+# =============================================================================
+# GEREKÇE: Kullanıcı en baştan beri AYNI GÜN için alıp-satabileceği bir
+# sistem istiyordu (SUPX örneği - yatay/hafif düşüş sonrası dağ gibi
+# yükseliş, hepsi TEK GÜN içinde). Bugüne kadarki TÜM testler (8'li
+# cephanelik dahil) 1-10 GÜNLÜK checkpoint kullanıyordu - kullanıcının
+# asıl isteğine hiç uymuyordu. Bu, DOĞRU soruyu soran ilk test:
+# - GİRİŞ: gün içi 15dk barlarla, bugüne kadarki NEREDEYSE TÜM
+#   göstergeler (tersine dönüş + trend + sıkışma aileleri)
+# - ÇIKIŞ: SADECE AYNI GÜN İÇİNDE - hedefe ulaşırsa WIN, gün biterse
+#   GERÇEK kapanış fiyatıyla (sabit -1 değil, gerçek kâr/zarar) kapanır
+# - HEDEF: ATR-ölçekli (volatil hisselerde sabit yüzde anlamsızlaşıyor,
+#   bugün zaten öğrendik)
+# - EVREN: volatil/küçük hisseler (kullanıcının kendi gözlemi - böyle
+#   patlamalar büyük/sakin hisselerde değil, küçük hisselerde oluyor)
+
+GUN_ICI_ATR_HEDEFI = 1.0  # ayni gun icinde ATR'nin bu kati hedef
+
+
+def _gun_ici_cikis_sonucu(barlar_15dk: pd.DataFrame, giris_konum: int, yon: str,
+                            gunluk_atr: float, hedef_atr_kati: float = GUN_ICI_ATR_HEDEFI):
+    """SADECE AYNI GÜN içinde ilerler. Hedef (ATR'nin X katı) tutarsa
+    WIN, gün biterse GERÇEK kapanış fiyatıyla (gerçek R) kapanır - sabit
+    -1 DEĞİL. Döner: (sonuç_etiketi, R_değeri)."""
+    giris_fiyat = barlar_15dk.iloc[giris_konum]["close"]
+    giris_gun = barlar_15dk.iloc[giris_konum]["gun"]
+    if pd.isna(gunluk_atr) or gunluk_atr == 0:
+        return None
+
+    son_konum = giris_konum
+    for offset in range(1, 40):  # bir gunde en fazla ~26 tane 15dk bar var (6.5 saat), 40 guvenli ust sinir
+        aday_konum = giris_konum + offset
+        if aday_konum >= len(barlar_15dk):
+            break
+        bar = barlar_15dk.iloc[aday_konum]
+        if bar["gun"] != giris_gun:
+            break  # gun degisti, dur
+        son_konum = aday_konum
+        hedef_fiyat = (giris_fiyat + hedef_atr_kati * gunluk_atr if yon == "LONG"
+                       else giris_fiyat - hedef_atr_kati * gunluk_atr)
+        if yon == "LONG" and bar["high"] >= hedef_fiyat:
+            return "WIN", hedef_atr_kati
+        if yon == "SHORT" and bar["low"] <= hedef_fiyat:
+            return "WIN", hedef_atr_kati
+
+    # hedef tutmadi - GUN SONU kapanisiyla GERCEK R hesapla
+    son_fiyat = barlar_15dk.iloc[son_konum]["close"]
+    fiyat_farki = (son_fiyat - giris_fiyat) if yon == "LONG" else (giris_fiyat - son_fiyat)
+    gercek_r = fiyat_farki / gunluk_atr
+    return "EOD_KAPANIS", round(gercek_r, 3)
+
+
+def gun_ici_giris_cikis_turnuvasi_calistir(hisse_listesi: str = "volatil", max_hisse: int = 40) -> tuple:
+    """Bugüne kadarki NEREDEYSE TÜM göstergeleri (tersine dönüş + trend +
+    sıkışma) GERÇEK aynı-gün giriş/çıkış mantığıyla test eder - hiçbir
+    sinyal ertesi güne taşınmaz. Volatil hisse evreninde, ATR-ölçekli
+    hedefle. Döner: (dosya_yolu, özet_dict) ya da (None, hata_mesajı)."""
+    import yfinance as yf
+
+    hisseler = (US_VOLATIL_TICKERS if hisse_listesi == "volatil" else US_INSIDER_TICKERS)[:max_hisse]
+    isimler = [
+        "Bollinger dokunuşu", "Stochastic %K", "CCI", "RSI21", "VWAP sapması", "MFI",
+        "Donchian-20 kırılımı", "EMA9/21 kesişimi", "ADX+DI yön", "MACD kesişimi",
+        "PSAR dönüşü", "Awesome Oscillator",
+        "NR7 kırılımı", "İç Mum kırılımı", "Hacim Daralma Örüntüsü (release+AO)",
+        "%B Stabilizasyonu (release+AO)",
+    ]
+    tum_sonuclar = {isim: [] for isim in isimler}
+    tum_sonuclar["[KÖR] Koşulsuz LONG"] = []
+    tum_sonuclar["[KÖR] Koşulsuz SHORT"] = []
+
+    for n_i, ticker in enumerate(hisseler, 1):
+        try:
+            print(f"[Gün İçi Turnuva {n_i}/{len(hisseler)}] {ticker}...", flush=True)
+            gunluk = yf.Ticker(ticker).history(period="60d", interval="1d", timeout=20)
+            barlar_15dk = yf.Ticker(ticker).history(period="60d", interval="15m", timeout=20)
+            if gunluk is None or gunluk.empty or barlar_15dk is None or barlar_15dk.empty:
+                continue
+            gunluk = gunluk.rename(columns={"Close": "close", "High": "high", "Low": "low"})
+            gunluk.index = pd.to_datetime(gunluk.index).tz_localize(None)
+            tr = pd.concat([(gunluk["high"] - gunluk["low"]),
+                             (gunluk["high"] - gunluk["close"].shift()).abs(),
+                             (gunluk["low"] - gunluk["close"].shift()).abs()], axis=1).max(axis=1)
+            gunluk["atr14"] = tr.rolling(14).mean()
+            gunluk_atr_harita = gunluk["atr14"].to_dict()
+            gunluk_tarihleri = [d.date() for d in gunluk.index]
+            gunluk_atr_gun_bazli = dict(zip(gunluk_tarihleri, gunluk["atr14"].values))
+
+            barlar_15dk = barlar_15dk.reset_index().rename(columns={
+                "Datetime": "ts", "Open": "open", "High": "high", "Low": "low",
+                "Close": "close", "Volume": "volume"})
+            if "ts" not in barlar_15dk.columns:
+                barlar_15dk = barlar_15dk.rename(columns={barlar_15dk.columns[0]: "ts"})
+            barlar_15dk["ts"] = pd.to_datetime(barlar_15dk["ts"]).dt.tz_localize(None)
+            barlar_15dk["gun"] = barlar_15dk["ts"].dt.date
+
+            # --- TUM GOSTERGELERI HESAPLA ---
+            barlar_15dk["rsi21"] = _rsi_hesapla(barlar_15dk["close"], 21)
+            barlar_15dk["stoch"] = _stochastic_hesapla(barlar_15dk["high"], barlar_15dk["low"], barlar_15dk["close"], 14)
+            barlar_15dk["cci"] = _cci_hesapla(barlar_15dk["high"], barlar_15dk["low"], barlar_15dk["close"], 20)
+            barlar_15dk["mfi"] = _mfi_hesapla(barlar_15dk["high"], barlar_15dk["low"], barlar_15dk["close"], barlar_15dk["volume"], 14)
+            boll_alt, boll_ust = _bollinger_hesapla(barlar_15dk["close"], 20, 2.0)
+            barlar_15dk["boll_alt"], barlar_15dk["boll_ust"] = boll_alt, boll_ust
+            barlar_15dk["vwap"] = _vwap_gun_ici_hesapla(barlar_15dk["high"], barlar_15dk["low"], barlar_15dk["close"], barlar_15dk["volume"], barlar_15dk["gun"])
+            barlar_15dk["vwap_sapma_pct"] = (barlar_15dk["close"] - barlar_15dk["vwap"]) / barlar_15dk["vwap"] * 100
+            barlar_15dk["donchian_ust"] = barlar_15dk["high"].rolling(20).max()
+            barlar_15dk["donchian_alt"] = barlar_15dk["low"].rolling(20).min()
+            barlar_15dk["ema_hizli"] = _ema_hesapla(barlar_15dk["close"], 9)
+            barlar_15dk["ema_yavas"] = _ema_hesapla(barlar_15dk["close"], 21)
+            adx, plus_di, minus_di = _adx_di_hesapla(barlar_15dk["high"], barlar_15dk["low"], barlar_15dk["close"], 14)
+            barlar_15dk["adx"], barlar_15dk["plus_di"], barlar_15dk["minus_di"] = adx, plus_di, minus_di
+            macd_line, macd_sinyal = _macd_hesapla(barlar_15dk["close"], 12, 26, 9)
+            barlar_15dk["macd_line"], barlar_15dk["macd_sinyal"] = macd_line, macd_sinyal
+            _, trend_yukari = _psar_hesapla(barlar_15dk["high"], barlar_15dk["low"], barlar_15dk["close"])
+            barlar_15dk["psar_yukari"] = trend_yukari
+            barlar_15dk["ao"] = _awesome_oscillator_hesapla(barlar_15dk["high"], barlar_15dk["low"])
+            barlar_15dk["nr7"] = _nr7_tespit(barlar_15dk["high"], barlar_15dk["low"], 7)
+            barlar_15dk["ic_mum"] = _ic_mum_tespit(barlar_15dk["high"], barlar_15dk["low"])
+            barlar_15dk["hacim_daralma"] = _hacim_daralma_orintusu_tespit(barlar_15dk["high"], barlar_15dk["low"], barlar_15dk["volume"], 5, 3)
+            barlar_15dk["percent_b"] = _percent_b_hesapla(barlar_15dk["close"])
+            barlar_15dk["pb_stabil"] = _percent_b_stabilizasyon_tespit(barlar_15dk["percent_b"], 10, 0.15)
+
+            tetiklenen = {isim: set() for isim in isimler}
+            baslangic_konum = 40
+            for idx in range(baslangic_konum, len(barlar_15dk) - 1):
+                bar = barlar_15dk.iloc[idx]
+                onceki = barlar_15dk.iloc[idx - 1]
+                gun = bar["gun"]
+                gunluk_atr = gunluk_atr_gun_bazli.get(gun)
+                if gunluk_atr is None or pd.isna(gunluk_atr):
+                    continue
+
+                # KOR CIZGI - ayni gun-ici cikisla
+                tum_sonuclar["[KÖR] Koşulsuz LONG"].append(_gun_ici_cikis_sonucu(barlar_15dk, idx, "LONG", gunluk_atr))
+                tum_sonuclar["[KÖR] Koşulsuz SHORT"].append(_gun_ici_cikis_sonucu(barlar_15dk, idx, "SHORT", gunluk_atr))
+
+                adaylar = []
+                if gun not in tetiklenen["Bollinger dokunuşu"] and pd.notna(bar["boll_alt"]):
+                    if bar["close"] <= bar["boll_alt"]:
+                        adaylar.append(("Bollinger dokunuşu", "LONG"))
+                    elif bar["close"] >= bar["boll_ust"]:
+                        adaylar.append(("Bollinger dokunuşu", "SHORT"))
+                if gun not in tetiklenen["Stochastic %K"] and pd.notna(bar["stoch"]):
+                    if bar["stoch"] <= 20:
+                        adaylar.append(("Stochastic %K", "LONG"))
+                    elif bar["stoch"] >= 80:
+                        adaylar.append(("Stochastic %K", "SHORT"))
+                if gun not in tetiklenen["CCI"] and pd.notna(bar["cci"]):
+                    if bar["cci"] <= -100:
+                        adaylar.append(("CCI", "LONG"))
+                    elif bar["cci"] >= 100:
+                        adaylar.append(("CCI", "SHORT"))
+                if gun not in tetiklenen["RSI21"] and pd.notna(bar["rsi21"]):
+                    if bar["rsi21"] <= 25:
+                        adaylar.append(("RSI21", "LONG"))
+                    elif bar["rsi21"] >= 75:
+                        adaylar.append(("RSI21", "SHORT"))
+                if gun not in tetiklenen["VWAP sapması"] and pd.notna(bar["vwap_sapma_pct"]):
+                    if bar["vwap_sapma_pct"] <= -1.0:
+                        adaylar.append(("VWAP sapması", "LONG"))
+                    elif bar["vwap_sapma_pct"] >= 1.0:
+                        adaylar.append(("VWAP sapması", "SHORT"))
+                if gun not in tetiklenen["MFI"] and pd.notna(bar["mfi"]):
+                    if bar["mfi"] <= 20:
+                        adaylar.append(("MFI", "LONG"))
+                    elif bar["mfi"] >= 80:
+                        adaylar.append(("MFI", "SHORT"))
+                if gun not in tetiklenen["Donchian-20 kırılımı"] and pd.notna(bar["donchian_ust"]):
+                    if bar["close"] >= bar["donchian_ust"]:
+                        adaylar.append(("Donchian-20 kırılımı", "LONG"))
+                    elif bar["close"] <= bar["donchian_alt"]:
+                        adaylar.append(("Donchian-20 kırılımı", "SHORT"))
+                if gun not in tetiklenen["EMA9/21 kesişimi"] and pd.notna(bar["ema_hizli"]) and pd.notna(onceki["ema_hizli"]):
+                    if onceki["ema_hizli"] <= onceki["ema_yavas"] and bar["ema_hizli"] > bar["ema_yavas"]:
+                        adaylar.append(("EMA9/21 kesişimi", "LONG"))
+                    elif onceki["ema_hizli"] >= onceki["ema_yavas"] and bar["ema_hizli"] < bar["ema_yavas"]:
+                        adaylar.append(("EMA9/21 kesişimi", "SHORT"))
+                if gun not in tetiklenen["ADX+DI yön"] and pd.notna(bar["adx"]) and bar["adx"] >= 25 and pd.notna(onceki["plus_di"]):
+                    if onceki["plus_di"] <= onceki["minus_di"] and bar["plus_di"] > bar["minus_di"]:
+                        adaylar.append(("ADX+DI yön", "LONG"))
+                    elif onceki["plus_di"] >= onceki["minus_di"] and bar["plus_di"] < bar["minus_di"]:
+                        adaylar.append(("ADX+DI yön", "SHORT"))
+                if gun not in tetiklenen["MACD kesişimi"] and pd.notna(bar["macd_line"]) and pd.notna(onceki["macd_line"]):
+                    if onceki["macd_line"] <= onceki["macd_sinyal"] and bar["macd_line"] > bar["macd_sinyal"]:
+                        adaylar.append(("MACD kesişimi", "LONG"))
+                    elif onceki["macd_line"] >= onceki["macd_sinyal"] and bar["macd_line"] < bar["macd_sinyal"]:
+                        adaylar.append(("MACD kesişimi", "SHORT"))
+                if gun not in tetiklenen["PSAR dönüşü"] and pd.notna(bar["psar_yukari"]):
+                    if bool(bar["psar_yukari"]) and not bool(onceki["psar_yukari"]):
+                        adaylar.append(("PSAR dönüşü", "LONG"))
+                    elif not bool(bar["psar_yukari"]) and bool(onceki["psar_yukari"]):
+                        adaylar.append(("PSAR dönüşü", "SHORT"))
+                if gun not in tetiklenen["Awesome Oscillator"] and pd.notna(bar["ao"]) and pd.notna(onceki["ao"]):
+                    if onceki["ao"] <= 0 and bar["ao"] > 0:
+                        adaylar.append(("Awesome Oscillator", "LONG"))
+                    elif onceki["ao"] >= 0 and bar["ao"] < 0:
+                        adaylar.append(("Awesome Oscillator", "SHORT"))
+                if gun not in tetiklenen["NR7 kırılımı"] and bool(bar["nr7"]):
+                    sonraki = barlar_15dk.iloc[idx + 1] if idx + 1 < len(barlar_15dk) else None
+                    if sonraki is not None and sonraki["gun"] == gun:
+                        if sonraki["close"] > bar["high"]:
+                            adaylar.append(("NR7 kırılımı", "LONG"))
+                        elif sonraki["close"] < bar["low"]:
+                            adaylar.append(("NR7 kırılımı", "SHORT"))
+                if gun not in tetiklenen["İç Mum kırılımı"] and bool(bar["ic_mum"]):
+                    sonraki = barlar_15dk.iloc[idx + 1] if idx + 1 < len(barlar_15dk) else None
+                    if sonraki is not None and sonraki["gun"] == gun:
+                        if sonraki["close"] > bar["high"]:
+                            adaylar.append(("İç Mum kırılımı", "LONG"))
+                        elif sonraki["close"] < bar["low"]:
+                            adaylar.append(("İç Mum kırılımı", "SHORT"))
+                yon_ao = "LONG" if (pd.notna(bar["ao"]) and bar["ao"] > 0) else ("SHORT" if pd.notna(bar["ao"]) else None)
+                if yon_ao and gun not in tetiklenen["Hacim Daralma Örüntüsü (release+AO)"] and bool(onceki["hacim_daralma"]) and not bool(bar["hacim_daralma"]):
+                    adaylar.append(("Hacim Daralma Örüntüsü (release+AO)", yon_ao))
+                if yon_ao and gun not in tetiklenen["%B Stabilizasyonu (release+AO)"] and bool(onceki["pb_stabil"]) and not bool(bar["pb_stabil"]):
+                    adaylar.append(("%B Stabilizasyonu (release+AO)", yon_ao))
+
+                for isim, yon in adaylar:
+                    tetiklenen[isim].add(gun)
+                    sonuc = _gun_ici_cikis_sonucu(barlar_15dk, idx, yon, gunluk_atr)
+                    if sonuc is not None:
+                        tum_sonuclar[isim].append(sonuc)
+        except Exception as e:
+            print(f"[Gün İçi Turnuva] {ticker} hata: {e}", flush=True)
+        time.sleep(0.3)
+
+    satirlar = _kanit_ozet_tablosu(tum_sonuclar)
+    if not satirlar:
+        return None, "Hiçbir strateji için yeterli veri üretilemedi."
+
+    kor_long = next((s["kazanma_orani_pct"] for s in satirlar if s["strateji"] == "[KÖR] Koşulsuz LONG"), None)
+    kor_long_r = next((s["ort_R"] for s in satirlar if s["strateji"] == "[KÖR] Koşulsuz LONG"), None)
+    for s in satirlar:
+        s["kor_isabet_farki"] = round(s["kazanma_orani_pct"] - kor_long, 2) if kor_long is not None and s["kazanma_orani_pct"] is not None else None
+        s["kor_R_farki"] = round(s["ort_R"] - kor_long_r, 4) if kor_long_r is not None and s["ort_R"] is not None else None
+
+    tablo = pd.DataFrame(satirlar).sort_values("kor_R_farki", ascending=False)
+    dosya_yolu = _data_path("gun_ici_giris_cikis_turnuvasi.csv")
+    tablo.to_csv(dosya_yolu, index=False, encoding="utf-8-sig")
+    return dosya_yolu, {"satirlar": satirlar, "hisse_listesi": hisse_listesi,
+                         "denenen_hisse_sayisi": len(hisseler)}
+
+
+# =============================================================================
 # EKŞİ SÖZLÜK BAĞLANTI TESTİ — 2026-08-19
 # =============================================================================
 # GEREKÇE: Ekşi Sözlük'ün resmi bir API'si yok - sadece web sayfası
@@ -5912,6 +6156,9 @@ def send_startup_message():
         "ama ATR-ÖLÇEKLİ hedeflerle (sabit %1-5 yerine hissenin kendi "
         "volatilitesine göre) - volatil hisselerde sabit hedefin "
         "anlamsızlaşma sorununu çözmek için\n"
+        "/gun_ici_turnuva [volatil|buyuk] [HİSSE_SAYISI] — 16 göstergeyi "
+        "GERÇEK aynı-gün giriş/çıkış mantığıyla test eder (kullanıcının "
+        "asıl isteği - SUPX tarzı gün-içi patlama yakalama)\n"
         "/sikisma_turnuvasi_v4 [volatil|buyuk] [HİSSE_SAYISI] — Hacim "
         "Daralma Örüntüsü (çok-periyotlu, Minervini tarzı) + %B "
         "Stabilizasyonu, v3'ün aynı metodolojisiyle\n"
@@ -6833,6 +7080,38 @@ def poll_arge_commands():
                 except Exception as e:
                     send_telegram_message(f"🌀 Sıkışma turnuvası v4 hatası: {e}")
             threading.Thread(target=_arka_plan_sikisma_v4, args=(liste4, hisse_sayisi4), daemon=True).start()
+        elif text.startswith("/gun_ici_turnuva"):
+            parcalar = text.split()
+            liste_gi = parcalar[1] if len(parcalar) > 1 and parcalar[1] in ("volatil", "buyuk") else "volatil"
+            hisse_sayisi_gi = int(parcalar[2]) if len(parcalar) > 2 else 40
+            send_telegram_message(
+                f"📅 GÜN-İÇİ GİRİŞ+ÇIKIŞ TURNUVASI başlıyor (liste: {liste_gi}, "
+                f"{hisse_sayisi_gi} hisse): 16 gösterge (tersine dönüş + trend "
+                f"+ sıkışma) GERÇEK aynı-gün giriş/çıkış mantığıyla test "
+                f"ediliyor - hiçbir sinyal ertesi güne taşınmıyor, gün "
+                f"biterse gerçek kapanış fiyatıyla kapanıyor. ARKA PLANDA "
+                f"çalışıyor, biraz sürebilir, bitince CSV + özet göndereceğim."
+            )
+
+            def _arka_plan_gun_ici_turnuva(l, hs):
+                try:
+                    dosya_yolu, ozet = gun_ici_giris_cikis_turnuvasi_calistir(l, hs)
+                    if dosya_yolu is None:
+                        send_telegram_message(f"📅 Gün-içi turnuva başarısız: {ozet}")
+                        return
+                    satirlar = [f"📅 Gün-İçi Giriş+Çıkış Turnuvası Sonucu (liste: "
+                                f"{ozet['hisse_listesi']}, {ozet['denenen_hisse_sayisi']} hisse)\n"]
+                    for s in ozet["satirlar"]:
+                        fark_str = f", kör R farkı: {s['kor_R_farki']:+.4f}" \
+                            if s.get("kor_R_farki") is not None else ""
+                        satirlar.append(
+                            f"{s['strateji']}: n={s['toplam_sinyal']}, "
+                            f"%{s['kazanma_orani_pct']} isabet, ort R={s['ort_R']}{fark_str}"
+                        )
+                    send_telegram_document(dosya_yolu, caption="\n".join(satirlar))
+                except Exception as e:
+                    send_telegram_message(f"📅 Gün-içi turnuva hatası: {e}")
+            threading.Thread(target=_arka_plan_gun_ici_turnuva, args=(liste_gi, hisse_sayisi_gi), daemon=True).start()
         elif text.startswith("/sikisma_turnuvasi_v3"):
             parcalar = text.split()
             liste3 = parcalar[1] if len(parcalar) > 1 and parcalar[1] in ("volatil", "buyuk") else "volatil"
@@ -7083,6 +7362,35 @@ def poll_arge_commands():
                 except Exception as e:
                     send_telegram_message(f"🧪 Test turu hata verdi: {e}")
             threading.Thread(target=_arka_plan_arge_test, daemon=True).start()
+        elif text.startswith("/gun_ici_giris_cikis"):
+            parcalar = text.split()
+            hisse_sayisi = int(parcalar[1]) if len(parcalar) > 1 else 40
+            send_telegram_message(
+                f"📅 GÜN-İÇİ GİRİŞ+ÇIKIŞ TESTİ başlıyor ({hisse_sayisi} hisse): "
+                f"canlıda çalışan AYNI 8 gösterge, ama çıkış artık AYNI GÜN "
+                f"içinde - hedef gün bitmeden tutarsa kazanç, tutmazsa "
+                f"kapanışta zorla kapatılıp gerçek kâr/zarar kaydediliyor. "
+                f"ARKA PLANDA çalışıyor, bitince CSV + özet göndereceğim."
+            )
+
+            def _arka_plan_gun_ici_giris_cikis(hs):
+                try:
+                    dosya_yolu, ozet = gun_ici_giris_cikis_testi_calistir(hs)
+                    if dosya_yolu is None:
+                        send_telegram_message(f"📅 Gün-içi testi başarısız: {ozet}")
+                        return
+                    satirlar = [f"📅 Gün-İçi Giriş+Çıkış Testi Sonucu ({ozet['hisse_sayisi']} hisse)\n"]
+                    for s in ozet["satirlar"]:
+                        fark_str = f", kör R farkı: {s['kor_R_farki']:+.4f}" \
+                            if s.get("kor_R_farki") is not None else ""
+                        satirlar.append(
+                            f"{s['strateji']}: n={s['toplam_sinyal']}, "
+                            f"%{s['kazanma_orani_pct']} isabet, ort R={s['ort_R']}{fark_str}"
+                        )
+                    send_telegram_document(dosya_yolu, caption="\n".join(satirlar))
+                except Exception as e:
+                    send_telegram_message(f"📅 Gün-içi testi hatası: {e}")
+            threading.Thread(target=_arka_plan_gun_ici_giris_cikis, args=(hisse_sayisi,), daemon=True).start()
         elif text.startswith("/arge_yardim"):
             send_telegram_message(
                 "📖 Ar-Ge Botu komutları (sadece gece radarı için):\n"
@@ -7103,6 +7411,207 @@ def poll_arge_commands():
                 f.write(str(offset))
         except Exception:
             pass
+
+
+# =============================================================================
+# GÜN-İÇİ GİRİŞ + GÜN-İÇİ ÇIKIŞ TESTİ — 2026-08-19
+# =============================================================================
+# GEREKÇE: Kullanıcı baştan beri (SUPX görseliyle) AYNI GÜN içinde
+# alıp-satabileceği bir sistem istiyordu - bugüne kadarki TÜM testler
+# (canlıdaki 8'li cephanelik dahil) 1-10 GÜNLÜK checkpoint kullanıyordu,
+# bu YANLIŞ soruydu. Bu test, CANLIDA ZATEN ÇALIŞAN AYNI 8 göstergeyi
+# kullanıyor (Donchian-20, EMA9/21, ADX+DI, Awesome Oscillator,
+# Bollinger, CCI, VWAP Sapması, MACD) - ama çıkış GÜN İÇİNDE: hedef
+# gün bitmeden tutarsa kazanç, tutmazsa kapanışta ZORLA kapatılıp o
+# andaki GERÇEK kâr/zarar kaydediliyor (ikili KAZANDI/KAYBETTİ değil,
+# gerçekçi bir P&L).
+
+GUN_ICI_CIKIS_CHECKPOINTS = [(4, "1sa", 0.3), (8, "2sa", 0.6), (16, "4sa", 1.0)]  # bar sayisi (15dk), ATR-intraday kati
+
+
+def _intraday_atr_hesapla(high, low, close, n=14):
+    tr = pd.concat([(high - low), (high - close.shift()).abs(), (low - close.shift()).abs()], axis=1).max(axis=1)
+    return tr.rolling(n).mean()
+
+
+def _gun_ici_ayni_gun_cikis_sonuc(barlar: pd.DataFrame, giris_idx: int, yon: str, atr_col: str = "atr_gun_ici"):
+    """Girişten sonra AYNI GÜN içindeki barlarla checkpoint kontrolü.
+    Hiçbiri tutmazsa günün SON barında ZORLA kapatılır, o andaki GERÇEK
+    R (ATR-intraday'a göre ölçekli) döner - ikili WIN/LOSS değil,
+    gerçekçi bir kapanış sonucu."""
+    giris_bar = barlar.iloc[giris_idx]
+    giris_fiyat = giris_bar["close"]
+    atr = giris_bar[atr_col]
+    if pd.isna(atr) or atr == 0:
+        return None
+    bugun = giris_bar["gun"]
+
+    # ayni gunun kalan barlarini bul
+    gun_sonu_idx = giris_idx
+    for j in range(giris_idx + 1, len(barlar)):
+        if barlar.iloc[j]["gun"] != bugun:
+            break
+        gun_sonu_idx = j
+    if gun_sonu_idx == giris_idx:
+        return None  # gunun son barinda tetiklenmis, kontrol edecek bar yok
+
+    for bar_ofset, etiket, atr_kat in GUN_ICI_CIKIS_CHECKPOINTS:
+        i = giris_idx + bar_ofset
+        if i > gun_sonu_idx:
+            break  # bu checkpoint gun bitmeden yetismiyor
+        bar = barlar.iloc[i]
+        if yon == "LONG":
+            hedef = giris_fiyat + atr_kat * atr
+            if bar["high"] >= hedef:
+                return "WIN", atr_kat
+        else:
+            hedef = giris_fiyat - atr_kat * atr
+            if bar["low"] <= hedef:
+                return "WIN", atr_kat
+
+    # hicbir checkpoint tutmadi -> GUN SONUNDA ZORLA KAPAT, gercek R hesapla.
+    # 2026-08-19 DUZELTME: _kanit_ozet_tablosu SADECE "WIN"/"LOSS"/"TIMEOUT"
+    # etiketlerini taniyor - ozel "EOD_KAPANIS" etiketi kullanilsaydi hic
+    # "LOSS" sayilmayacagi icin isabet orani YANLIS (yapay %100'e yakin)
+    # cikardi. Artik gercek R'nin ISARETINE gore WIN/LOSS etiketleniyor,
+    # ama gercek R degeri (kucuk de olsa, negatif de olsa) korunuyor -
+    # hem isabet orani hem ortalama R dogru hesaplaniyor.
+    kapanis_fiyat = barlar.iloc[gun_sonu_idx]["close"]
+    if yon == "LONG":
+        gercek_r = (kapanis_fiyat - giris_fiyat) / atr
+    else:
+        gercek_r = (giris_fiyat - kapanis_fiyat) / atr
+    etiket = "WIN" if gercek_r > 0 else "LOSS"
+    return etiket, round(gercek_r, 4)
+
+
+def gun_ici_giris_cikis_testi_calistir(max_hisse: int = 40) -> tuple:
+    """Canlıda çalışan AYNI 8 göstergeyi, AYNI GÜN çıkışıyla (checkpoint
+    tutarsa kazanç, tutmazsa kapanışta zorla + gerçek R) test eder. Kör
+    temel çizgi de (koşulsuz LONG/SHORT, günün ilk barında giriş, aynı
+    gün çıkış) aynı yöntemle hesaplanıyor. Döner: (dosya_yolu, özet_dict)
+    ya da (None, hata_mesajı)."""
+    import yfinance as yf
+
+    hisseler = US_INSIDER_TICKERS[:max_hisse]
+    isimler = ["Donchian-20 Kırılımı", "EMA9/21 Kesişimi", "ADX+DI Yön",
+               "Awesome Oscillator", "Bollinger Bandı Dokunuşu", "CCI",
+               "VWAP Sapması", "MACD Kesişimi"]
+    tum_sonuclar = {isim: [] for isim in isimler}
+    tum_sonuclar["[KÖR] Koşulsuz LONG (gün içi)"] = []
+    tum_sonuclar["[KÖR] Koşulsuz SHORT (gün içi)"] = []
+
+    for n_i, ticker in enumerate(hisseler, 1):
+        try:
+            print(f"[Gün İçi Testi {n_i}/{len(hisseler)}] {ticker}...", flush=True)
+            barlar = yf.Ticker(ticker).history(period="60d", interval="15m", timeout=20)
+            if barlar is None or barlar.empty or len(barlar) < 60:
+                continue
+            barlar = barlar.reset_index().rename(columns={
+                "Datetime": "ts", "Open": "open", "High": "high", "Low": "low",
+                "Close": "close", "Volume": "volume"})
+            if "ts" not in barlar.columns:
+                barlar = barlar.rename(columns={barlar.columns[0]: "ts"})
+            barlar["ts"] = pd.to_datetime(barlar["ts"]).dt.tz_localize(None)
+            barlar["gun"] = barlar["ts"].dt.date
+
+            barlar["atr_gun_ici"] = _intraday_atr_hesapla(barlar["high"], barlar["low"], barlar["close"])
+            barlar["donchian_ust"] = barlar["high"].rolling(20).max()
+            barlar["donchian_alt"] = barlar["low"].rolling(20).min()
+            barlar["ema9"] = _ema_hesapla(barlar["close"], 9)
+            barlar["ema21"] = _ema_hesapla(barlar["close"], 21)
+            adx, plus_di, minus_di = _adx_di_hesapla(barlar["high"], barlar["low"], barlar["close"], 14)
+            barlar["adx"], barlar["plus_di"], barlar["minus_di"] = adx, plus_di, minus_di
+            barlar["ao"] = _awesome_oscillator_hesapla(barlar["high"], barlar["low"])
+            boll_alt, boll_ust = _bollinger_hesapla(barlar["close"], 20, 2.0)
+            barlar["boll_alt"], barlar["boll_ust"] = boll_alt, boll_ust
+            barlar["cci"] = _cci_hesapla(barlar["high"], barlar["low"], barlar["close"], 20)
+            barlar["vwap"] = _vwap_gun_ici_hesapla(barlar["high"], barlar["low"], barlar["close"],
+                                                    barlar["volume"], barlar["gun"])
+            barlar["vwap_sapma_pct"] = (barlar["close"] - barlar["vwap"]) / barlar["vwap"] * 100
+            macd_line, macd_sinyal = _macd_hesapla(barlar["close"], 12, 26, 9)
+            barlar["macd_line"], barlar["macd_sinyal"] = macd_line, macd_sinyal
+
+            tetiklenen = {isim: set() for isim in isimler}
+            baslangic = 40
+            for idx in range(baslangic, len(barlar) - 1):
+                bar = barlar.iloc[idx]
+                onceki = barlar.iloc[idx - 1]
+                gun = bar["gun"]
+
+                # KOR CIZGI - gunun ilk barinda kosulsuz gir
+                if gun not in tetiklenen.setdefault("_kor_gun", set()):
+                    tetiklenen["_kor_gun"].add(gun)
+                    sonuc_l = _gun_ici_ayni_gun_cikis_sonuc(barlar, idx, "LONG")
+                    if sonuc_l is not None:
+                        tum_sonuclar["[KÖR] Koşulsuz LONG (gün içi)"].append(sonuc_l)
+                    sonuc_s = _gun_ici_ayni_gun_cikis_sonuc(barlar, idx, "SHORT")
+                    if sonuc_s is not None:
+                        tum_sonuclar["[KÖR] Koşulsuz SHORT (gün içi)"].append(sonuc_s)
+
+                adaylar = []
+                if gun not in tetiklenen["Donchian-20 Kırılımı"] and pd.notna(bar["donchian_ust"]):
+                    if bar["close"] >= bar["donchian_ust"]:
+                        adaylar.append(("Donchian-20 Kırılımı", "LONG"))
+                    elif bar["close"] <= bar["donchian_alt"]:
+                        adaylar.append(("Donchian-20 Kırılımı", "SHORT"))
+                if gun not in tetiklenen["EMA9/21 Kesişimi"] and pd.notna(bar["ema9"]) and pd.notna(onceki["ema9"]):
+                    if onceki["ema9"] <= onceki["ema21"] and bar["ema9"] > bar["ema21"]:
+                        adaylar.append(("EMA9/21 Kesişimi", "LONG"))
+                    elif onceki["ema9"] >= onceki["ema21"] and bar["ema9"] < bar["ema21"]:
+                        adaylar.append(("EMA9/21 Kesişimi", "SHORT"))
+                if gun not in tetiklenen["ADX+DI Yön"] and pd.notna(bar["adx"]) and bar["adx"] >= 25:
+                    if onceki["plus_di"] <= onceki["minus_di"] and bar["plus_di"] > bar["minus_di"]:
+                        adaylar.append(("ADX+DI Yön", "LONG"))
+                    elif onceki["plus_di"] >= onceki["minus_di"] and bar["plus_di"] < bar["minus_di"]:
+                        adaylar.append(("ADX+DI Yön", "SHORT"))
+                if gun not in tetiklenen["Awesome Oscillator"] and pd.notna(bar["ao"]) and pd.notna(onceki["ao"]):
+                    if onceki["ao"] <= 0 and bar["ao"] > 0:
+                        adaylar.append(("Awesome Oscillator", "LONG"))
+                    elif onceki["ao"] >= 0 and bar["ao"] < 0:
+                        adaylar.append(("Awesome Oscillator", "SHORT"))
+                if gun not in tetiklenen["Bollinger Bandı Dokunuşu"] and pd.notna(bar["boll_alt"]):
+                    if bar["close"] <= bar["boll_alt"]:
+                        adaylar.append(("Bollinger Bandı Dokunuşu", "LONG"))
+                    elif bar["close"] >= bar["boll_ust"]:
+                        adaylar.append(("Bollinger Bandı Dokunuşu", "SHORT"))
+                if gun not in tetiklenen["CCI"] and pd.notna(bar["cci"]):
+                    if bar["cci"] <= -100:
+                        adaylar.append(("CCI", "LONG"))
+                    elif bar["cci"] >= 100:
+                        adaylar.append(("CCI", "SHORT"))
+                if gun not in tetiklenen["VWAP Sapması"] and pd.notna(bar["vwap_sapma_pct"]):
+                    if bar["vwap_sapma_pct"] <= -1.0:
+                        adaylar.append(("VWAP Sapması", "LONG"))
+                    elif bar["vwap_sapma_pct"] >= 1.0:
+                        adaylar.append(("VWAP Sapması", "SHORT"))
+                if gun not in tetiklenen["MACD Kesişimi"] and pd.notna(bar["macd_line"]) and pd.notna(onceki["macd_line"]):
+                    if onceki["macd_line"] <= onceki["macd_sinyal"] and bar["macd_line"] > bar["macd_sinyal"]:
+                        adaylar.append(("MACD Kesişimi", "LONG"))
+                    elif onceki["macd_line"] >= onceki["macd_sinyal"] and bar["macd_line"] < bar["macd_sinyal"]:
+                        adaylar.append(("MACD Kesişimi", "SHORT"))
+
+                for isim, yon in adaylar:
+                    tetiklenen[isim].add(gun)
+                    sonuc = _gun_ici_ayni_gun_cikis_sonuc(barlar, idx, yon)
+                    if sonuc is not None:
+                        tum_sonuclar[isim].append(sonuc)
+        except Exception as e:
+            print(f"[Gün İçi Testi] {ticker} hata: {e}", flush=True)
+        time.sleep(0.3)
+
+    satirlar = _kanit_ozet_tablosu(tum_sonuclar)
+    if not satirlar:
+        return None, "Hiçbir strateji için yeterli veri üretilemedi."
+
+    kor_long_r = next((s["ort_R"] for s in satirlar if s["strateji"] == "[KÖR] Koşulsuz LONG (gün içi)"), None)
+    for s in satirlar:
+        s["kor_R_farki"] = round(s["ort_R"] - kor_long_r, 4) if kor_long_r is not None and s["ort_R"] is not None else None
+
+    tablo = pd.DataFrame(satirlar).sort_values("kor_R_farki", ascending=False)
+    dosya_yolu = _data_path("gun_ici_giris_cikis_testi.csv")
+    tablo.to_csv(dosya_yolu, index=False, encoding="utf-8-sig")
+    return dosya_yolu, {"satirlar": satirlar, "hisse_sayisi": len(hisseler)}
 
 
 # =============================================================================
