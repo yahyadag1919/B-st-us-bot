@@ -50,7 +50,7 @@ import socket
 # mesajlarında görünür kılmak için (2026-08-17: 3 kez üst üste "aynı
 # sonuç geldi" şüphesi sonrası eklendi - deploy'un gerçekten güncel
 # olup olmadığını KANITLA göstermek için).
-ARGE_KOD_SURUMU = "v59-ozet-tablo-ve-selfping-duzeltmesi-2026-08-19"
+ARGE_KOD_SURUMU = "v60-riskli-soket-ayari-geri-alindi-2026-08-19"
 import warnings
 from datetime import datetime, timezone
 
@@ -59,18 +59,14 @@ import pandas as pd
 from scipy import stats as _stats
 import requests
 
-# 2026-08-19 KRİTİK EKLEME: kullanıcı, ThreadPoolExecutor'ın SERT zaman
-# aşımına (120sn) RAĞMEN 50+ dakika tam bir donma yaşadı - hatta TAMAMEN
-# BAĞIMSIZ bir thread'in (komut dinleme) "nabız" mesajı bile gelmedi. Bu,
-# EDGAR'a özgü bir şey değil, PYTHON SÜRECİNİN KENDİSİNİN (GIL dahil)
-# donduğu anlamına geliyor - bilinen bir Python davranışı: bazı
-# sistemlerde DNS çözümlemesi (getaddrinfo) GIL'i bırakmadan donabiliyor,
-# ki bu durumda hiçbir Python-seviyesi thread/timeout önlemi işe yaramaz.
-# socket.setdefaulttimeout(), TÜM soket işlemlerine (DNS dahil) işletim
-# sistemi seviyesinde bir üst sınır koyar - requests kütüphanesinin
-# KENDİ timeout parametresinden daha alt seviyede, daha güvenilir bir
-# son çare.
-socket.setdefaulttimeout(30)
+# 2026-08-19 GERİ ALINDI: socket.setdefaulttimeout(30) buraya eklenmişti
+# (DNS donmalarına karşı son çare olarak) ama kullanıcı, TAM O NOKTADAN
+# SONRA botun Render'da "uyumaya" başladığını fark etti - bu ayar GLOBAL
+# olduğu için muhtemelen Flask'ın KENDİ sunucu soketini de etkileyip
+# onu bozmuştu (tahmini bir risk olarak baştan not edilmişti, gerçekleşmiş
+# görünüyor). Kaldırıldı - DNS donmalarına karşı savunma artık sadece
+# ThreadPoolExecutor'ın sert zaman aşımına (120sn) ve her isteğin kendi
+# requests(timeout=...) parametresine dayanıyor.
 
 warnings.filterwarnings("ignore")
 
