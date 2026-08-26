@@ -50,7 +50,7 @@ import socket
 # mesajlarında görünür kılmak için (2026-08-17: 3 kez üst üste "aynı
 # sonuç geldi" şüphesi sonrası eklendi - deploy'un gerçekten güncel
 # olup olmadığını KANITLA göstermek için).
-ARGE_KOD_SURUMU = "v61-tum-testlere-sert-zaman-asimi-2026-08-19"
+ARGE_KOD_SURUMU = "v62-buyuk-patlama-gunu-testi-2026-08-19"
 import warnings
 from datetime import datetime, timezone
 
@@ -5352,7 +5352,19 @@ US_VOLATIL_TICKERS = [
     "NKLA", "GOEV", "FSR", "RIDE", "CLOV", "WISH", "BB", "IONQ", "RGTI",
     "SMCI", "UPST", "AFRM", "CVNA", "DKNG", "HOOD", "COIN", "ROKU", "SNAP",
     "PLUG", "FCEL", "CHPT", "QS",
+    # 2026-08-19 EKLENDİ - kullanıcının isteğiyle daha da genişletildi,
+    # küçük/volatil hisselerde "patlama günü" yakalama testi için.
+    # DÜRÜST NOT: bu ek liste de canlı bir tarama değil, genel bilgime
+    # dayanıyor - bazıları artık farklı davranıyor olabilir, kod
+    # bunları otomatik atlar (veri gelmezse).
+    "BBAI", "SOUN", "IONS", "CRSP", "NTLA", "BEAM", "EDIT", "RXRX",
+    "ACHR", "JOBY", "LILM", "EVTL", "BLDE", "DNA", "GEVO", "AMTX",
+    "MULN", "WKHS", "HYLN", "CENN", "GOEV", "PHUN", "ATER", "BBIG",
+    "PROG", "SPRT", "ANY", "SDC", "TLRY", "CGC", "ACB", "HEXO",
+    "APRN", "CCIV", "SKLZ", "OPEN", "RUN", "BLNK", "EVGO", "LAZR",
+    "VLDR", "OUST", "MVIS", "CIDM", "GSAT", "SIRI", "NKE", "MRIN",
 ]
+US_VOLATIL_TICKERS = list(dict.fromkeys(US_VOLATIL_TICKERS))  # tekrarları at, sirayi koru
 
 _52HAFTA_PENCERE = 252
 
@@ -6063,6 +6075,213 @@ def gun_ici_giris_cikis_turnuvasi_calistir(hisse_listesi: str = "volatil", max_h
 
 
 # =============================================================================
+# "BÜYÜK PATLAMA GÜNÜ" TESTİ — ERKEN ÇIKIŞ YOK, GÜN SONUNA KADAR TUT
+# =============================================================================
+# 2026-08-19 - GEREKÇE: Önceki gün-içi testlerde 1x ATR hedefine ulaşınca
+# HEMEN çıkıyorduk - bu, SUPX gibi %21 patlayan bir günde bile sadece
+# %5-8'de çıkıp geri kalan büyük hareketi KAÇIRDIĞIMIZ anlamına geliyor.
+# Bu test FARKLI bir soru soruyor: "Sinyal tetiklendiğinde, pozisyonu
+# HİÇ ERKEN ÇIKMADAN gün sonuna kadar tutsaydık, GERÇEKTEN büyük
+# (%10+, %20+) günler yakalıyor muyuz?" Rapor artık ortalama R değil,
+# GERÇEK YÜZDE GETİRİ DAĞILIMI (kaç tanesi büyük patlama oldu).
+# Adaylar: bugüne kadarki TÜM sıkışma/kırılma ailesi + YENİ bir aday
+# (Saf Hacim Patlaması - başka hiçbir şeye bakmadan sadece anormal
+# hacim artışı). GENİŞLETİLMİŞ volatil hisse evreninde.
+
+HACIM_PATLAMASI_KATI = 3.0  # ortalama hacmin bu katindan fazlasi
+
+
+def _hacim_patlamasi_tespit(volume, pencere=20, kat=3.0):
+    """SAF hacim patlaması - fiyat/başka hiçbir koşula bakmadan, sadece
+    o günün hacmi son N günün ortalamasının kaç katı."""
+    ort_hacim = volume.rolling(pencere).mean().shift(1)  # BUGUNU haric onceki ortalama
+    return volume >= kat * ort_hacim
+
+
+def _tam_gun_tutma_getirisi(barlar_15dk: pd.DataFrame, giris_konum: int, yon: str):
+    """Pozisyonu HİÇ ERKEN ÇIKMADAN gün sonuna kadar tutar - GERÇEK
+    yüzde getiriyi döner (ATR'a göre DEĞİL, doğrudan %). None dönerse
+    veri yetersiz demektir."""
+    giris_fiyat = barlar_15dk.iloc[giris_konum]["close"]
+    giris_gun = barlar_15dk.iloc[giris_konum]["gun"]
+    son_konum = giris_konum
+    for offset in range(1, 40):
+        aday = giris_konum + offset
+        if aday >= len(barlar_15dk):
+            break
+        bar = barlar_15dk.iloc[aday]
+        if bar["gun"] != giris_gun:
+            break
+        son_konum = aday
+    if son_konum == giris_konum:
+        return None  # gunun son bariydi, ilerleme yok
+    son_fiyat = barlar_15dk.iloc[son_konum]["close"]
+    if yon == "LONG":
+        return (son_fiyat - giris_fiyat) / giris_fiyat * 100
+    else:
+        return (giris_fiyat - son_fiyat) / giris_fiyat * 100
+
+
+def buyuk_patlama_gunu_testi_calistir(hisse_listesi: str = "volatil", max_hisse: int = 60) -> tuple:
+    """İç Mum, NR7, ve tüm sıkışma ailesi + Saf Hacim Patlaması'nı ERKEN
+    ÇIKIŞ OLMADAN (gün sonuna kadar tutarak) test eder - GERÇEK yüzde
+    getiri dağılımını (ort., medyan, %10+ ve %20+ oranı) raporlar.
+    Döner: (dosya_yolu, özet_dict) ya da (None, hata_mesajı)."""
+    isimler = ["İç Mum kırılımı", "NR7 kırılımı", "Bollinger Genişlik Sıkışması",
+               "TTM Squeeze", "ATR Persentil Sıkışması", "Hacim Daralma Örüntüsü",
+               "%B Stabilizasyonu", "52-Hafta Zirve/Dip Kırılımı", "Gap Kırılımı",
+               "Saf Hacim Patlaması", "[KÖR] Koşulsuz LONG", "[KÖR] Koşulsuz SHORT"]
+    tum_getiriler = {isim: [] for isim in isimler}
+
+    hisseler = (US_VOLATIL_TICKERS if hisse_listesi == "volatil" else US_INSIDER_TICKERS)[:max_hisse]
+
+    for n_i, ticker in enumerate(hisseler, 1):
+        try:
+            print(f"[Büyük Patlama Testi {n_i}/{len(hisseler)}] {ticker}...", flush=True)
+            barlar_15dk = _yf_history_sert_zaman_asimli(ticker, "60d", "15m")
+            if barlar_15dk is None or barlar_15dk.empty:
+                continue
+            barlar_15dk = barlar_15dk.reset_index().rename(columns={
+                "Datetime": "ts", "Open": "open", "High": "high", "Low": "low",
+                "Close": "close", "Volume": "volume"})
+            if "ts" not in barlar_15dk.columns:
+                barlar_15dk = barlar_15dk.rename(columns={barlar_15dk.columns[0]: "ts"})
+            barlar_15dk["ts"] = pd.to_datetime(barlar_15dk["ts"]).dt.tz_localize(None)
+            barlar_15dk["gun"] = barlar_15dk["ts"].dt.date
+
+            barlar_15dk["nr7"] = _nr7_tespit(barlar_15dk["high"], barlar_15dk["low"], 7)
+            barlar_15dk["ic_mum"] = _ic_mum_tespit(barlar_15dk["high"], barlar_15dk["low"])
+            barlar_15dk["boll_sikisma"] = _boll_genislik_sikisma_tespit(barlar_15dk["close"], 20, 2.0, 60, 0.10)
+            barlar_15dk["ttm_squeeze"] = _ttm_squeeze_tespit(barlar_15dk["high"], barlar_15dk["low"], barlar_15dk["close"])
+            barlar_15dk["atr_sikisma"] = _atr_persentil_sikisma_tespit(barlar_15dk["high"], barlar_15dk["low"], barlar_15dk["close"], 100, 0.10)
+            barlar_15dk["hacim_daralma"] = _hacim_daralma_orintusu_tespit(barlar_15dk["high"], barlar_15dk["low"], barlar_15dk["volume"], 5, 3)
+            barlar_15dk["percent_b"] = _percent_b_hesapla(barlar_15dk["close"])
+            barlar_15dk["pb_stabil"] = _percent_b_stabilizasyon_tespit(barlar_15dk["percent_b"], 10, 0.15)
+            barlar_15dk["ao"] = _awesome_oscillator_hesapla(barlar_15dk["high"], barlar_15dk["low"])
+            boll_orta = barlar_15dk["close"].rolling(20).mean()
+            boll_std = barlar_15dk["close"].rolling(20).std()
+            alt_bant, ust_bant = boll_orta - 2.0 * boll_std, boll_orta + 2.0 * boll_std
+            barlar_15dk["yeni_zirve"], barlar_15dk["yeni_dip"] = _52_hafta_kirilim_tespit(
+                barlar_15dk["high"], barlar_15dk["low"], barlar_15dk["close"], 252)
+            barlar_15dk["gap_yukari"], barlar_15dk["gap_asagi"] = _gap_kirilim_tespit(
+                barlar_15dk["open"], barlar_15dk["close"], barlar_15dk["close"].shift(1))
+            barlar_15dk["hacim_patlamasi"] = _hacim_patlamasi_tespit(barlar_15dk["volume"], 20, HACIM_PATLAMASI_KATI)
+
+            tetiklenen = {isim: set() for isim in isimler}
+            baslangic = 105
+            for idx in range(baslangic, len(barlar_15dk) - 1):
+                row = barlar_15dk.iloc[idx]
+                onceki = barlar_15dk.iloc[idx - 1]
+                gun = row["gun"]
+
+                yon_ao = "LONG" if (pd.notna(row["ao"]) and row["ao"] > 0) else ("SHORT" if pd.notna(row["ao"]) else None)
+
+                # KOR CIZGI
+                for yon_kor in ("LONG", "SHORT"):
+                    getiri = _tam_gun_tutma_getirisi(barlar_15dk, idx, yon_kor)
+                    if getiri is not None:
+                        tum_getiriler[f"[KÖR] Koşulsuz {yon_kor}"].append(getiri)
+
+                if gun not in tetiklenen["İç Mum kırılımı"] and bool(row["ic_mum"]):
+                    sonraki = barlar_15dk.iloc[idx + 1] if idx + 1 < len(barlar_15dk) else None
+                    if sonraki is not None and sonraki["gun"] == gun:
+                        y = "LONG" if sonraki["close"] > row["high"] else ("SHORT" if sonraki["close"] < row["low"] else None)
+                        if y:
+                            tetiklenen["İç Mum kırılımı"].add(gun)
+                            g = _tam_gun_tutma_getirisi(barlar_15dk, idx + 1, y)
+                            if g is not None:
+                                tum_getiriler["İç Mum kırılımı"].append(g)
+                if gun not in tetiklenen["NR7 kırılımı"] and bool(row["nr7"]):
+                    sonraki = barlar_15dk.iloc[idx + 1] if idx + 1 < len(barlar_15dk) else None
+                    if sonraki is not None and sonraki["gun"] == gun:
+                        y = "LONG" if sonraki["close"] > row["high"] else ("SHORT" if sonraki["close"] < row["low"] else None)
+                        if y:
+                            tetiklenen["NR7 kırılımı"].add(gun)
+                            g = _tam_gun_tutma_getirisi(barlar_15dk, idx + 1, y)
+                            if g is not None:
+                                tum_getiriler["NR7 kırılımı"].append(g)
+                if yon_ao and gun not in tetiklenen["Bollinger Genişlik Sıkışması"] and bool(onceki["boll_sikisma"]) and not bool(row["boll_sikisma"]):
+                    tetiklenen["Bollinger Genişlik Sıkışması"].add(gun)
+                    g = _tam_gun_tutma_getirisi(barlar_15dk, idx, yon_ao)
+                    if g is not None:
+                        tum_getiriler["Bollinger Genişlik Sıkışması"].append(g)
+                if yon_ao and gun not in tetiklenen["TTM Squeeze"] and bool(onceki["ttm_squeeze"]) and not bool(row["ttm_squeeze"]):
+                    tetiklenen["TTM Squeeze"].add(gun)
+                    g = _tam_gun_tutma_getirisi(barlar_15dk, idx, yon_ao)
+                    if g is not None:
+                        tum_getiriler["TTM Squeeze"].append(g)
+                if yon_ao and gun not in tetiklenen["ATR Persentil Sıkışması"] and bool(onceki["atr_sikisma"]) and not bool(row["atr_sikisma"]):
+                    tetiklenen["ATR Persentil Sıkışması"].add(gun)
+                    g = _tam_gun_tutma_getirisi(barlar_15dk, idx, yon_ao)
+                    if g is not None:
+                        tum_getiriler["ATR Persentil Sıkışması"].append(g)
+                if yon_ao and gun not in tetiklenen["Hacim Daralma Örüntüsü"] and bool(onceki["hacim_daralma"]) and not bool(row["hacim_daralma"]):
+                    tetiklenen["Hacim Daralma Örüntüsü"].add(gun)
+                    g = _tam_gun_tutma_getirisi(barlar_15dk, idx, yon_ao)
+                    if g is not None:
+                        tum_getiriler["Hacim Daralma Örüntüsü"].append(g)
+                if yon_ao and gun not in tetiklenen["%B Stabilizasyonu"] and bool(onceki["pb_stabil"]) and not bool(row["pb_stabil"]):
+                    tetiklenen["%B Stabilizasyonu"].add(gun)
+                    g = _tam_gun_tutma_getirisi(barlar_15dk, idx, yon_ao)
+                    if g is not None:
+                        tum_getiriler["%B Stabilizasyonu"].append(g)
+                if gun not in tetiklenen["52-Hafta Zirve/Dip Kırılımı"]:
+                    if bool(row["yeni_zirve"]):
+                        tetiklenen["52-Hafta Zirve/Dip Kırılımı"].add(gun)
+                        g = _tam_gun_tutma_getirisi(barlar_15dk, idx, "LONG")
+                        if g is not None:
+                            tum_getiriler["52-Hafta Zirve/Dip Kırılımı"].append(g)
+                    elif bool(row["yeni_dip"]):
+                        tetiklenen["52-Hafta Zirve/Dip Kırılımı"].add(gun)
+                        g = _tam_gun_tutma_getirisi(barlar_15dk, idx, "SHORT")
+                        if g is not None:
+                            tum_getiriler["52-Hafta Zirve/Dip Kırılımı"].append(g)
+                if gun not in tetiklenen["Gap Kırılımı"]:
+                    if bool(row["gap_yukari"]):
+                        tetiklenen["Gap Kırılımı"].add(gun)
+                        g = _tam_gun_tutma_getirisi(barlar_15dk, idx, "LONG")
+                        if g is not None:
+                            tum_getiriler["Gap Kırılımı"].append(g)
+                    elif bool(row["gap_asagi"]):
+                        tetiklenen["Gap Kırılımı"].add(gun)
+                        g = _tam_gun_tutma_getirisi(barlar_15dk, idx, "SHORT")
+                        if g is not None:
+                            tum_getiriler["Gap Kırılımı"].append(g)
+                if yon_ao and gun not in tetiklenen["Saf Hacim Patlaması"] and bool(row["hacim_patlamasi"]):
+                    tetiklenen["Saf Hacim Patlaması"].add(gun)
+                    g = _tam_gun_tutma_getirisi(barlar_15dk, idx, yon_ao)
+                    if g is not None:
+                        tum_getiriler["Saf Hacim Patlaması"].append(g)
+        except Exception as e:
+            print(f"[Büyük Patlama Testi] {ticker} hata: {e}", flush=True)
+        time.sleep(0.3)
+
+    satirlar = []
+    for isim, getiriler in tum_getiriler.items():
+        if not getiriler:
+            continue
+        arr = np.array(getiriler)
+        satirlar.append({
+            "strateji": isim, "n": len(arr),
+            "ort_getiri_pct": round(float(np.mean(arr)), 3),
+            "medyan_getiri_pct": round(float(np.median(arr)), 3),
+            "kazanma_orani_pct": round(float((arr > 0).mean() * 100), 2),
+            "yuzde10_ustu_oran_pct": round(float((arr >= 10).mean() * 100), 2),
+            "yuzde20_ustu_oran_pct": round(float((arr >= 20).mean() * 100), 2),
+            "en_iyi_pct": round(float(arr.max()), 2),
+            "en_kotu_pct": round(float(arr.min()), 2),
+        })
+    if not satirlar:
+        return None, "Hiçbir strateji için yeterli veri üretilemedi."
+
+    tablo = pd.DataFrame(satirlar).sort_values("yuzde10_ustu_oran_pct", ascending=False)
+    dosya_yolu = _data_path("buyuk_patlama_gunu_testi.csv")
+    tablo.to_csv(dosya_yolu, index=False, encoding="utf-8-sig")
+    return dosya_yolu, {"satirlar": satirlar, "hisse_listesi": hisse_listesi,
+                         "denenen_hisse_sayisi": len(hisseler)}
+
+
+# =============================================================================
 # EKŞİ SÖZLÜK BAĞLANTI TESTİ — 2026-08-19
 # =============================================================================
 # GEREKÇE: Ekşi Sözlük'ün resmi bir API'si yok - sadece web sayfası
@@ -6192,6 +6411,9 @@ def send_startup_message():
         "/gun_ici_turnuva [volatil|buyuk] [HİSSE_SAYISI] — 16 göstergeyi "
         "GERÇEK aynı-gün giriş/çıkış mantığıyla test eder (kullanıcının "
         "asıl isteği - SUPX tarzı gün-içi patlama yakalama)\n"
+        "/buyuk_patlama [volatil|buyuk] [HİSSE_SAYISI] — İç Mum/NR7/sıkışma "
+        "ailesi + Saf Hacim Patlaması, ERKEN ÇIKIŞ YOK, gün sonuna kadar "
+        "tutuluyor - gerçek %10+/%20+ patlama günü oranını ölçer\n"
         "/sikisma_turnuvasi_v4 [volatil|buyuk] [HİSSE_SAYISI] — Hacim "
         "Daralma Örüntüsü (çok-periyotlu, Minervini tarzı) + %B "
         "Stabilizasyonu, v3'ün aynı metodolojisiyle\n"
@@ -7114,6 +7336,38 @@ def poll_arge_commands():
                 except Exception as e:
                     send_telegram_message(f"🌀 Sıkışma turnuvası v4 hatası: {e}")
             threading.Thread(target=_arka_plan_sikisma_v4, args=(liste4, hisse_sayisi4), daemon=True).start()
+        elif text.startswith("/buyuk_patlama"):
+            parcalar = text.split()
+            liste_bp = parcalar[1] if len(parcalar) > 1 and parcalar[1] in ("volatil", "buyuk") else "volatil"
+            hisse_sayisi_bp = int(parcalar[2]) if len(parcalar) > 2 else 60
+            send_telegram_message(
+                f"💥 BÜYÜK PATLAMA GÜNÜ TESTİ başlıyor (liste: {liste_bp}, "
+                f"{hisse_sayisi_bp} hisse): İç Mum, NR7, tüm sıkışma ailesi "
+                f"+ Saf Hacim Patlaması - ERKEN ÇIKIŞ YOK, gün sonuna kadar "
+                f"tutuluyor, GERÇEK yüzde getiri dağılımı (%10+ ve %20+ "
+                f"oranı dahil) ölçülüyor. ARKA PLANDA çalışıyor, bitince "
+                f"CSV + özet göndereceğim."
+            )
+
+            def _arka_plan_buyuk_patlama(l, hs):
+                try:
+                    dosya_yolu, ozet = buyuk_patlama_gunu_testi_calistir(l, hs)
+                    if dosya_yolu is None:
+                        send_telegram_message(f"💥 Büyük patlama testi başarısız: {ozet}")
+                        return
+                    satirlar = [f"💥 Büyük Patlama Günü Testi Sonucu (liste: "
+                                f"{ozet['hisse_listesi']}, {ozet['denenen_hisse_sayisi']} hisse)\n"]
+                    for s in ozet["satirlar"]:
+                        satirlar.append(
+                            f"{s['strateji']}: n={s['n']}, ort=%{s['ort_getiri_pct']}, "
+                            f"medyan=%{s['medyan_getiri_pct']}, kazanma=%{s['kazanma_orani_pct']}, "
+                            f"%10+ oranı=%{s['yuzde10_ustu_oran_pct']}, %20+ oranı=%{s['yuzde20_ustu_oran_pct']}, "
+                            f"en iyi=%{s['en_iyi_pct']}, en kötü=%{s['en_kotu_pct']}"
+                        )
+                    send_telegram_document(dosya_yolu, caption="\n".join(satirlar))
+                except Exception as e:
+                    send_telegram_message(f"💥 Büyük patlama testi hatası: {e}")
+            threading.Thread(target=_arka_plan_buyuk_patlama, args=(liste_bp, hisse_sayisi_bp), daemon=True).start()
         elif text.startswith("/gun_ici_turnuva"):
             parcalar = text.split()
             liste_gi = parcalar[1] if len(parcalar) > 1 and parcalar[1] in ("volatil", "buyuk") else "volatil"
