@@ -50,7 +50,7 @@ import socket
 # mesajlarında görünür kılmak için (2026-08-17: 3 kez üst üste "aynı
 # sonuç geldi" şüphesi sonrası eklendi - deploy'un gerçekten güncel
 # olup olmadığını KANITLA göstermek için).
-ARGE_KOD_SURUMU = "v58-varsayilan-hisse-sayisi-kucultuldu-2026-08-19"
+ARGE_KOD_SURUMU = "v59-ozet-tablo-ve-selfping-duzeltmesi-2026-08-19"
 import warnings
 from datetime import datetime, timezone
 
@@ -1996,6 +1996,18 @@ def _kanit_ozet_tablosu(tumu: dict) -> list:
         win = sum(1 for d, _ in kayitlar if d == "WIN")
         loss = sum(1 for d, _ in kayitlar if d == "LOSS")
         timeout = sum(1 for d, _ in kayitlar if d == "TIMEOUT")
+        # 2026-08-19 DÜZELTME: _gun_ici_cikis_sonucu "EOD_KAPANIS" etiketi
+        # döndürüyor (gün sonu gerçek kâr/zararla kapanma) - bu daha önce
+        # HİÇ tanınmıyordu, "loss" hiç sayılmadığı için isabet oranı her
+        # zaman %100 çıkıyordu. Artık R işaretine göre win/loss'a
+        # ekleniyor - R sıfırdan büyükse "kazanç sayılan", küçükse
+        # "kayıp sayılan" olarak.
+        for d, r in kayitlar:
+            if d == "EOD_KAPANIS" and r is not None:
+                if r >= 0:
+                    win += 1
+                else:
+                    loss += 1
         karar_verilen = win + loss
         kazanma_orani = round(win / karar_verilen * 100, 2) if karar_verilen else None
         p = _binom_p(win, karar_verilen) if karar_verilen >= KANIT_MIN_N else None
@@ -7660,6 +7672,19 @@ if __name__ == "__main__":
                 print(f"[Ar-Ge Bağımsız] Araştırma döngüsü hatası: {e}", flush=True)
             time.sleep(5)
 
+    def _standalone_kendi_kendine_ping():
+        # 2026-08-19 EKLENDİ: bağımsız modda bu HİÇ yoktu - kullanıcı
+        # botun Render'ın ücretsiz sürümünün "hareketsizlikte uyu"
+        # mekanizmasıyla uyuyakaldığından şüphelendi, muhtemelen haklıydı.
+        import requests as _standalone_requests
+        time.sleep(30)  # once uygulamanin tam ayaga kalkmasini bekle
+        while True:
+            try:
+                _standalone_requests.get(f"http://127.0.0.1:{_PORT}/health", timeout=10)
+            except Exception as e:
+                print(f"[Ar-Ge Bağımsız] Kendi kendine ping hatası: {e}", flush=True)
+            time.sleep(600)  # 10 dakikada bir
+
     print(f"[BAŞLANGIÇ] arge_botu.py BAĞIMSIZ modda çalışıyor — {ARGE_KOD_SURUMU}", flush=True)
     send_telegram_message(
         f"🔬 Ar-Ge Botu BAĞIMSIZ modda başlatıldı — {ARGE_KOD_SURUMU}\n\n"
@@ -7667,9 +7692,11 @@ if __name__ == "__main__":
         f"başına çalışıyor (Start Command geçici olarak değiştirildi).\n"
         f"⚠️ Ana ABD sinyal botu bu sürede ÇALIŞMIYOR - test bitince "
         f"Start Command'ı 'python us_sinyal_botu.py' olarak geri almayı "
-        f"unutma.\n\n"
+        f"unutma.\n"
+        f"🔁 Kendi kendine ping: 10 dk'da bir (önceden eksikti, eklendi)\n\n"
         f"/arge_yardim yazarak komutları görebilirsin."
     )
     _standalone_threading.Thread(target=_standalone_komut_dongusu, daemon=True).start()
     _standalone_threading.Thread(target=_standalone_arastirma_dongusu, daemon=True).start()
+    _standalone_threading.Thread(target=_standalone_kendi_kendine_ping, daemon=True).start()
     _standalone_app.run(host="0.0.0.0", port=_PORT)
