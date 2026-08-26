@@ -54,7 +54,7 @@ TARAMA_ARALIGI_SANIYE = int(os.environ.get("TARAMA_ARALIGI_SANIYE", "300"))  # 5
 # seçildi - 5dk, Yahoo'nun hız sınırına ("Too Many Requests") takılma
 # riskini ciddi artırıyordu; 10dk hem sık hem güvenli.
 
-BOT_KOD_SURUMU = "v8-gun-ici-modul-celisen-sessiz-5dk-tarama-2026-08-19"
+BOT_KOD_SURUMU = "v9-otomatik-arastirma-kapatildi-2026-08-19"
 
 US_TICKERS = [
     "AAPL", "MSFT", "GOOGL", "AMZN", "NVDA", "META", "TSLA", "BRK-B", "JPM",
@@ -1092,7 +1092,13 @@ if __name__ == "__main__":
     print("[BAŞLANGIÇ] Ar-Ge botu başlangıç mesajı thread'i başlatıldı.", flush=True)
     threading.Thread(target=arge_botu_komut_dongusu, daemon=True).start()
     print("[BAŞLANGIÇ] Ar-Ge botu KOMUT dinleme thread'i başlatıldı (ayrı).", flush=True)
-    threading.Thread(target=arge_botu_arastirma_dongusu, daemon=True).start()
-    print("[BAŞLANGIÇ] Ar-Ge botu ARAŞTIRMA thread'i başlatıldı (ayrı, komutları asla bloklamaz).", flush=True)
+    # 2026-08-19 KAPATILDI: arge_botu_arastirma_dongusu (otomatik AI
+    # hipotez üretme + BIST veri çekme + Gemini istekleri) artık
+    # BAŞLATILMIYOR. Kullanıcı bunu hiç kullanmıyordu ama arka planda
+    # sürekli ağ isteği yapıp donma riski ve log kirliliği yaratıyordu.
+    # Ar-Ge KOMUTLARI (/gun_ici_turnuva, /buyuk_patlama vb.) etkilenmez -
+    # onlar komut döngüsünden çalışmaya devam eder.
+    print("[BAŞLANGIÇ] Ar-Ge OTOMATİK ARAŞTIRMA thread'i KAPALI "
+          "(bilinçli olarak devre dışı - sadece komutlar çalışır).", flush=True)
     print("[BAŞLANGIÇ] Flask sunucusu başlatılıyor...", flush=True)
     app.run(host="0.0.0.0", port=PORT)

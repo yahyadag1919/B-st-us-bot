@@ -50,7 +50,7 @@ import socket
 # mesajlarında görünür kılmak için (2026-08-17: 3 kez üst üste "aynı
 # sonuç geldi" şüphesi sonrası eklendi - deploy'un gerçekten güncel
 # olup olmadığını KANITLA göstermek için).
-ARGE_KOD_SURUMU = "v64-buyuk-patlama-5-grup-komutu-2026-08-19"
+ARGE_KOD_SURUMU = "v65-otomatik-arastirma-kapatildi-2026-08-19"
 import warnings
 from datetime import datetime, timezone
 
@@ -8027,6 +8027,9 @@ if __name__ == "__main__":
         f"/arge_yardim yazarak komutları görebilirsin."
     )
     _standalone_threading.Thread(target=_standalone_komut_dongusu, daemon=True).start()
-    _standalone_threading.Thread(target=_standalone_arastirma_dongusu, daemon=True).start()
+    # 2026-08-19 KAPATILDI: otomatik araştırma döngüsü artık başlatılmıyor
+    # (kullanıcı kullanmıyordu, arka planda gereksiz ağ yükü/donma riski
+    # yaratıyordu). Komut döngüsü çalışmaya devam ediyor.
+    print("[BAŞLANGIÇ] Otomatik araştırma döngüsü KAPALI (sadece komutlar çalışır).", flush=True)
     _standalone_threading.Thread(target=_standalone_kendi_kendine_ping, daemon=True).start()
     _standalone_app.run(host="0.0.0.0", port=_PORT)
