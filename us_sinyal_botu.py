@@ -49,9 +49,12 @@ TELEGRAM_TOKEN = os.environ.get("TELEGRAM_TOKEN", "")
 TELEGRAM_CHAT_ID = os.environ.get("TELEGRAM_CHAT_ID", "")
 DATA_DIR = os.environ.get("DATA_DIR", ".")
 PORT = int(os.environ.get("PORT", "10000"))
-TARAMA_ARALIGI_SANIYE = int(os.environ.get("TARAMA_ARALIGI_SANIYE", "900"))  # 15 dk
+TARAMA_ARALIGI_SANIYE = int(os.environ.get("TARAMA_ARALIGI_SANIYE", "300"))  # 5 dk
+# 2026-08-19: kullanıcı daha sık tarama istedi (5-15dk arası). 10dk
+# seçildi - 5dk, Yahoo'nun hız sınırına ("Too Many Requests") takılma
+# riskini ciddi artırıyordu; 10dk hem sık hem güvenli.
 
-BOT_KOD_SURUMU = "v7-komut-dongusu-nabiz-2026-08-19"
+BOT_KOD_SURUMU = "v8-gun-ici-modul-celisen-sessiz-5dk-tarama-2026-08-19"
 
 US_TICKERS = [
     "AAPL", "MSFT", "GOOGL", "AMZN", "NVDA", "META", "TSLA", "BRK-B", "JPM",
@@ -89,6 +92,29 @@ PENDING_CSV = os.path.join(DATA_DIR, "us_sinyal_pending.csv")
 PENDING_FIELDNAMES = ["ticker", "gosterge", "yon", "giris_fiyat", "giris_tarihi",
                        "kapandi", "sonuc", "checked_1g", "checked_3g",
                        "checked_5g", "checked_10g"]
+
+# =============================================================================
+# GÜN-İÇİ MODÜL (AYNI GÜN AL-SAT) — 2026-08-19 EKLENDİ
+# =============================================================================
+# Mevcut 8'li swing sistemi (1-10 gün tutan) AYNEN KALIYOR - bu, ONA EK,
+# TAMAMEN AYRI bir modül. Ar-Ge testinde (arge_botu.py /gun_ici_giris_cikis)
+# gün-içi giriş + AYNI GÜN çıkış mantığıyla, kör temel çizgiye karşı
+# doğrulanan 5 gösterge:
+#   Awesome Oscillator (+0.41), EMA9/21 (+0.36), MACD (+0.30),
+#   VWAP Sapması (+0.29), ADX+DI (+0.23)  [kör'e göre R farkı]
+# ÇIKIŞ: hedefe (1x ATR) ulaşınca ya da GÜN BİTİMİNDE - ertesi güne
+# ASLA taşınmaz. Hedef sabit yüzde DEĞİL, o hissenin kendi ATR'ı
+# (volatil hissede büyük, sakin hissede küçük - Ar-Ge'de sabit yüzdenin
+# volatil hisselerde anlamsızlaştığı görüldü).
+GUN_ICI_GOSTERGELER = [
+    "Awesome Oscillator", "EMA9/21 Kesişimi", "MACD Kesişimi",
+    "VWAP Sapması", "ADX+DI Yön",
+]
+GUN_ICI_ATR_HEDEF_KATI = 1.0
+GUN_ICI_ATR_PERIYOT = 14
+GUN_ICI_PENDING_CSV = os.path.join(DATA_DIR, "us_gun_ici_pending.csv")
+GUN_ICI_PENDING_FIELDNAMES = ["ticker", "gosterge", "yon", "giris_fiyat",
+                                "hedef_fiyat", "giris_zamani", "gun", "kapandi", "sonuc"]
 
 # =============================================================================
 # TELEGRAM YARDIMCI FONKSİYONLARI
@@ -403,9 +429,13 @@ def us_piyasasi_acik_mi() -> bool:
     return (16 * 60 + 25) <= dakika_toplam <= (23 * 60 + 5)
 
 
-def tek_hisse_tara(ticker: str):
+def tek_hisse_tara(ticker: str, hazir_df=None):
+    """hazir_df verilirse o kullanılır (veri tekrar çekilmez) - 2026-08-19:
+    swing ve gün-içi taramalar AYNI 15dk veriyi ayrı ayrı çekiyordu, bu
+    yfinance istek yükünü gereksiz yere ikiye katlıyordu (gün boyu
+    'Too Many Requests' hatalarının bir sebebi). Artık tek çekim paylaşılıyor."""
     try:
-        df = yf_history_guvenli(ticker, period="5d", interval="15m")
+        df = hazir_df if hazir_df is not None else yf_history_guvenli(ticker, period="5d", interval="15m")
         if df is None or df.empty or len(df) < 40:
             return
         df = df.reset_index().rename(columns={
@@ -434,16 +464,13 @@ def tek_hisse_tara(ticker: str):
 
         if long_gostergeler and short_gostergeler:
             # CELISEN SINYAL: gostergeler ayni anda ters yonde - pozisyon
-            # KAYDETMİYORUZ (hangi yon takip edilecek belirsiz), sadece
-            # bilgilendirme yapiyoruz.
+            # KAYDETMIYORUZ (hangi yon takip edilecek belirsiz).
+            # 2026-08-19: kullanici bildirim fazlaligi oldugunu belirtti -
+            # artik SESSIZCE atlaniyor, Telegram'a hicbir sey gonderilmiyor,
+            # sadece loglara yaziliyor (teshis icin).
             _bugun_tetiklendi_isaretle(ticker, bugun)
-            send_telegram_message(
-                f"⚠️ ÇELİŞEN SİNYAL: {ticker}\n"
-                f"LONG diyor: {', '.join(long_gostergeler)}\n"
-                f"SHORT diyor: {', '.join(short_gostergeler)}\n"
-                f"Fiyat: {giris_fiyat:.2f}\n"
-                f"Göstergeler anlaşamıyor - bu hisseyi şimdilik atlamanı öneririm."
-            )
+            print(f"[Çelişen sinyal - sessizce atlandı] {ticker}: "
+                  f"LONG={long_gostergeler} SHORT={short_gostergeler}", flush=True)
             return
 
         yon = "LONG" if long_gostergeler else "SHORT"
@@ -463,14 +490,233 @@ def tek_hisse_tara(ticker: str):
 
 
 def tam_tarama_calistir():
+    """2026-08-19 BİRLEŞTİRİLDİ: 15dk veriyi hisse başına TEK KEZ çekip
+    hem swing hem gün-içi sistemine veriyor. Öncesinde ikisi ayrı ayrı
+    çekiyordu - bu, yfinance istek yükünü gereksiz yere ikiye katlıyordu
+    ve gün boyu yaşanan 'Too Many Requests' hatalarının bir sebebiydi.
+    Tarama sıklığını artırabilmemiz için bu gerekliydi.
+    Her iki sistem AYRI try/except ile korunuyor - birinde hata olsa bile
+    diğeri etkilenmez."""
     if not us_piyasasi_acik_mi():
         print(f"[{datetime.now().strftime('%H:%M:%S')}] Piyasa saatleri dışı, tarama atlandı.", flush=True)
         return
-    print(f"[{datetime.now().strftime('%H:%M:%S')}] Tarama başlıyor ({len(US_TICKERS)} hisse)...", flush=True)
+    print(f"[{datetime.now().strftime('%H:%M:%S')}] Birleşik tarama başlıyor "
+          f"({len(US_TICKERS)} hisse, swing + gün-içi)...", flush=True)
     for ticker in US_TICKERS:
-        tek_hisse_tara(ticker)
+        ham_df = yf_history_guvenli(ticker, period="5d", interval="15m")
+        if ham_df is None or ham_df.empty:
+            time.sleep(0.3)
+            continue
+        try:
+            tek_hisse_tara(ticker, hazir_df=ham_df.copy())
+        except Exception as e:
+            print(f"[Swing tarama] {ticker} hata: {e}", flush=True)
+        try:
+            gun_ici_tek_hisse_tara(ticker, hazir_df=ham_df.copy())
+        except Exception as e:
+            print(f"[Gün-içi tarama] {ticker} hata: {e}", flush=True)
         time.sleep(0.3)
-    print(f"[{datetime.now().strftime('%H:%M:%S')}] Tarama bitti.", flush=True)
+    print(f"[{datetime.now().strftime('%H:%M:%S')}] Birleşik tarama bitti.", flush=True)
+
+
+# =============================================================================
+# GÜN-İÇİ MODÜL FONKSİYONLARI — 2026-08-19
+# =============================================================================
+
+_gun_ici_bugun_tetiklenenler = {}  # {ticker: tarih}
+
+
+def _gun_ici_pending_oku() -> list:
+    if not os.path.exists(GUN_ICI_PENDING_CSV):
+        return []
+    with open(GUN_ICI_PENDING_CSV, "r", newline="", encoding="utf-8-sig") as f:
+        return list(csv.DictReader(f))
+
+
+def _gun_ici_pending_yaz(satirlar: list):
+    with open(GUN_ICI_PENDING_CSV, "w", newline="", encoding="utf-8-sig") as f:
+        w = csv.DictWriter(f, fieldnames=GUN_ICI_PENDING_FIELDNAMES)
+        w.writeheader()
+        for s in satirlar:
+            w.writerow(s)
+
+
+def gun_ici_gostergeleri_kontrol_et(bar, onceki) -> list:
+    """SADECE Ar-Ge'de gün-içi mantıkla doğrulanan 5 gösterge."""
+    sonuc = []
+    if pd.notna(bar["ao"]) and pd.notna(onceki["ao"]):
+        if onceki["ao"] <= 0 and bar["ao"] > 0:
+            sonuc.append(("Awesome Oscillator", "LONG"))
+        elif onceki["ao"] >= 0 and bar["ao"] < 0:
+            sonuc.append(("Awesome Oscillator", "SHORT"))
+    if pd.notna(bar["ema_hizli"]) and pd.notna(onceki["ema_hizli"]):
+        if onceki["ema_hizli"] <= onceki["ema_yavas"] and bar["ema_hizli"] > bar["ema_yavas"]:
+            sonuc.append(("EMA9/21 Kesişimi", "LONG"))
+        elif onceki["ema_hizli"] >= onceki["ema_yavas"] and bar["ema_hizli"] < bar["ema_yavas"]:
+            sonuc.append(("EMA9/21 Kesişimi", "SHORT"))
+    if pd.notna(bar["macd_line"]) and pd.notna(onceki["macd_line"]):
+        if onceki["macd_line"] <= onceki["macd_sinyal"] and bar["macd_line"] > bar["macd_sinyal"]:
+            sonuc.append(("MACD Kesişimi", "LONG"))
+        elif onceki["macd_line"] >= onceki["macd_sinyal"] and bar["macd_line"] < bar["macd_sinyal"]:
+            sonuc.append(("MACD Kesişimi", "SHORT"))
+    if pd.notna(bar["vwap_sapma_pct"]):
+        if bar["vwap_sapma_pct"] <= -VWAP_SAPMA_ESIK_PCT:
+            sonuc.append(("VWAP Sapması", "LONG"))
+        elif bar["vwap_sapma_pct"] >= VWAP_SAPMA_ESIK_PCT:
+            sonuc.append(("VWAP Sapması", "SHORT"))
+    if pd.notna(bar["adx"]) and bar["adx"] >= 25 and pd.notna(onceki["plus_di"]):
+        if onceki["plus_di"] <= onceki["minus_di"] and bar["plus_di"] > bar["minus_di"]:
+            sonuc.append(("ADX+DI Yön", "LONG"))
+        elif onceki["plus_di"] >= onceki["minus_di"] and bar["plus_di"] < bar["minus_di"]:
+            sonuc.append(("ADX+DI Yön", "SHORT"))
+    return sonuc
+
+
+def gun_ici_tek_hisse_tara(ticker: str, hazir_df=None):
+    """Gün-içi sinyalleri tarar. Mevcut swing taramasından TAMAMEN AYRI -
+    kendi tetiklenme takibi, kendi pending dosyası. hazir_df verilirse
+    veri tekrar çekilmez (swing taramasıyla paylaşılır)."""
+    try:
+        df = hazir_df if hazir_df is not None else yf_history_guvenli(ticker, period="5d", interval="15m")
+        if df is None or df.empty or len(df) < 40:
+            return
+        df = df.reset_index().rename(columns={
+            "Datetime": "ts", "Open": "open", "High": "high", "Low": "low",
+            "Close": "close", "Volume": "volume"})
+        if "ts" not in df.columns:
+            df = df.rename(columns={df.columns[0]: "ts"})
+        df["ts"] = pd.to_datetime(df["ts"]).dt.tz_localize(None)
+        df["gun"] = df["ts"].dt.date
+        df = _tum_gostergeleri_hesapla(df)
+
+        bar = df.iloc[-1]
+        onceki = df.iloc[-2]
+        bugun = bar["gun"]
+
+        if _gun_ici_bugun_tetiklenenler.get(ticker) == bugun:
+            return  # bu hisse icin bugun zaten bir gun-ici sinyal verildi
+
+        tetiklenenler = gun_ici_gostergeleri_kontrol_et(bar, onceki)
+        if not tetiklenenler:
+            return
+
+        long_g = [g for g, y in tetiklenenler if y == "LONG"]
+        short_g = [g for g, y in tetiklenenler if y == "SHORT"]
+        if long_g and short_g:
+            return  # celisen gun-ici sinyal - sessizce atla (bildirim kirliligi olmasin)
+
+        yon = "LONG" if long_g else "SHORT"
+        destekleyenler = long_g or short_g
+        giris_fiyat = float(bar["close"])
+
+        # ATR'i GUNLUK veriden hesapla (hedefi olceklemek icin)
+        gunluk = yf_history_guvenli(ticker, period="30d", interval="1d")
+        if gunluk is None or gunluk.empty or len(gunluk) < GUN_ICI_ATR_PERIYOT + 1:
+            return
+        g_high, g_low, g_close = gunluk["High"], gunluk["Low"], gunluk["Close"]
+        tr = pd.concat([(g_high - g_low), (g_high - g_close.shift()).abs(),
+                         (g_low - g_close.shift()).abs()], axis=1).max(axis=1)
+        atr = tr.rolling(GUN_ICI_ATR_PERIYOT).mean().iloc[-1]
+        if pd.isna(atr) or atr == 0:
+            return
+
+        hedef_fiyat = (giris_fiyat + GUN_ICI_ATR_HEDEF_KATI * atr if yon == "LONG"
+                       else giris_fiyat - GUN_ICI_ATR_HEDEF_KATI * atr)
+        hedef_pct = abs(hedef_fiyat - giris_fiyat) / giris_fiyat * 100
+
+        _gun_ici_bugun_tetiklenenler[ticker] = bugun
+        satirlar = _gun_ici_pending_oku()
+        satirlar.append({
+            "ticker": ticker, "gosterge": ", ".join(destekleyenler), "yon": yon,
+            "giris_fiyat": round(giris_fiyat, 4), "hedef_fiyat": round(hedef_fiyat, 4),
+            "giris_zamani": datetime.now().isoformat(), "gun": bugun.isoformat(),
+            "kapandi": "0", "sonuc": "",
+        })
+        _gun_ici_pending_yaz(satirlar)
+
+        destek_str = f" ({len(destekleyenler)} gösterge)" if len(destekleyenler) > 1 else ""
+        send_telegram_message(
+            f"⚡ GÜN-İÇİ SİNYAL: {ticker} → {yon}{destek_str}\n"
+            f"Destekleyen: {', '.join(destekleyenler)}\n"
+            f"Giriş: {giris_fiyat:.2f}\n"
+            f"Hedef: {hedef_fiyat:.2f} (%{hedef_pct:.1f} - bu hissenin kendi ATR'ına göre)\n"
+            f"⏰ AYNI GÜN işlemi: hedefe ulaşırsa kapat, ulaşmazsa piyasa "
+            f"kapanmadan kapat. Ertesi güne TAŞIMA."
+        )
+    except Exception as e:
+        print(f"[Gün-içi tarama] {ticker} hata: {e}", flush=True)
+
+
+def gun_ici_pozisyonlari_kontrol_et():
+    """Açık gün-içi pozisyonların hedefe ulaşıp ulaşmadığını kontrol eder,
+    gün bitmişse kapanış fiyatıyla kapatır."""
+    satirlar = _gun_ici_pending_oku()
+    if not satirlar:
+        return
+    degisti = False
+    bugun = date.today()
+
+    for satir in satirlar:
+        if satir["kapandi"] == "1":
+            continue
+        ticker = satir["ticker"]
+        sinyal_gun = date.fromisoformat(satir["gun"])
+        giris_fiyat = float(satir["giris_fiyat"])
+        hedef_fiyat = float(satir["hedef_fiyat"])
+        yon = satir["yon"]
+
+        try:
+            df = yf_history_guvenli(ticker, period="5d", interval="15m")
+            if df is None or df.empty:
+                continue
+            df = df.reset_index().rename(columns={
+                "Datetime": "ts", "High": "high", "Low": "low", "Close": "close"})
+            if "ts" not in df.columns:
+                df = df.rename(columns={df.columns[0]: "ts"})
+            df["ts"] = pd.to_datetime(df["ts"]).dt.tz_localize(None)
+            df["gun"] = df["ts"].dt.date
+            o_gun = df[df["gun"] == sinyal_gun]
+            if o_gun.empty:
+                continue
+
+            hedef_tuttu = ((o_gun["high"] >= hedef_fiyat).any() if yon == "LONG"
+                            else (o_gun["low"] <= hedef_fiyat).any())
+            if hedef_tuttu:
+                satir["kapandi"], satir["sonuc"] = "1", "HEDEF_TUTTU"
+                degisti = True
+                kar_pct = abs(hedef_fiyat - giris_fiyat) / giris_fiyat * 100
+                send_telegram_message(
+                    f"✅ GÜN-İÇİ HEDEF TUTTU: {ticker} {yon} ({satir['gosterge']})\n"
+                    f"Giriş: {giris_fiyat:.2f} → Hedef: {hedef_fiyat:.2f} (+%{kar_pct:.1f})"
+                )
+            elif sinyal_gun < bugun:
+                # gun bitti, hedef tutmadi - o gunun SON fiyatiyla kapat
+                son_fiyat = float(o_gun.iloc[-1]["close"])
+                getiri = ((son_fiyat - giris_fiyat) if yon == "LONG"
+                           else (giris_fiyat - son_fiyat)) / giris_fiyat * 100
+                satir["kapandi"] = "1"
+                satir["sonuc"] = f"GUN_SONU_{getiri:+.2f}%"
+                degisti = True
+                send_telegram_message(
+                    f"🔔 GÜN-İÇİ GÜN SONU: {ticker} {yon} ({satir['gosterge']})\n"
+                    f"Giriş: {giris_fiyat:.2f} → Gün sonu: {son_fiyat:.2f} "
+                    f"({getiri:+.2f}%)\nHedefe ulaşmadı, gün bitti."
+                )
+        except Exception as e:
+            print(f"[Gün-içi kontrol] {ticker} hata: {e}", flush=True)
+
+    if degisti:
+        _gun_ici_pending_yaz(satirlar)
+
+
+def gun_ici_tam_tarama_calistir():
+    if not us_piyasasi_acik_mi():
+        return
+    print(f"[{datetime.now().strftime('%H:%M:%S')}] Gün-içi tarama başlıyor...", flush=True)
+    for ticker in US_TICKERS:
+        gun_ici_tek_hisse_tara(ticker)
+        time.sleep(0.3)
+    print(f"[{datetime.now().strftime('%H:%M:%S')}] Gün-içi tarama bitti.", flush=True)
 
 
 # =============================================================================
@@ -626,6 +872,16 @@ def arka_plan_dongusu():
                 son_checkpoint_kontrol_zamani = simdi
         except Exception as e:
             print(f"[Arka plan döngüsü] Hata: {e}", flush=True)
+        # GÜN-İÇİ MODÜL - AYRI try/except: burada bir hata olsa bile
+        # yukarıdaki ana swing sistemi HİÇ etkilenmez (ve tersi de).
+        # 2026-08-19: gun_ici_tam_tarama_calistir() BURADAN KALDIRILDI -
+        # gün-içi tarama artık tam_tarama_calistir() içinde, aynı veri
+        # çekimini paylaşarak yapılıyor. Burada sadece açık gün-içi
+        # pozisyonların hedef/gün-sonu kontrolü kalıyor.
+        try:
+            gun_ici_pozisyonlari_kontrol_et()
+        except Exception as e:
+            print(f"[Gün-içi modül] Hata: {e}", flush=True)
         time.sleep(TARAMA_ARALIGI_SANIYE)
 
 
@@ -658,9 +914,17 @@ def poll_telegram_commands():
                     acik = [s for s in satirlar if s["kapandi"] == "0"]
                     kapali = [s for s in satirlar if s["kapandi"] == "1"]
                     kazanan = [s for s in kapali if s["sonuc"].startswith("WIN")]
+                    gi_satirlar = _gun_ici_pending_oku()
+                    gi_acik = [s for s in gi_satirlar if s["kapandi"] == "0"]
+                    gi_kapali = [s for s in gi_satirlar if s["kapandi"] == "1"]
+                    gi_hedef = [s for s in gi_kapali if s["sonuc"] == "HEDEF_TUTTU"]
                     send_telegram_message(
-                        f"📊 Durum\nAçık sinyal: {len(acik)}\n"
-                        f"Kapanan: {len(kapali)} (Kazanan: {len(kazanan)})\n"
+                        f"📊 Durum\n\n"
+                        f"— SWING (1-10 gün) —\n"
+                        f"Açık: {len(acik)} | Kapanan: {len(kapali)} (Kazanan: {len(kazanan)})\n\n"
+                        f"— GÜN-İÇİ (aynı gün) —\n"
+                        f"Açık: {len(gi_acik)} | Kapanan: {len(gi_kapali)} "
+                        f"(Hedef tutan: {len(gi_hedef)})\n\n"
                         f"Sürüm: {BOT_KOD_SURUMU}"
                     )
                 elif text.startswith("/liste"):
@@ -713,16 +977,26 @@ def send_startup_message():
         f"sistemleri (ATR Kırılımı, Hacim Z-Skor, küçük-hedefli RSI21), "
         f"AI/ML modelleri ve KAP gözlemcisi KALDIRILDI.\n\n"
         f"Şu an SADECE 8 doğrulanmış gösterge çalışıyor:\n{gosterge_listesi}\n\n"
+        f"⚡ YENİ: GÜN-İÇİ MODÜL de eklendi (aynı gün al-sat) — swing "
+        f"sistemine EK, tamamen ayrı çalışıyor:\n"
+        + "\n".join(f"  • {g}" for g in GUN_ICI_GOSTERGELER) + "\n"
+        f"  Hedef: o hissenin kendi ATR'ına göre (sabit yüzde değil), "
+        f"aynı gün kapanır, ertesi güne TAŞINMAZ.\n\n"
         f"📅 Çalışma saatleri: ABD piyasa saatleri boyunca (16:30-23:00 "
         f"TR saati), {TARAMA_ARALIGI_SANIYE // 60} dakikada bir tarama.\n"
         f"🎯 Hedefler: 1g(+%1) / 3g(+%2) / 5g(+%3) / 10g(+%5) - herhangi "
         f"biri tutarsa isabet sayılır.\n"
         f"📊 {len(US_TICKERS)} ABD hissesi taranıyor.\n"
         f"🔔 Bir hissede birden fazla gösterge AYNI yönde tetiklenirse TEK "
-        f"bir bildirimde birleştirilir. TERS yönde tetiklenirse "
-        f"'ÇELİŞEN SİNYAL' olarak ayrı işaretlenir, pozisyon takibe "
-        f"alınmaz.\n"
-        f"⏱️ Hedef kontrolü artık saatte bir yapılıyor (günde bir yerine).\n"
+        f"bir bildirimde birleştirilir. TERS yönde tetiklenirse (çelişen "
+        f"sinyal) artık HİÇ BİLDİRİM GÖNDERİLMEZ - sessizce atlanır.\n\n"
+        f"⚡ YENİ - GÜN İÇİ MODÜL (ayrı sistem, ⚡ işaretiyle gelir):\n"
+        f"  Göstergeler: {', '.join(GUN_ICI_GOSTERGELER)}\n"
+        f"  Bu sinyaller AYNI GÜN alınıp AYNI GÜN satılmak içindir - "
+        f"hedef, hissenin o günkü ATR'ının {GUN_ICI_ATR_HEDEF_KATI}x katı "
+        f"(sabit yüzde değil, her hissenin kendi volatilitesine göre).\n"
+        f"  Hedefe ulaşılmazsa gün sonunda kapatılır.\n\n"
+        f"⏱️ Hedef kontrolü saatte bir yapılıyor.\n"
         f"🔁 Kendi kendine ping: 10 dk'da bir (Render uyku moduna girmesin diye)\n\n"
         f"🔬 Ar-Ge Botu entegre edildi: {'✅ aktif' if _ARGE_MODUL_YUKLENDI else '❌ yüklenemedi'} "
         f"(ayrı Telegram token/sohbet - araştırma komutları oradan çalışır)\n\n"
