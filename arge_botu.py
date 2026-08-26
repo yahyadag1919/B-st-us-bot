@@ -50,7 +50,7 @@ import socket
 # mesajlarında görünür kılmak için (2026-08-17: 3 kez üst üste "aynı
 # sonuç geldi" şüphesi sonrası eklendi - deploy'un gerçekten güncel
 # olup olmadığını KANITLA göstermek için).
-ARGE_KOD_SURUMU = "v62-buyuk-patlama-gunu-testi-2026-08-19"
+ARGE_KOD_SURUMU = "v64-buyuk-patlama-5-grup-komutu-2026-08-19"
 import warnings
 from datetime import datetime, timezone
 
@@ -6122,10 +6122,15 @@ def _tam_gun_tutma_getirisi(barlar_15dk: pd.DataFrame, giris_konum: int, yon: st
         return (giris_fiyat - son_fiyat) / giris_fiyat * 100
 
 
-def buyuk_patlama_gunu_testi_calistir(hisse_listesi: str = "volatil", max_hisse: int = 60) -> tuple:
+def buyuk_patlama_gunu_testi_calistir(hisse_listesi: str = "volatil", max_hisse: int = 15,
+                                        ozel_hisseler: list = None) -> tuple:
     """İç Mum, NR7, ve tüm sıkışma ailesi + Saf Hacim Patlaması'nı ERKEN
     ÇIKIŞ OLMADAN (gün sonuna kadar tutarak) test eder - GERÇEK yüzde
     getiri dağılımını (ort., medyan, %10+ ve %20+ oranı) raporlar.
+    2026-08-19 EKLENDİ: ozel_hisseler verilirse (belirli bir grup), o
+    liste AYNEN kullanılır - Render'ın uzun süren tek seferlik taramaları
+    kısıtlıyor olabileceği düşünüldüğü için, kullanıcı tüm 87 hisseyi
+    5'li ~20'şer gruba bölüp ayrı ayrı komutlarla çalıştırıyor.
     Döner: (dosya_yolu, özet_dict) ya da (None, hata_mesajı)."""
     isimler = ["İç Mum kırılımı", "NR7 kırılımı", "Bollinger Genişlik Sıkışması",
                "TTM Squeeze", "ATR Persentil Sıkışması", "Hacim Daralma Örüntüsü",
@@ -6133,7 +6138,10 @@ def buyuk_patlama_gunu_testi_calistir(hisse_listesi: str = "volatil", max_hisse:
                "Saf Hacim Patlaması", "[KÖR] Koşulsuz LONG", "[KÖR] Koşulsuz SHORT"]
     tum_getiriler = {isim: [] for isim in isimler}
 
-    hisseler = (US_VOLATIL_TICKERS if hisse_listesi == "volatil" else US_INSIDER_TICKERS)[:max_hisse]
+    if ozel_hisseler:
+        hisseler = ozel_hisseler
+    else:
+        hisseler = (US_VOLATIL_TICKERS if hisse_listesi == "volatil" else US_INSIDER_TICKERS)[:max_hisse]
 
     for n_i, ticker in enumerate(hisseler, 1):
         try:
@@ -7336,10 +7344,57 @@ def poll_arge_commands():
                 except Exception as e:
                     send_telegram_message(f"🌀 Sıkışma turnuvası v4 hatası: {e}")
             threading.Thread(target=_arka_plan_sikisma_v4, args=(liste4, hisse_sayisi4), daemon=True).start()
+        elif text.startswith("/buyuk_patlama_grup"):
+            _BP_GRUPLARI = {
+                "1": ["GME", "AMC", "MARA", "RIOT", "MSTR", "PLTR", "SOFI", "LCID", "RIVN",
+                      "NIO", "XPEV", "LI", "SAVA", "OCGN", "INO", "VXRT", "BNGO", "SPCE",
+                      "NKLA", "GOEV"],
+                "2": ["FSR", "RIDE", "CLOV", "WISH", "BB", "IONQ", "RGTI", "SMCI", "UPST",
+                      "AFRM", "CVNA", "DKNG", "HOOD", "COIN", "ROKU", "SNAP", "PLUG", "FCEL",
+                      "CHPT", "QS"],
+                "3": ["BBAI", "SOUN", "IONS", "CRSP", "NTLA", "BEAM", "EDIT", "RXRX", "ACHR",
+                      "JOBY", "LILM", "EVTL", "BLDE", "DNA", "GEVO", "AMTX", "MULN", "WKHS",
+                      "HYLN", "CENN"],
+                "4": ["PHUN", "ATER", "BBIG", "PROG", "SPRT", "ANY", "SDC", "TLRY", "CGC",
+                      "ACB", "HEXO", "APRN", "CCIV", "SKLZ", "OPEN", "RUN", "BLNK", "EVGO",
+                      "LAZR", "VLDR"],
+                "5": ["OUST", "MVIS", "CIDM", "GSAT", "SIRI", "NKE", "MRIN"],
+            }
+            grup_no = text.replace("/buyuk_patlama_grup", "").strip()
+            if grup_no not in _BP_GRUPLARI:
+                send_telegram_message(f"⚠️ Geçersiz grup numarası: '{grup_no}'. "
+                                       f"1'den 5'e kadar kullan (örn. /buyuk_patlama_grup1).")
+            else:
+                grup_hisseler = _BP_GRUPLARI[grup_no]
+                send_telegram_message(
+                    f"💥 BÜYÜK PATLAMA GÜNÜ TESTİ - GRUP {grup_no} başlıyor "
+                    f"({len(grup_hisseler)} hisse: {', '.join(grup_hisseler)}). "
+                    f"ARKA PLANDA çalışıyor, bitince CSV + özet göndereceğim."
+                )
+
+                def _arka_plan_buyuk_patlama_grup(hisceler, gno):
+                    try:
+                        dosya_yolu, ozet = buyuk_patlama_gunu_testi_calistir(ozel_hisseler=hisceler)
+                        if dosya_yolu is None:
+                            send_telegram_message(f"💥 Grup {gno} testi başarısız: {ozet}")
+                            return
+                        satirlar = [f"💥 Büyük Patlama Günü Testi - GRUP {gno} Sonucu "
+                                    f"({ozet['denenen_hisse_sayisi']} hisse)\n"]
+                        for s in ozet["satirlar"]:
+                            satirlar.append(
+                                f"{s['strateji']}: n={s['n']}, ort=%{s['ort_getiri_pct']}, "
+                                f"medyan=%{s['medyan_getiri_pct']}, kazanma=%{s['kazanma_orani_pct']}, "
+                                f"%10+ oranı=%{s['yuzde10_ustu_oran_pct']}, %20+ oranı=%{s['yuzde20_ustu_oran_pct']}, "
+                                f"en iyi=%{s['en_iyi_pct']}, en kötü=%{s['en_kotu_pct']}"
+                            )
+                        send_telegram_document(dosya_yolu, caption="\n".join(satirlar))
+                    except Exception as e:
+                        send_telegram_message(f"💥 Grup {gno} testi hatası: {e}")
+                threading.Thread(target=_arka_plan_buyuk_patlama_grup, args=(grup_hisseler, grup_no), daemon=True).start()
         elif text.startswith("/buyuk_patlama"):
             parcalar = text.split()
             liste_bp = parcalar[1] if len(parcalar) > 1 and parcalar[1] in ("volatil", "buyuk") else "volatil"
-            hisse_sayisi_bp = int(parcalar[2]) if len(parcalar) > 2 else 60
+            hisse_sayisi_bp = int(parcalar[2]) if len(parcalar) > 2 else 15
             send_telegram_message(
                 f"💥 BÜYÜK PATLAMA GÜNÜ TESTİ başlıyor (liste: {liste_bp}, "
                 f"{hisse_sayisi_bp} hisse): İç Mum, NR7, tüm sıkışma ailesi "
