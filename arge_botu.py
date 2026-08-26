@@ -50,7 +50,7 @@ import socket
 # mesajlarında görünür kılmak için (2026-08-17: 3 kez üst üste "aynı
 # sonuç geldi" şüphesi sonrası eklendi - deploy'un gerçekten güncel
 # olup olmadığını KANITLA göstermek için).
-ARGE_KOD_SURUMU = "v60-riskli-soket-ayari-geri-alindi-2026-08-19"
+ARGE_KOD_SURUMU = "v61-tum-testlere-sert-zaman-asimi-2026-08-19"
 import warnings
 from datetime import datetime, timezone
 
@@ -1530,6 +1530,31 @@ def _edgar_form4_detay(cik: str, accession: str) -> list:
     except Exception as e:
         print(f"[EDGAR] {accession} detay hatası: {e}", flush=True)
         return []
+
+
+def _yf_history_sert_zaman_asimli(ticker: str, period: str, interval: str, sert_sure: int = 30):
+    """yfinance'in history() çağrısını SERT bir zaman aşımıyla sarar -
+    2026-08-19: EDGAR testinde bulduğumuz aynı sorun (bazı ağ çağrıları
+    normal timeout parametresine RAĞMEN donabiliyor, muhtemelen DNS
+    seviyesinde) diğer testlerde de (özellikle gün-içi/sıkışma
+    turnuvaları) yaşandı - hiç ThreadPoolExecutor koruması yoktu. Bu
+    fonksiyon, o korumayı TEK bir yerden tüm yeni testlere kazandırıyor."""
+    import concurrent.futures
+    import yfinance as yf
+
+    def _cek():
+        return yf.Ticker(ticker).history(period=period, interval=interval, timeout=20)
+
+    executor = concurrent.futures.ThreadPoolExecutor(max_workers=1)
+    try:
+        gelecek = executor.submit(_cek)
+        return gelecek.result(timeout=sert_sure)
+    except concurrent.futures.TimeoutError:
+        print(f"[yfinance SERT zaman aşımı] {ticker} ({period}/{interval}) "
+              f"{sert_sure}sn'yi aştı, atlanıyor.", flush=True)
+        return None
+    finally:
+        executor.shutdown(wait=False)
 
 
 def _edgar_tek_hisse_isle(ticker: str, cik: str, gun_ufku: int) -> list:
@@ -4886,8 +4911,8 @@ def gosterge_cephaneligi_calistir(max_hisse: int = 12) -> tuple:
     for n_i, ticker in enumerate(hisseler, 1):
         try:
             print(f"[Gösterge Cephaneliği {n_i}/{len(hisseler)}] {ticker}...", flush=True)
-            gunluk = yf.Ticker(ticker).history(period="2y", interval="1d", timeout=20)
-            barlar_15dk = yf.Ticker(ticker).history(period="60d", interval="15m", timeout=20)
+            gunluk = _yf_history_sert_zaman_asimli(ticker, "2y", "1d")
+            barlar_15dk = _yf_history_sert_zaman_asimli(ticker, "60d", "15m")
             if gunluk is None or gunluk.empty or barlar_15dk is None or barlar_15dk.empty:
                 continue
             gunluk = gunluk.rename(columns={"Close": "close", "High": "high", "Low": "low",
@@ -5231,7 +5256,7 @@ def hareket_oncesi_sikisma_turnuvasi_calistir(max_hisse: int = 12) -> tuple:
     for n_i, ticker in enumerate(hisseler, 1):
         try:
             print(f"[Sıkışma Turnuvası {n_i}/{len(hisseler)}] {ticker}...", flush=True)
-            gunluk = yf.Ticker(ticker).history(period="2y", interval="1d", timeout=20)
+            gunluk = _yf_history_sert_zaman_asimli(ticker, "2y", "1d")
             if gunluk is None or gunluk.empty or len(gunluk) < 150:
                 continue
             gunluk = gunluk.rename(columns={"Close": "close", "High": "high", "Low": "low",
@@ -5374,7 +5399,7 @@ def sikisma_turnuvasi_v2_calistir(hisse_listesi: str = "volatil", max_hisse: int
     for n_i, ticker in enumerate(hisseler, 1):
         try:
             print(f"[Sıkışma v2 {n_i}/{len(hisseler)}] {ticker}...", flush=True)
-            gunluk = yf.Ticker(ticker).history(period="2y", interval="1d", timeout=20)
+            gunluk = _yf_history_sert_zaman_asimli(ticker, "2y", "1d")
             if gunluk is None or gunluk.empty or len(gunluk) < 280:
                 print(f"[Sıkışma v2] {ticker}: yetersiz veri (2 yıl gerekli, 52-hafta "
                       f"kırılımı için), atlanıyor.", flush=True)
@@ -5527,7 +5552,7 @@ def sikisma_turnuvasi_v3_calistir(hisse_listesi: str = "volatil", max_hisse: int
     for n_i, ticker in enumerate(hisseler, 1):
         try:
             print(f"[Sıkışma v3 {n_i}/{len(hisseler)}] {ticker}...", flush=True)
-            gunluk = yf.Ticker(ticker).history(period="2y", interval="1d", timeout=20)
+            gunluk = _yf_history_sert_zaman_asimli(ticker, "2y", "1d")
             if gunluk is None or gunluk.empty or len(gunluk) < 280:
                 print(f"[Sıkışma v3] {ticker}: yetersiz veri, atlanıyor.", flush=True)
                 continue
@@ -5726,7 +5751,7 @@ def sikisma_turnuvasi_v4_calistir(hisse_listesi: str = "volatil", max_hisse: int
     for n_i, ticker in enumerate(hisseler, 1):
         try:
             print(f"[Sıkışma v4 {n_i}/{len(hisseler)}] {ticker}...", flush=True)
-            gunluk = yf.Ticker(ticker).history(period="2y", interval="1d", timeout=20)
+            gunluk = _yf_history_sert_zaman_asimli(ticker, "2y", "1d")
             if gunluk is None or gunluk.empty or len(gunluk) < 120:
                 print(f"[Sıkışma v4] {ticker}: yetersiz veri, atlanıyor.", flush=True)
                 continue
@@ -5868,8 +5893,8 @@ def gun_ici_giris_cikis_turnuvasi_calistir(hisse_listesi: str = "volatil", max_h
     for n_i, ticker in enumerate(hisseler, 1):
         try:
             print(f"[Gün İçi Turnuva {n_i}/{len(hisseler)}] {ticker}...", flush=True)
-            gunluk = yf.Ticker(ticker).history(period="60d", interval="1d", timeout=20)
-            barlar_15dk = yf.Ticker(ticker).history(period="60d", interval="15m", timeout=20)
+            gunluk = _yf_history_sert_zaman_asimli(ticker, "60d", "1d")
+            barlar_15dk = _yf_history_sert_zaman_asimli(ticker, "60d", "15m")
             if gunluk is None or gunluk.empty or barlar_15dk is None or barlar_15dk.empty:
                 continue
             gunluk = gunluk.rename(columns={"Close": "close", "High": "high", "Low": "low"})
