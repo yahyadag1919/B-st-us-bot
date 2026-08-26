@@ -50,7 +50,7 @@ import socket
 # mesajlarında görünür kılmak için (2026-08-17: 3 kez üst üste "aynı
 # sonuç geldi" şüphesi sonrası eklendi - deploy'un gerçekten güncel
 # olup olmadığını KANITLA göstermek için).
-ARGE_KOD_SURUMU = "v57-gun-ici-giris-cikis-testi-2026-08-19"
+ARGE_KOD_SURUMU = "v58-varsayilan-hisse-sayisi-kucultuldu-2026-08-19"
 import warnings
 from datetime import datetime, timezone
 
@@ -4849,7 +4849,7 @@ def _vortex_hesapla(high, low, close, n=14):
     return vi_plus, vi_minus
 
 
-def gosterge_cephaneligi_calistir(max_hisse: int = 60) -> tuple:
+def gosterge_cephaneligi_calistir(max_hisse: int = 12) -> tuple:
     """(1) 4 güçlü sinyalin (Bollinger/Stochastic/CCI/RSI21) örtüşmesini,
     (2) trend/momentum + yeni adayları TEK taramada test eder, hepsini
     kör temel çizgiyle kıyaslar. 2026-08-19: Williams %R çıkarıldı
@@ -5204,7 +5204,7 @@ def _atr_persentil_sikisma_tespit(high, low, close, pencere=100, esik_persentil=
     return atr <= esik
 
 
-def hareket_oncesi_sikisma_turnuvasi_calistir(max_hisse: int = 60) -> tuple:
+def hareket_oncesi_sikisma_turnuvasi_calistir(max_hisse: int = 12) -> tuple:
     """5 farklı sıkışma/pre-breakout adayını, günde ilk tetiklenme
     kuralıyla, gerçek checkpoint çıkışıyla ve kör temel çizgiyle test
     eder. Yön, sıkışma anındaki fiyatın 20-günlük EMA'ya göre konumuyla
@@ -5348,7 +5348,7 @@ def _gap_kirilim_tespit(open_, close, prev_close, esik_pct=3.0):
     return gap_yukari_devam, gap_asagi_devam
 
 
-def sikisma_turnuvasi_v2_calistir(hisse_listesi: str = "volatil", max_hisse: int = 40) -> tuple:
+def sikisma_turnuvasi_v2_calistir(hisse_listesi: str = "volatil", max_hisse: int = 12) -> tuple:
     """v1'in düzeltilmiş hali: release-bazlı yön (AO ile), yeni volatil
     hisse evreni seçeneği, +3 yeni aday. hisse_listesi='volatil' ya da
     'buyuk' (mevcut 106'lık liste) olabilir. Döner: (dosya_yolu,
@@ -5501,7 +5501,7 @@ def _kanit_us_checkpoint_sonuc_atr_olcekli(df: pd.DataFrame, idx: int, direction
     return "LOSS", -1.0
 
 
-def sikisma_turnuvasi_v3_calistir(hisse_listesi: str = "volatil", max_hisse: int = 40) -> tuple:
+def sikisma_turnuvasi_v3_calistir(hisse_listesi: str = "volatil", max_hisse: int = 12) -> tuple:
     """v2 ile AYNI 8 strateji + kör çizgi, ama ATR-ölçekli checkpoint
     çıkışıyla - volatil hisseler için sabit yüzde hedeflerin anlamsız
     hale gelme sorununu çözmek için. Döner: (dosya_yolu, özet_dict) ya da
@@ -5702,7 +5702,7 @@ def _percent_b_stabilizasyon_tespit(percent_b, pencere=10, esik_persentil=0.15):
     return pb_std <= esik
 
 
-def sikisma_turnuvasi_v4_calistir(hisse_listesi: str = "volatil", max_hisse: int = 40) -> tuple:
+def sikisma_turnuvasi_v4_calistir(hisse_listesi: str = "volatil", max_hisse: int = 12) -> tuple:
     """Hacim Daralma Örüntüsü + %B Stabilizasyonu'nu, v3'ün AYNI
     metodolojisiyle (ATR-ölçekli hedef, release+AO yön, volatil hisse
     evreni) test eder. Döner: (dosya_yolu, özet_dict) ya da (None,
@@ -5838,7 +5838,7 @@ def _gun_ici_cikis_sonucu(barlar_15dk: pd.DataFrame, giris_konum: int, yon: str,
     return "EOD_KAPANIS", round(gercek_r, 3)
 
 
-def gun_ici_giris_cikis_turnuvasi_calistir(hisse_listesi: str = "volatil", max_hisse: int = 40) -> tuple:
+def gun_ici_giris_cikis_turnuvasi_calistir(hisse_listesi: str = "volatil", max_hisse: int = 12) -> tuple:
     """Bugüne kadarki NEREDEYSE TÜM göstergeleri (tersine dönüş + trend +
     sıkışma) GERÇEK aynı-gün giriş/çıkış mantığıyla test eder - hiçbir
     sinyal ertesi güne taşınmaz. Volatil hisse evreninde, ATR-ölçekli
@@ -6570,22 +6570,23 @@ def poll_arge_commands():
         elif text.startswith("/icgorusel_islem_edgar"):
             parcalar = text.split()
             gun_ufku = int(parcalar[1]) if len(parcalar) > 1 else ICGORUSEL_ISLEM_GUN_UFKU
+            edgar_hisse_sayisi = int(parcalar[2]) if len(parcalar) > 2 else 12
             send_telegram_message(
                 f"👤 EDGAR İÇERİDEN İŞLEM TESTİ başlıyor: SEC EDGAR'dan (yfinance "
-                f"yerine) çekiliyor, TÜM {len(US_INSIDER_TICKERS)} hisse taranacak. "
-                f"2026-08-19: tekrarlayan donmalar sonrası SEC'e istek hızı "
-                f"BİLİNÇLİ OLARAK YAVAŞLATILDI (hisse başına en fazla 10 "
-                f"dosya, istekler arası 1sn) - artık daha YAVAŞ (muhtemelen "
-                f"45-60+ dakika) ama daha GÜVENİLİR olması hedefleniyor. "
+                f"yerine) çekiliyor, {edgar_hisse_sayisi} hisse taranacak "
+                f"(varsayılan artık KÜÇÜK - tekrarlayan tam-süreç donmaları "
+                f"sonrası, Render'ın ücretsiz sürümünün uzun süren arka plan "
+                f"görevlerini kısıtlıyor olabileceği düşünülüyor - küçük, "
+                f"hızlı, güvenilir parçalar halinde ilerliyoruz. Tam listeyi "
+                f"istersen /icgorusel_islem_edgar {gun_ufku} 106 yaz). "
                 f"ARKA PLANDA çalışıyor, bitince CSV + özet göndereceğim. "
-                f"İstatistik artık aynı gün/aynı türdeki tekrar eden işlem "
-                f"satırları için TEKİLLEŞTİRİLMİŞ veriden hesaplanıyor "
-                f"(önceki şişme sorunu düzeltildi)."
+                f"İstatistik aynı gün/aynı türdeki tekrar eden işlem "
+                f"satırları için TEKİLLEŞTİRİLMİŞ veriden hesaplanıyor."
             )
 
-            def _arka_plan_icgorusel_edgar(gu):
+            def _arka_plan_icgorusel_edgar(gu, hs):
                 try:
-                    dosya_yolu, ozet = icgorusel_islem_testi_edgar_calistir(gu, max_hisse=None)
+                    dosya_yolu, ozet = icgorusel_islem_testi_edgar_calistir(gu, max_hisse=hs)
                     if dosya_yolu is None:
                         send_telegram_message(f"👤 EDGAR içeriden işlem testi başarısız: {ozet}")
                         return
@@ -6599,7 +6600,7 @@ def poll_arge_commands():
                     send_telegram_document(dosya_yolu, caption="\n".join(satirlar))
                 except Exception as e:
                     send_telegram_message(f"👤 EDGAR içeriden işlem testi hatası: {e}")
-            threading.Thread(target=_arka_plan_icgorusel_edgar, args=(gun_ufku,), daemon=True).start()
+            threading.Thread(target=_arka_plan_icgorusel_edgar, args=(gun_ufku, edgar_hisse_sayisi), daemon=True).start()
         elif text.startswith("/pykap_test"):
             send_telegram_message("🔍 pykap bağlantı testi başlıyor...")
 
@@ -7015,7 +7016,7 @@ def poll_arge_commands():
             threading.Thread(target=_arka_plan_nihai_kor, daemon=True).start()
         elif text.startswith("/gosterge_cephaneligi"):
             parcalar = text.split()
-            hisse_sayisi = int(parcalar[1]) if len(parcalar) > 1 else 60
+            hisse_sayisi = int(parcalar[1]) if len(parcalar) > 1 else 12
             send_telegram_message(
                 f"🏹 GÖSTERGE CEPHANELİĞİ başlıyor ({hisse_sayisi} hisse - "
                 f"Donchian'ı büyük örneklemde doğrulamak için varsayılan "
@@ -7052,7 +7053,7 @@ def poll_arge_commands():
         elif text.startswith("/sikisma_turnuvasi_v4"):
             parcalar = text.split()
             liste4 = parcalar[1] if len(parcalar) > 1 and parcalar[1] in ("volatil", "buyuk") else "volatil"
-            hisse_sayisi4 = int(parcalar[2]) if len(parcalar) > 2 else 40
+            hisse_sayisi4 = int(parcalar[2]) if len(parcalar) > 2 else 12
             send_telegram_message(
                 f"🌀 SIKIŞMA TURNUVASI v4 başlıyor (liste: {liste4}, {hisse_sayisi4} "
                 f"hisse): Hacim Daralma Örüntüsü (çok-periyotlu, Minervini "
@@ -7083,7 +7084,7 @@ def poll_arge_commands():
         elif text.startswith("/gun_ici_turnuva"):
             parcalar = text.split()
             liste_gi = parcalar[1] if len(parcalar) > 1 and parcalar[1] in ("volatil", "buyuk") else "volatil"
-            hisse_sayisi_gi = int(parcalar[2]) if len(parcalar) > 2 else 40
+            hisse_sayisi_gi = int(parcalar[2]) if len(parcalar) > 2 else 12
             send_telegram_message(
                 f"📅 GÜN-İÇİ GİRİŞ+ÇIKIŞ TURNUVASI başlıyor (liste: {liste_gi}, "
                 f"{hisse_sayisi_gi} hisse): 16 gösterge (tersine dönüş + trend "
@@ -7115,7 +7116,7 @@ def poll_arge_commands():
         elif text.startswith("/sikisma_turnuvasi_v3"):
             parcalar = text.split()
             liste3 = parcalar[1] if len(parcalar) > 1 and parcalar[1] in ("volatil", "buyuk") else "volatil"
-            hisse_sayisi3 = int(parcalar[2]) if len(parcalar) > 2 else 40
+            hisse_sayisi3 = int(parcalar[2]) if len(parcalar) > 2 else 12
             send_telegram_message(
                 f"🌀 SIKIŞMA TURNUVASI v3 başlıyor (liste: {liste3}, {hisse_sayisi3} "
                 f"hisse): ATR-ÖLÇEKLİ hedefler - her hissenin kendi volatilitesine "
@@ -7146,7 +7147,7 @@ def poll_arge_commands():
         elif text.startswith("/sikisma_turnuvasi_v2"):
             parcalar = text.split()
             liste = parcalar[1] if len(parcalar) > 1 and parcalar[1] in ("volatil", "buyuk") else "volatil"
-            hisse_sayisi2 = int(parcalar[2]) if len(parcalar) > 2 else 40
+            hisse_sayisi2 = int(parcalar[2]) if len(parcalar) > 2 else 12
             send_telegram_message(
                 f"🌀 SIKIŞMA TURNUVASI v2 başlıyor (liste: {liste}, {hisse_sayisi2} "
                 f"hisse): düzeltilmiş yön mantığı (sıkışma bitişinde Awesome "
@@ -7176,7 +7177,7 @@ def poll_arge_commands():
             threading.Thread(target=_arka_plan_sikisma_v2, args=(liste, hisse_sayisi2), daemon=True).start()
         elif text.startswith("/sikisma_turnuvasi"):
             parcalar = text.split()
-            hisse_sayisi = int(parcalar[1]) if len(parcalar) > 1 else 60
+            hisse_sayisi = int(parcalar[1]) if len(parcalar) > 1 else 12
             send_telegram_message(
                 f"🌀 HAREKET-ÖNCESİ SIKIŞMA TURNUVASI başlıyor ({hisse_sayisi} "
                 f"hisse): NR7, İç Mum, Bollinger Genişlik Sıkışması, TTM "
@@ -7364,7 +7365,7 @@ def poll_arge_commands():
             threading.Thread(target=_arka_plan_arge_test, daemon=True).start()
         elif text.startswith("/gun_ici_giris_cikis"):
             parcalar = text.split()
-            hisse_sayisi = int(parcalar[1]) if len(parcalar) > 1 else 40
+            hisse_sayisi = int(parcalar[1]) if len(parcalar) > 1 else 12
             send_telegram_message(
                 f"📅 GÜN-İÇİ GİRİŞ+ÇIKIŞ TESTİ başlıyor ({hisse_sayisi} hisse): "
                 f"canlıda çalışan AYNI 8 gösterge, ama çıkış artık AYNI GÜN "
@@ -7485,7 +7486,7 @@ def _gun_ici_ayni_gun_cikis_sonuc(barlar: pd.DataFrame, giris_idx: int, yon: str
     return etiket, round(gercek_r, 4)
 
 
-def gun_ici_giris_cikis_testi_calistir(max_hisse: int = 40) -> tuple:
+def gun_ici_giris_cikis_testi_calistir(max_hisse: int = 12) -> tuple:
     """Canlıda çalışan AYNI 8 göstergeyi, AYNI GÜN çıkışıyla (checkpoint
     tutarsa kazanç, tutmazsa kapanışta zorla + gerçek R) test eder. Kör
     temel çizgi de (koşulsuz LONG/SHORT, günün ilk barında giriş, aynı
