@@ -1063,18 +1063,20 @@ def arge_botu_komut_dongusu():
         time.sleep(3)
 
 
-def arge_botu_arastirma_dongusu():
-    """SADECE kendi kendine hipotez araştırma döngüsünü çalıştırır -
-    komut dinlemeden TAMAMEN AYRI. Bu yavaş olabilir/nadiren takılabilir
-    (yfinance rate limit vb.) ama artık komutları etkilemiyor."""
+def arge_botu_tarama_dongusu():
+    """2026-08-19: Eski Ar-Ge araştırma döngüsünün yerine BIST TAVAN
+    TARAYICISI geldi. arge_botu.py tamamen yeniden yazıldı - artık
+    araştırma değil, kapanışa yakın saatlerde tavana yaklaşan BIST
+    hisselerini tarayıp bildiriyor. maybe_run_scan() kendi kendini
+    zamanlıyor (pencere + aralık kontrolü içeride)."""
     if not _ARGE_MODUL_YUKLENDI:
         return
     while True:
         try:
-            arge_botu.maybe_run_research()
+            arge_botu.maybe_run_scan()
         except Exception as e:
-            print(f"[Ar-Ge Araştırma Döngüsü] Hata: {e}", flush=True)
-        time.sleep(5)
+            print(f"[Tavan Tarayıcı] Hata: {e}", flush=True)
+        time.sleep(30)
 
 
 if __name__ == "__main__":
@@ -1098,7 +1100,10 @@ if __name__ == "__main__":
     # sürekli ağ isteği yapıp donma riski ve log kirliliği yaratıyordu.
     # Ar-Ge KOMUTLARI (/gun_ici_turnuva, /buyuk_patlama vb.) etkilenmez -
     # onlar komut döngüsünden çalışmaya devam eder.
-    print("[BAŞLANGIÇ] Ar-Ge OTOMATİK ARAŞTIRMA thread'i KAPALI "
-          "(bilinçli olarak devre dışı - sadece komutlar çalışır).", flush=True)
+    # 2026-08-19: Eski Ar-Ge araştırma döngüsünün yerine BIST TAVAN
+    # TARAYICISI geldi (arge_botu.py tamamen yeniden yazıldı).
+    threading.Thread(target=arge_botu_tarama_dongusu, daemon=True).start()
+    print("[BAŞLANGIÇ] BIST TAVAN TARAYICI thread'i başlatıldı "
+          "(16:00-18:15 TR penceresinde çalışır).", flush=True)
     print("[BAŞLANGIÇ] Flask sunucusu başlatılıyor...", flush=True)
     app.run(host="0.0.0.0", port=PORT)
