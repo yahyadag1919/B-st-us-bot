@@ -36,7 +36,7 @@ import numpy as np
 import pandas as pd
 import requests
 
-ARGE_KOD_SURUMU = "tavan-tarayici-v1-2026-08-19"
+ARGE_KOD_SURUMU = "tavan-tarayici-v2-likidite-filtresi-2026-08-19"
 
 TELEGRAM_TOKEN = os.environ.get("ARGE_TELEGRAM_TOKEN", "")
 TELEGRAM_CHAT_ID = os.environ.get("ARGE_TELEGRAM_CHAT_ID", "")
@@ -47,10 +47,20 @@ ALT_ESIK_PCT = 7.0          # bu getirinin uzerindekiler ilgi alanina girer
 UST_ESIK_PCT = 9.49         # bunun ustu zaten TAVAN, gec kalmis olurduk
 TEKRAR_BILDIRIM_ARTIS = 0.5 # tekrar bildirim icin en az bu kadar yukselmeli
 TARAMA_ARALIGI_SANIYE = 300 # 5 dakika
+
+# 2026-08-19 EKLENDI: minimum GUNLUK TL ISLEM HACMI filtresi.
+# Kullanicinin istegi: "cok olu, giremiyecegim hisseler gelmesin ama
+# ayni zamanda digerlerini de kacirmayalim."
+# 2 milyon TL secildi: gercekten olu hisseleri (birkac yuz bin TL)
+# eler, ama orta-kucuk hisseleri kacirmaz. Cok yuksek yapmak kucuk
+# hisseleri (tavanlarin cogu orada oluyor) disarida birakirdi.
+# Render'da MIN_TL_HACIM degiskeniyle kod degistirmeden ayarlanabilir.
+MIN_TL_HACIM = float(os.environ.get("MIN_TL_HACIM", "2000000"))
 PENCERE_BASLANGIC = 16 * 60      # 16:00 TR
 PENCERE_BITIS = 18 * 60 + 15     # 18:15 TR
 
 BIST_HISSELER = [
+    # --- buyuk/orta olcekli (mevcut liste) ---
     "THYAO.IS", "GARAN.IS", "AKBNK.IS", "ISCTR.IS", "YKBNK.IS", "VAKBN.IS",
     "HALKB.IS", "SISE.IS", "EREGL.IS", "KRDMD.IS", "TUPRS.IS", "PETKM.IS",
     "ASELS.IS", "TCELL.IS", "TTKOM.IS", "BIMAS.IS", "MGROS.IS", "SOKM.IS",
@@ -63,7 +73,72 @@ BIST_HISSELER = [
     "KONTR.IS", "ISDMR.IS", "CIMSA.IS", "AKCNS.IS", "OYAKC.IS", "BRSAN.IS",
     "MAVI.IS", "BRYAT.IS", "AGHOL.IS", "KARSN.IS", "OTKAR.IS", "KLSER.IS",
     "EGEEN.IS", "ALTNY.IS", "REEDR.IS", "IZINV.IS", "MIATK.IS", "FORTE.IS",
+    # --- 2026-08-19 EKLENDİ: KÜÇÜK/ORTA ölçekli hisseler ---
+    # Kullanıcının haklı tespiti: tavan hareketleri ağırlıklı olarak
+    # KÜÇÜK hisselerde oluyor, büyüklerde nadir. Liste bu yüzden ciddi
+    # şekilde genişletildi.
+    # DÜRÜST NOT: bu liste genel bilgime dayanıyor, canlı bir BIST
+    # taraması değil - bazı kodlar değişmiş/işlemden kalkmış olabilir.
+    # Veri gelmeyen hisseler otomatik atlanır (kod bunu zaten yapıyor).
+    "ADESE.IS", "AFYON.IS", "AGYO.IS", "AHGAZ.IS", "AKFGY.IS", "AKSA.IS",
+    "AKSUE.IS", "ALCAR.IS", "ALKIM.IS", "ANELE.IS", "ARENA.IS", "ARSAN.IS",
+    "ASUZU.IS", "ATAKP.IS", "ATEKS.IS", "AVOD.IS", "AYCES.IS", "AYDEM.IS",
+    "AYEN.IS", "AZTEK.IS", "BAGFS.IS", "BAKAB.IS", "BALAT.IS", "BARMA.IS",
+    "BASGZ.IS", "BAYRK.IS", "BERA.IS", "BEYAZ.IS", "BIENY.IS", "BIGCH.IS",
+    "BIOEN.IS", "BLCYT.IS", "BMSCH.IS", "BMSTL.IS", "BNTAS.IS", "BOBET.IS",
+    "BORSK.IS", "BOSSA.IS", "BRISA.IS", "BRKSN.IS", "BRLSM.IS", "BSOKE.IS",
+    "BUCIM.IS", "BURCE.IS", "BURVA.IS", "CANTE.IS", "CASA.IS", "CATES.IS",
+    "CELHA.IS", "CEMAS.IS", "CEMTS.IS", "CEOEM.IS", "CMBTN.IS", "CONSE.IS",
+    "COSMO.IS", "CRDFA.IS", "CUSAN.IS", "DAGI.IS", "DAPGM.IS", "DARDL.IS",
+    "DENGE.IS", "DERHL.IS", "DERIM.IS", "DESA.IS", "DESPC.IS", "DGATE.IS",
+    "DGNMO.IS", "DIRIT.IS", "DITAS.IS", "DMSAS.IS", "DOBUR.IS", "DOCO.IS",
+    "DOFER.IS", "DURDO.IS", "DYOBY.IS", "EBEBK.IS", "ECILC.IS", "EDATA.IS",
+    "EGGUB.IS", "EGPRO.IS", "EKIZ.IS", "EKSUN.IS", "ELITE.IS", "EMKEL.IS",
+    "ENERY.IS", "ENSRI.IS", "EPLAS.IS", "ERBOS.IS", "ERCB.IS", "ERSU.IS",
+    "ESCAR.IS", "ESCOM.IS", "ESEN.IS", "ETILR.IS", "EUKYO.IS", "EUYO.IS",
+    "FADE.IS", "FENER.IS", "FLAP.IS", "FMIZP.IS", "FONET.IS", "FRIGO.IS",
+    "GARFA.IS", "GEDIK.IS", "GENIL.IS", "GENTS.IS", "GEREL.IS", "GLBMD.IS",
+    "GLCVY.IS", "GLRYH.IS", "GMTAS.IS", "GOKNR.IS", "GOLTS.IS", "GOODY.IS",
+    "GRNYO.IS", "GRSEL.IS", "GRTRK.IS", "GSDDE.IS", "GSDHO.IS", "GSRAY.IS",
+    "GWIND.IS", "GZNMI.IS", "HATEK.IS", "HATSN.IS", "HDFGS.IS", "HKTM.IS",
+    "HLGYO.IS", "HUBVC.IS", "HUNER.IS", "HURGZ.IS", "ICBCT.IS", "ICUGS.IS",
+    "IDGYO.IS", "IHAAS.IS", "IHEVA.IS", "IHGZT.IS", "IHLAS.IS", "IHLGM.IS",
+    "IHYAY.IS", "IMASM.IS", "INDES.IS", "INFO.IS", "INGRM.IS", "INTEM.IS",
+    "INVEO.IS", "INVES.IS", "ISBIR.IS", "ISDEM.IS", "ISFIN.IS", "ISGSY.IS",
+    "ISKPL.IS", "ISMEN.IS", "ISSEN.IS", "ISYAT.IS", "IZENR.IS", "IZFAS.IS",
+    "IZMDC.IS", "JANTS.IS", "KAPLM.IS", "KAREL.IS", "KARTN.IS", "KATMR.IS",
+    "KAYSE.IS", "KBORU.IS", "KCAER.IS", "KFEIN.IS", "KGYO.IS", "KIMMR.IS",
+    "KLGYO.IS", "KLKIM.IS", "KLMSN.IS", "KLRHO.IS", "KMPUR.IS", "KNFRT.IS",
+    "KOCMT.IS", "KONKA.IS", "KONYA.IS", "KOPOL.IS", "KORDS.IS", "KRGYO.IS",
+    "KRONT.IS", "KRPLS.IS", "KRSTL.IS", "KRVGD.IS", "KTLEV.IS", "KTSKR.IS",
+    "KUTPO.IS", "KUYAS.IS", "KZBGY.IS", "LIDER.IS", "LIDFA.IS", "LILAK.IS",
+    "LINK.IS", "LKMNH.IS", "LOGO.IS", "LUKSK.IS", "MAALT.IS", "MACKO.IS",
+    "MAKIM.IS", "MAKTK.IS", "MANAS.IS", "MARBL.IS", "MARKA.IS", "MARTI.IS",
+    "MEDTR.IS", "MEGAP.IS", "MEKAG.IS", "MEPET.IS", "MERCN.IS", "MERIT.IS",
+    "METRO.IS", "METUR.IS", "MHRGY.IS", "MMCAS.IS", "MNDRS.IS", "MOBTL.IS",
+    "MPARK.IS", "MRGYO.IS", "MRSHL.IS", "MSGYO.IS", "MTRKS.IS", "MZHLD.IS",
+    "NATEN.IS", "NIBAS.IS", "NTGAZ.IS", "NTHOL.IS", "NUHCM.IS", "OBASE.IS",
+    "OFSYM.IS", "ONCSM.IS", "ORCAY.IS", "ORGE.IS", "ORMA.IS", "OSMEN.IS",
+    "OSTIM.IS", "OYAYO.IS", "OZGYO.IS", "OZKGY.IS", "OZRDN.IS", "OZSUB.IS",
+    "PAGYO.IS", "PAMEL.IS", "PAPIL.IS", "PARSN.IS", "PASEU.IS", "PATEK.IS",
+    "PCILT.IS", "PEKGY.IS", "PENGD.IS", "PETUN.IS", "PINSU.IS", "PKART.IS",
+    "PKENT.IS", "PLTUR.IS", "PNLSN.IS", "POLTK.IS", "PRDGS.IS", "PRKAB.IS",
+    "PRKME.IS", "PRZMA.IS", "PSDTC.IS", "QUAGR.IS", "RALYH.IS", "RAYSG.IS",
+    "RNPOL.IS", "RODRG.IS", "ROYAL.IS", "RTALB.IS", "RUBNS.IS", "SAFKR.IS",
+    "SAMAT.IS", "SANEL.IS", "SANFM.IS", "SANKO.IS", "SARKY.IS", "SAYAS.IS",
+    "SDTTR.IS", "SEGYO.IS", "SEKUR.IS", "SELEC.IS", "SELGD.IS", "SELVA.IS",
+    "SEYKM.IS", "SILVR.IS", "SKTAS.IS", "SMART.IS", "SNGYO.IS", "SNICA.IS",
+    "SNPAM.IS", "SODSN.IS", "SOKE.IS", "SONME.IS", "SUMAS.IS", "SUNTK.IS",
+    "SURGY.IS", "TBORG.IS", "TDGYO.IS", "TEKTU.IS", "TERA.IS", "TEZOL.IS",
+    "TGSAS.IS", "TKNSA.IS", "TLMAN.IS", "TMPOL.IS", "TMSN.IS", "TNZTP.IS",
+    "TRILC.IS", "TSGYO.IS", "TSPOR.IS", "TUCLK.IS", "TUKAS.IS", "TUREX.IS",
+    "TURGG.IS", "UFUK.IS", "ULAS.IS", "ULUFA.IS", "ULUSE.IS", "ULUUN.IS",
+    "UNLU.IS", "USAK.IS", "UZERB.IS", "VAKKO.IS", "VANGD.IS", "VBTYZ.IS",
+    "VERTU.IS", "VERUS.IS", "VKGYO.IS", "VKING.IS", "YAPRK.IS", "YATAS.IS",
+    "YAYLA.IS", "YEOTK.IS", "YESIL.IS", "YGGYO.IS", "YIGIT.IS", "YKSLN.IS",
+    "YONGA.IS", "YUNSA.IS", "YYAPI.IS", "YYLGD.IS", "ZEDUR.IS", "ZRGYO.IS",
 ]
+BIST_HISSELER = list(dict.fromkeys(BIST_HISSELER))  # tekrarlari at, sirayi koru
 
 _ARGE_AVAILABLE = bool(TELEGRAM_TOKEN and TELEGRAM_CHAT_ID)
 if not _ARGE_AVAILABLE:
@@ -177,6 +252,11 @@ def _hisse_durumu(veri, ticker):
         gecmis_hacimler = [h for h in gecmis_hacimler if h > 0]
         hacim_orani = (bugun_hacim / np.mean(gecmis_hacimler)) if gecmis_hacimler else None
 
+        # 2026-08-19 EKLENDI: TL cinsinden islem hacmi (lot degil).
+        # Amac: girilemeyecek kadar OLU hisseleri elemek. Bugunku her
+        # barin (kapanis x hacim) toplami = yaklasik TL islem hacmi.
+        tl_hacim = float((bugun_barlar["Close"] * bugun_barlar["Volume"]).sum())
+
         # son 1 saatte (4 bar) ne kadar hizlandi
         son4 = bugun_barlar["Close"].tail(5)
         hiz = ((son4.iloc[-1] - son4.iloc[0]) / son4.iloc[0] * 100) if len(son4) >= 2 and son4.iloc[0] > 0 else None
@@ -185,6 +265,7 @@ def _hisse_durumu(veri, ticker):
                 "getiri_pct": round(getiri, 2),
                 "tavana_kalan_pct": round(10.0 - getiri, 2),
                 "hacim_orani": round(hacim_orani, 2) if hacim_orani else None,
+                "tl_hacim": tl_hacim,
                 "son1saat_pct": round(hiz, 2) if hiz is not None else None,
                 "son_bar_saati": bugun_barlar.index[-1].strftime("%H:%M")}
     except Exception:
@@ -207,12 +288,19 @@ def taramayi_calistir(elle=False):
                               "bulunan": 0, "taranan": 0, "hata": "veri alınamadı"}
         return []
 
-    bulunanlar, taranan = [], 0
+    bulunanlar, taranan, hacim_elenen = [], 0, 0
     for ticker in BIST_HISSELER:
         d = _hisse_durumu(veri, ticker)
         if d is None:
             continue
         taranan += 1
+        # 2026-08-19: getiri esigini gecse bile TL hacmi cok dusukse
+        # bildirme - girilemeyecek olu hisseler bildirim kirliligi
+        # yaratiyordu. Sadece ELEME icin, tarama yine tum listede.
+        if d.get("tl_hacim", 0) < MIN_TL_HACIM:
+            if d["getiri_pct"] >= ALT_ESIK_PCT:
+                hacim_elenen += 1
+            continue
         if ALT_ESIK_PCT <= d["getiri_pct"] <= UST_ESIK_PCT:
             bulunanlar.append(d)
         elif d["getiri_pct"] > UST_ESIK_PCT:
@@ -220,7 +308,8 @@ def taramayi_calistir(elle=False):
             bulunanlar.append(d)
 
     _son_tarama_ozeti = {"zaman": datetime.now().strftime("%H:%M:%S"),
-                          "bulunan": len(bulunanlar), "taranan": taranan, "hata": None}
+                          "bulunan": len(bulunanlar), "taranan": taranan,
+                          "hacim_elenen": hacim_elenen, "hata": None}
 
     yeni_bildirimler = []
     for d in sorted(bulunanlar, key=lambda x: -x["getiri_pct"]):
@@ -243,12 +332,16 @@ def taramayi_calistir(elle=False):
                                 f"(tavana %{d['tavana_kalan_pct']} kaldı)")
             satirlar.append(f"   Fiyat: {d['fiyat']}" +
                             (f" | Hacim: {d['hacim_orani']}x ort." if d.get("hacim_orani") else "") +
+                            (f" | İşlem: {d['tl_hacim']/1_000_000:.1f}M TL" if d.get("tl_hacim") else "") +
                             (f" | Son 1sa: %{d['son1saat_pct']}" if d.get("son1saat_pct") is not None else ""))
         satirlar.append("\n⏰ Veri ~15 dk gecikmeli olabilir - karar verirken hesaba kat.")
         send_telegram_message("\n".join(satirlar))
     elif elle:
         send_telegram_message(f"🔍 Tarama bitti: {taranan} hisse tarandı, "
-                               f"{ALT_ESIK_PCT}-{UST_ESIK_PCT}% aralığında yeni hisse yok.")
+                               f"{ALT_ESIK_PCT}-{UST_ESIK_PCT}% aralığında yeni hisse yok."
+                               + (f"\n({hacim_elenen} hisse eşiği geçti ama "
+                                  f"{MIN_TL_HACIM/1_000_000:.0f}M TL hacim filtresine takıldı.)"
+                                  if hacim_elenen else ""))
     return yeni_bildirimler
 
 
@@ -277,6 +370,10 @@ def send_startup_message():
         f"Eski Ar-Ge botu (araştırma komutları, otomatik AI hipotez üretimi) "
         f"TAMAMEN KALDIRILDI. Bu bot artık TEK İŞ yapıyor:\n\n"
         f"📊 {len(BIST_HISSELER)} BIST hissesi taranıyor\n"
+        f"💧 Likidite filtresi: günlük işlem hacmi "
+        f"{MIN_TL_HACIM/1_000_000:.0f}M TL altındaki hisseler bildirilmiyor "
+        f"(girilemeyecek ölü hisseleri elemek için - liste yine tam "
+        f"taranıyor, sadece bildirim süzülüyor)\n"
         f"🎯 Aranan: günlük getirisi %{ALT_ESIK_PCT} ile %{UST_ESIK_PCT} arası "
         f"(tavana yaklaşan ama HENÜZ tavan olmamış)\n"
         f"🔒 Tavan olanlar da ayrıca işaretlenip bildiriliyor\n"
