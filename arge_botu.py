@@ -36,16 +36,13 @@ import numpy as np
 import pandas as pd
 import requests
 
-ARGE_KOD_SURUMU = "tavan-tarayici-v2-likidite-filtresi-2026-08-19"
+ARGE_KOD_SURUMU = "tavan-tarayici-v3-gun-boyu-saat-duyarli-2026-08-19"
 
 TELEGRAM_TOKEN = os.environ.get("ARGE_TELEGRAM_TOKEN", "")
 TELEGRAM_CHAT_ID = os.environ.get("ARGE_TELEGRAM_CHAT_ID", "")
 DATA_DIR = os.environ.get("DATA_DIR", ".")
 
 # --- TARAMA AYARLARI ---
-ALT_ESIK_PCT = 7.0          # bu getirinin uzerindekiler ilgi alanina girer
-UST_ESIK_PCT = 9.49         # bunun ustu zaten TAVAN, gec kalmis olurduk
-TEKRAR_BILDIRIM_ARTIS = 0.5 # tekrar bildirim icin en az bu kadar yukselmeli
 TARAMA_ARALIGI_SANIYE = 300 # 5 dakika
 
 # 2026-08-19 EKLENDI: minimum GUNLUK TL ISLEM HACMI filtresi.
@@ -56,8 +53,42 @@ TARAMA_ARALIGI_SANIYE = 300 # 5 dakika
 # hisseleri (tavanlarin cogu orada oluyor) disarida birakirdi.
 # Render'da MIN_TL_HACIM degiskeniyle kod degistirmeden ayarlanabilir.
 MIN_TL_HACIM = float(os.environ.get("MIN_TL_HACIM", "2000000"))
-PENCERE_BASLANGIC = 16 * 60      # 16:00 TR
+
+# 2026-08-19 DEĞİŞTİRİLDİ: tarama artık GÜN BOYU (10:00-18:15 TR).
+# Kullanıcının isteği: "tam gaz tavana giden trene erken binmek."
+PENCERE_BASLANGIC = 10 * 60      # 10:00 TR (BIST açılışı)
 PENCERE_BITIS = 18 * 60 + 15     # 18:15 TR
+
+# SAAT DUYARLI EŞİKLER — neden gerekli:
+# Araştırmamız (bist_tavan.py + bist_tavana_yakin.py) şunu gösterdi:
+#   - GERÇEKTEN tavan kilitlenirse ertesi gün +%2.42 açıyor (%81 ihtimal)
+#   - Tavana yakın (%8-9.5) ama kilitlenmeden kapanırsa sadece +%0.39
+# Yani asıl değer, tavanın KİLİTLENMESİNDE. Bu yüzden:
+#   - Sabah erken: hissenin önünde 7-8 saat var, hem kilitlenebilir hem
+#     sönebilir → DAHA GÜÇLÜ kanıt istiyoruz (yüksek getiri + yüksek hız)
+#   - Kapanışa yakın: az zaman kaldı, mevcut seviye çok daha güvenilir
+#     bir gösterge → eşik gevşiyor
+# Format: (bitiş_dakikası, min_getiri_pct, min_son1saat_hiz_pct, etiket)
+SAAT_ESIKLERI = [
+    (12 * 60,        8.5, 2.5, "🌅 ERKEN (10:00-12:00)"),
+    (15 * 60,        8.0, 2.0, "☀️ ÖĞLE (12:00-15:00)"),
+    (17 * 60,        7.5, 1.0, "🌇 İKİNDİ (15:00-17:00)"),
+    (18 * 60 + 15,   7.0, 0.0, "🌆 KAPANIŞA YAKIN (17:00-18:15)"),
+]
+UST_ESIK_PCT = 9.49         # bunun ustu zaten TAVAN, gec kalmis olurduk
+TEKRAR_BILDIRIM_ARTIS = 0.5 # tekrar bildirim icin en az bu kadar yukselmeli
+TARAMA_ARALIGI_SANIYE = 300 # 5 dakika
+
+
+def _gecerli_esikler():
+    """Şu anki TR saatine göre (min_getiri, min_hiz, etiket) döner."""
+    simdi = _tr_dakika()
+    for bitis, min_getiri, min_hiz, etiket in SAAT_ESIKLERI:
+        if simdi <= bitis:
+            return min_getiri, min_hiz, etiket
+    son = SAAT_ESIKLERI[-1]
+    return son[1], son[2], son[3]
+
 
 BIST_HISSELER = [
     # --- buyuk/orta olcekli (mevcut liste) ---
@@ -288,7 +319,8 @@ def taramayi_calistir(elle=False):
                               "bulunan": 0, "taranan": 0, "hata": "veri alınamadı"}
         return []
 
-    bulunanlar, taranan, hacim_elenen = [], 0, 0
+    min_getiri, min_hiz, dilim_etiketi = _gecerli_esikler()
+    bulunanlar, taranan, hacim_elenen, hiz_elenen = [], 0, 0, 0
     for ticker in BIST_HISSELER:
         d = _hisse_durumu(veri, ticker)
         if d is None:
@@ -298,18 +330,30 @@ def taramayi_calistir(elle=False):
         # bildirme - girilemeyecek olu hisseler bildirim kirliligi
         # yaratiyordu. Sadece ELEME icin, tarama yine tum listede.
         if d.get("tl_hacim", 0) < MIN_TL_HACIM:
-            if d["getiri_pct"] >= ALT_ESIK_PCT:
+            if d["getiri_pct"] >= min_getiri:
                 hacim_elenen += 1
             continue
-        if ALT_ESIK_PCT <= d["getiri_pct"] <= UST_ESIK_PCT:
-            bulunanlar.append(d)
-        elif d["getiri_pct"] > UST_ESIK_PCT:
+        if d["getiri_pct"] > UST_ESIK_PCT:
             d["tavan_oldu"] = True
+            bulunanlar.append(d)
+        elif d["getiri_pct"] >= min_getiri:
+            # HIZ FILTRESI - kullanicinin "tam gaz giden tren" tarifi.
+            # Ayni %8, son 1 saatte hic kipirdamadan gelinmisse "tam gaz"
+            # degil; son 1 saatte hizla gelinmisse tam gaz. Sabah erken
+            # saatlerde bu sart daha yuksek (belirsizlik fazla), kapanisa
+            # dogru gevsiyor (mevcut seviye zaten guvenilir gosterge).
+            hiz = d.get("son1saat_pct")
+            if min_hiz > 0 and (hiz is None or hiz < min_hiz):
+                hiz_elenen += 1
+                continue
+            d["dilim"] = dilim_etiketi
             bulunanlar.append(d)
 
     _son_tarama_ozeti = {"zaman": datetime.now().strftime("%H:%M:%S"),
                           "bulunan": len(bulunanlar), "taranan": taranan,
-                          "hacim_elenen": hacim_elenen, "hata": None}
+                          "hacim_elenen": hacim_elenen, "hiz_elenen": hiz_elenen,
+                          "dilim": dilim_etiketi, "esik": f"%{min_getiri}/hız%{min_hiz}",
+                          "hata": None}
 
     yeni_bildirimler = []
     for d in sorted(bulunanlar, key=lambda x: -x["getiri_pct"]):
@@ -322,7 +366,8 @@ def taramayi_calistir(elle=False):
 
     if yeni_bildirimler:
         satirlar = [f"🔺 TAVANA YAKLAŞANLAR ({len(yeni_bildirimler)} hisse) "
-                    f"— veri saati ~{yeni_bildirimler[0].get('son_bar_saati','?')}"]
+                    f"— veri saati ~{yeni_bildirimler[0].get('son_bar_saati','?')}",
+                    f"{dilim_etiketi} | eşik: %{min_getiri}+ ve son 1sa %{min_hiz}+"]
         for d in yeni_bildirimler:
             if d.get("tavan_oldu"):
                 satirlar.append(f"\n🔒 {d['ticker']}: %{d['getiri_pct']} — TAVAN OLDU "
@@ -335,13 +380,19 @@ def taramayi_calistir(elle=False):
                             (f" | İşlem: {d['tl_hacim']/1_000_000:.1f}M TL" if d.get("tl_hacim") else "") +
                             (f" | Son 1sa: %{d['son1saat_pct']}" if d.get("son1saat_pct") is not None else ""))
         satirlar.append("\n⏰ Veri ~15 dk gecikmeli olabilir - karar verirken hesaba kat.")
+        if _tr_dakika() < 15 * 60:
+            satirlar.append("⚠️ Erken saat: tavana kilitlenmeden sönme ihtimali "
+                            "kapanışa yakın saatlere göre daha yüksek.")
         send_telegram_message("\n".join(satirlar))
     elif elle:
-        send_telegram_message(f"🔍 Tarama bitti: {taranan} hisse tarandı, "
-                               f"{ALT_ESIK_PCT}-{UST_ESIK_PCT}% aralığında yeni hisse yok."
-                               + (f"\n({hacim_elenen} hisse eşiği geçti ama "
+        send_telegram_message(f"🔍 Tarama bitti ({dilim_etiketi}): {taranan} hisse tarandı, "
+                               f"%{min_getiri}+ ve son 1sa %{min_hiz}+ koşulunu sağlayan "
+                               f"yeni hisse yok."
+                               + (f"\n({hacim_elenen} hisse getiri eşiğini geçti ama "
                                   f"{MIN_TL_HACIM/1_000_000:.0f}M TL hacim filtresine takıldı.)"
-                                  if hacim_elenen else ""))
+                                  if hacim_elenen else "")
+                               + (f"\n({hiz_elenen} hisse getiri eşiğini geçti ama "
+                                  f"yeterince hızlı yükselmiyordu.)" if hiz_elenen else ""))
     return yeni_bildirimler
 
 
@@ -374,10 +425,14 @@ def send_startup_message():
         f"{MIN_TL_HACIM/1_000_000:.0f}M TL altındaki hisseler bildirilmiyor "
         f"(girilemeyecek ölü hisseleri elemek için - liste yine tam "
         f"taranıyor, sadece bildirim süzülüyor)\n"
-        f"🎯 Aranan: günlük getirisi %{ALT_ESIK_PCT} ile %{UST_ESIK_PCT} arası "
-        f"(tavana yaklaşan ama HENÜZ tavan olmamış)\n"
-        f"🔒 Tavan olanlar da ayrıca işaretlenip bildiriliyor\n"
-        f"⏰ Çalışma penceresi: 16:00-18:15 TR, {TARAMA_ARALIGI_SANIYE//60} dakikada bir\n"
+        f"🎯 SAAT DUYARLI EŞİKLER (tren ne kadar erken yakalanırsa o kadar\n"
+        f"   güçlü kanıt isteniyor - sabah sönme riski yüksek, kapanışa\n"
+        f"   yakın mevcut seviye daha güvenilir):\n"
+        + "".join(f"   {et}: %{mg}+ ve son 1sa %{mh}+\n"
+                  for _, mg, mh, et in SAAT_ESIKLERI)
+        + f"🔒 Tavan olanlar da ayrıca işaretlenip bildiriliyor\n"
+        f"⏰ Çalışma penceresi: 10:00-18:15 TR (GÜN BOYU), "
+        f"{TARAMA_ARALIGI_SANIYE//60} dakikada bir\n"
         f"🔁 Aynı hisse için tekrar bildirim: sadece %{TEKRAR_BILDIRIM_ARTIS} "
         f"daha yükselirse (bildirim kirliliği olmasın)\n\n"
         f"⚠️ ÖNEMLİ: Veri ~15 dakika gecikmeli. Kapanışa 70+ dk varken sorun "
