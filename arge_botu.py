@@ -36,7 +36,7 @@ import numpy as np
 import pandas as pd
 import requests
 
-ARGE_KOD_SURUMU = "tavan-tarayici-v3-gun-boyu-saat-duyarli-2026-08-19"
+ARGE_KOD_SURUMU = "tavan-tarayici-v4-zaten-tavan-olanlar-atlaniyor-2026-08-19"
 
 TELEGRAM_TOKEN = os.environ.get("ARGE_TELEGRAM_TOKEN", "")
 TELEGRAM_CHAT_ID = os.environ.get("ARGE_TELEGRAM_CHAT_ID", "")
@@ -321,6 +321,7 @@ def taramayi_calistir(elle=False):
 
     min_getiri, min_hiz, dilim_etiketi = _gecerli_esikler()
     bulunanlar, taranan, hacim_elenen, hiz_elenen = [], 0, 0, 0
+    zaten_tavan_atlanan = 0
     for ticker in BIST_HISSELER:
         d = _hisse_durumu(veri, ticker)
         if d is None:
@@ -334,8 +335,20 @@ def taramayi_calistir(elle=False):
                 hacim_elenen += 1
             continue
         if d["getiri_pct"] > UST_ESIK_PCT:
-            d["tavan_oldu"] = True
-            bulunanlar.append(d)
+            # 2026-08-19 DÜZELTME: zaten TAVAN OLMUŞ hisseyi bildirmenin
+            # kullanıcıya faydası yok - amaç tavan olmadan ÖNCE girmek,
+            # bu bildirim "geç kaldın" demekten ibaret. İlk taramada
+            # (deploy anında) o güne kadar tavan olmuş her şey toplu
+            # bildirilip kirlilik yaratmıştı.
+            # Artık SADECE daha önce radara girmiş (yani biz haber
+            # vermişken henüz tavan olmamış) bir hisse sonradan
+            # kilitlenirse haber veriyoruz - o bilgi anlamlı: "sana
+            # söylediğim hisse tavan oldu".
+            if d["ticker"] in _bugun_bildirilen:
+                d["tavan_oldu"] = True
+                bulunanlar.append(d)
+            else:
+                zaten_tavan_atlanan += 1
         elif d["getiri_pct"] >= min_getiri:
             # HIZ FILTRESI - kullanicinin "tam gaz giden tren" tarifi.
             # Ayni %8, son 1 saatte hic kipirdamadan gelinmisse "tam gaz"
@@ -352,6 +365,7 @@ def taramayi_calistir(elle=False):
     _son_tarama_ozeti = {"zaman": datetime.now().strftime("%H:%M:%S"),
                           "bulunan": len(bulunanlar), "taranan": taranan,
                           "hacim_elenen": hacim_elenen, "hiz_elenen": hiz_elenen,
+                          "zaten_tavan_atlanan": zaten_tavan_atlanan,
                           "dilim": dilim_etiketi, "esik": f"%{min_getiri}/hız%{min_hiz}",
                           "hata": None}
 
@@ -392,7 +406,10 @@ def taramayi_calistir(elle=False):
                                   f"{MIN_TL_HACIM/1_000_000:.0f}M TL hacim filtresine takıldı.)"
                                   if hacim_elenen else "")
                                + (f"\n({hiz_elenen} hisse getiri eşiğini geçti ama "
-                                  f"yeterince hızlı yükselmiyordu.)" if hiz_elenen else ""))
+                                  f"yeterince hızlı yükselmiyordu.)" if hiz_elenen else "")
+                               + (f"\n({zaten_tavan_atlanan} hisse ZATEN TAVAN OLMUŞ - "
+                                  f"bunlar bildirilmiyor, çünkü amaç tavan olmadan "
+                                  f"önce yakalamak.)" if zaten_tavan_atlanan else ""))
     return yeni_bildirimler
 
 
