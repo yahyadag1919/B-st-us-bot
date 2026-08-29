@@ -28,6 +28,7 @@ değişir, geri kalan aynı kalır.
 Telegram komutları: /durum, /tara (elle tarama), /liste
 """
 import os
+import gc
 import time
 import threading
 from datetime import datetime, timezone
@@ -36,7 +37,7 @@ import numpy as np
 import pandas as pd
 import requests
 
-ARGE_KOD_SURUMU = "tavan-tarayici-v4-zaten-tavan-olanlar-atlaniyor-2026-08-19"
+ARGE_KOD_SURUMU = "tavan-tarayici-v5-bellek-duzeltmesi-2026-08-28"
 
 TELEGRAM_TOKEN = os.environ.get("ARGE_TELEGRAM_TOKEN", "")
 TELEGRAM_CHAT_ID = os.environ.get("ARGE_TELEGRAM_CHAT_ID", "")
@@ -53,6 +54,14 @@ TARAMA_ARALIGI_SANIYE = 300 # 5 dakika
 # hisseleri (tavanlarin cogu orada oluyor) disarida birakirdi.
 # Render'da MIN_TL_HACIM degiskeniyle kod degistirmeden ayarlanabilir.
 MIN_TL_HACIM = float(os.environ.get("MIN_TL_HACIM", "2000000"))
+
+# 2026-08-28 BELLEK: hisseler kac'arli gruplar halinde cekilip islenecek.
+# 414 hisseyi tek seferde cekmek ~2500 sutunluk dev bir DataFrame
+# yaratiyordu ve 5 dakikada bir tekrarlaniyordu; Render'in 512MB'lik
+# ucretsiz plani birkac saat icinde tukenip surec sessizce donuyordu.
+# 100'luk gruplar tepe bellegi ~4 kat dusuruyor. Render'da PARCA_BOYUTU
+# degiskeniyle kod degistirmeden ayarlanabilir.
+PARCA_BOYUTU = int(os.environ.get("PARCA_BOYUTU", "100"))
 
 # 2026-08-19 DEĞİŞTİRİLDİ: tarama artık GÜN BOYU (10:00-18:15 TR).
 # Kullanıcının isteği: "tam gaz tavana giden trene erken binmek."
@@ -180,6 +189,7 @@ _bugun_bildirilen = {}   # {ticker: en_son_bildirilen_getiri}
 _bugun_tarih = None
 _son_tarama_ozeti = {"zaman": None, "bulunan": 0, "taranan": 0, "hata": None}
 _son_update_id = None
+_poll_sayac = 0
 _gunluk_kayitlar = []
 
 
@@ -220,15 +230,25 @@ def pencere_icinde_mi():
     return PENCERE_BASLANGIC <= _tr_dakika() <= PENCERE_BITIS
 
 
-def _toplu_veri_cek(sert_sure=90):
-    """TUM hisseleri TEK istekte ceker - yfinance'in coklu-ticker
-    ozelligiyle. Hisse basina ayri istek atmak gun boyu 'Too Many
-    Requests' hatalarina yol acmisti; bu yontem o riski kokten cozuyor."""
+def _toplu_veri_cek(tickers=None, sert_sure=90):
+    """Verilen hisseleri TEK istekte ceker.
+    2026-08-28 BELLEK DUZELTMESI: Once TUM 414 hisse tek seferde
+    cekiliyordu - bu, ~2500 sutunluk dev bir DataFrame demek ve 5
+    dakikada bir tekrarlaniyordu. Zaman asimi olunca thread olmuyor,
+    veriyi tutmaya devam ediyordu; Render'in 512MB'lik ucretsiz plani
+    birkac saat icinde tukeniyor ve surec sessizce donuyordu
+    (kullanicinin defalarca yasadigi 'yeniden baslatinca duzeliyor,
+    sonra yine donuyor' sorununun muhtemel kok sebebi).
+    Artik PARCA PARCA cekiliyor ve her parca islenip hemen atiliyor -
+    tepe bellek kullanimi ~4 kat dusuyor. Ayrica period 5g -> 3g
+    (hacim ortalamasi icin 2 onceki gun yeterli)."""
     import concurrent.futures
     import yfinance as yf
 
+    hedef = tickers if tickers is not None else BIST_HISSELER
+
     def _cek():
-        return yf.download(tickers=" ".join(BIST_HISSELER), period="5d",
+        return yf.download(tickers=" ".join(hedef), period="3d",
                            interval="15m", group_by="ticker", progress=False,
                            threads=False, auto_adjust=False)
 
@@ -313,54 +333,64 @@ def taramayi_calistir(elle=False):
         _bugun_bildirilen = {}
         _gunluk_kayitlar = []
 
-    veri = _toplu_veri_cek()
-    if veri is None or veri.empty:
-        _son_tarama_ozeti = {"zaman": datetime.now().strftime("%H:%M:%S"),
-                              "bulunan": 0, "taranan": 0, "hata": "veri alınamadı"}
-        return []
-
     min_getiri, min_hiz, dilim_etiketi = _gecerli_esikler()
     bulunanlar, taranan, hacim_elenen, hiz_elenen = [], 0, 0, 0
     zaten_tavan_atlanan = 0
-    for ticker in BIST_HISSELER:
-        d = _hisse_durumu(veri, ticker)
-        if d is None:
+    basarili_parca = 0
+
+    # 2026-08-28: PARCA PARCA isle - her parca islenip HEMEN bellekten
+    # atiliyor. Tepe bellek kullanimi tum listeyi birden tutmaya gore
+    # ~4 kat dusuk. Render'in 512MB sinirinda donmalarin onune gecmek icin.
+    for i in range(0, len(BIST_HISSELER), PARCA_BOYUTU):
+        parca = BIST_HISSELER[i:i + PARCA_BOYUTU]
+        veri = _toplu_veri_cek(parca)
+        if veri is None or veri.empty:
+            print(f"[TARAYICI] Parça {i//PARCA_BOYUTU + 1} verisi alınamadı, "
+                  f"atlanıyor.", flush=True)
             continue
-        taranan += 1
-        # 2026-08-19: getiri esigini gecse bile TL hacmi cok dusukse
-        # bildirme - girilemeyecek olu hisseler bildirim kirliligi
-        # yaratiyordu. Sadece ELEME icin, tarama yine tum listede.
-        if d.get("tl_hacim", 0) < MIN_TL_HACIM:
-            if d["getiri_pct"] >= min_getiri:
-                hacim_elenen += 1
-            continue
-        if d["getiri_pct"] > UST_ESIK_PCT:
-            # 2026-08-19 DÜZELTME: zaten TAVAN OLMUŞ hisseyi bildirmenin
-            # kullanıcıya faydası yok - amaç tavan olmadan ÖNCE girmek,
-            # bu bildirim "geç kaldın" demekten ibaret. İlk taramada
-            # (deploy anında) o güne kadar tavan olmuş her şey toplu
-            # bildirilip kirlilik yaratmıştı.
-            # Artık SADECE daha önce radara girmiş (yani biz haber
-            # vermişken henüz tavan olmamış) bir hisse sonradan
-            # kilitlenirse haber veriyoruz - o bilgi anlamlı: "sana
-            # söylediğim hisse tavan oldu".
-            if d["ticker"] in _bugun_bildirilen:
-                d["tavan_oldu"] = True
-                bulunanlar.append(d)
-            else:
-                zaten_tavan_atlanan += 1
-        elif d["getiri_pct"] >= min_getiri:
-            # HIZ FILTRESI - kullanicinin "tam gaz giden tren" tarifi.
-            # Ayni %8, son 1 saatte hic kipirdamadan gelinmisse "tam gaz"
-            # degil; son 1 saatte hizla gelinmisse tam gaz. Sabah erken
-            # saatlerde bu sart daha yuksek (belirsizlik fazla), kapanisa
-            # dogru gevsiyor (mevcut seviye zaten guvenilir gosterge).
-            hiz = d.get("son1saat_pct")
-            if min_hiz > 0 and (hiz is None or hiz < min_hiz):
-                hiz_elenen += 1
+        basarili_parca += 1
+        for ticker in parca:
+            d = _hisse_durumu(veri, ticker)
+            if d is None:
                 continue
-            d["dilim"] = dilim_etiketi
-            bulunanlar.append(d)
+            taranan += 1
+            # 2026-08-19: getiri esigini gecse bile TL hacmi cok dusukse
+            # bildirme - girilemeyecek olu hisseler bildirim kirliligi
+            # yaratiyordu. Sadece ELEME icin, tarama yine tum listede.
+            if d.get("tl_hacim", 0) < MIN_TL_HACIM:
+                if d["getiri_pct"] >= min_getiri:
+                    hacim_elenen += 1
+                continue
+            if d["getiri_pct"] > UST_ESIK_PCT:
+                # 2026-08-19 DÜZELTME: zaten TAVAN OLMUŞ hisseyi bildirmenin
+                # kullanıcıya faydası yok - amaç tavan olmadan ÖNCE girmek,
+                # bu bildirim "geç kaldın" demekten ibaret.
+                # Artık SADECE daha önce radara girmiş bir hisse sonradan
+                # kilitlenirse haber veriyoruz - o bilgi anlamlı.
+                if d["ticker"] in _bugun_bildirilen:
+                    d["tavan_oldu"] = True
+                    bulunanlar.append(d)
+                else:
+                    zaten_tavan_atlanan += 1
+            elif d["getiri_pct"] >= min_getiri:
+                # HIZ FILTRESI - kullanicinin "tam gaz giden tren" tarifi.
+                # Ayni %8, son 1 saatte hic kipirdamadan gelinmisse "tam gaz"
+                # degil; son 1 saatte hizla gelinmisse tam gaz.
+                hiz = d.get("son1saat_pct")
+                if min_hiz > 0 and (hiz is None or hiz < min_hiz):
+                    hiz_elenen += 1
+                    continue
+                d["dilim"] = dilim_etiketi
+                bulunanlar.append(d)
+
+        # PARCA BITTI - veriyi HEMEN bellekten at
+        del veri
+        gc.collect()
+
+    if basarili_parca == 0:
+        _son_tarama_ozeti = {"zaman": datetime.now().strftime("%H:%M:%S"),
+                              "bulunan": 0, "taranan": 0, "hata": "veri alınamadı"}
+        return []
 
     _son_tarama_ozeti = {"zaman": datetime.now().strftime("%H:%M:%S"),
                           "bulunan": len(bulunanlar), "taranan": taranan,
@@ -464,8 +494,10 @@ def send_startup_message():
 
 def poll_arge_commands():
     """Ana botun komut dongusu bunu cagirir."""
-    global _son_update_id
+    global _son_update_id, _poll_sayac
     if not _ARGE_AVAILABLE:
+        print("[TARAYICI TEŞHİS] _ARGE_AVAILABLE=False - token/chat_id "
+              "tanımlı değil, komutlar HİÇ dinlenmiyor!", flush=True)
         return
     try:
         params = {"timeout": 5}
@@ -474,15 +506,32 @@ def poll_arge_commands():
         r = requests.get(f"https://api.telegram.org/bot{TELEGRAM_TOKEN}/getUpdates",
                          params=params, timeout=15)
         data = r.json()
+        # 2026-08-19 TEŞHİS: Telegram API'nin kendisi hata döndürüyor mu?
+        # (ornegin baska bir yerde webhook kuruluysa getUpdates calismaz)
+        if not data.get("ok", True):
+            print(f"[TARAYICI TEŞHİS] Telegram API HATA döndürdü: {data}", flush=True)
     except Exception as e:
         print(f"[TARAYICI] Komut alma hatası: {e}", flush=True)
         return
+
+    _poll_sayac += 1
+    if _poll_sayac % 20 == 0:
+        print(f"[TARAYICI TEŞHİS] Komut dinleme nabız: çalışıyor "
+              f"(sorgu #{_poll_sayac}, son gelen mesaj sayısı: "
+              f"{len(data.get('result', []))})", flush=True)
 
     for u in data.get("result", []):
         _son_update_id = u["update_id"]
         msg = u.get("message", {})
         chat_id = str(msg.get("chat", {}).get("id", ""))
         text = (msg.get("text") or "").strip()
+        # 2026-08-19 TEŞHİS: kullanıcı /tara yazdığında hiç yanıt
+        # alamadığını bildirdi. Bu satır GELEN HER MESAJI loglar - sorunun
+        # chat_id uyuşmazlığı mı, mesajın hiç ulaşmaması mı, yoksa başka
+        # bir şey mi olduğunu KESİN gösterir (tahmin etmeyi bırakıyoruz).
+        print(f"[TARAYICI TEŞHİS] Gelen mesaj: chat_id={chat_id} "
+              f"(beklenen={TELEGRAM_CHAT_ID}) metin='{text}' "
+              f"eşleşiyor_mu={chat_id == str(TELEGRAM_CHAT_ID)}", flush=True)
         if chat_id != str(TELEGRAM_CHAT_ID) or not text.startswith("/"):
             continue
 
