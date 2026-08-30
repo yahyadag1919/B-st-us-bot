@@ -37,7 +37,7 @@ import numpy as np
 import pandas as pd
 import requests
 
-ARGE_KOD_SURUMU = "tavan-tarayici-v8-esikler-tersine-hafta-sonu-uyarisi-2026-08-28"
+ARGE_KOD_SURUMU = "tavan-tarayici-v9-kapanis-konumu-2026-08-28"
 
 TELEGRAM_TOKEN = os.environ.get("ARGE_TELEGRAM_TOKEN", "")
 TELEGRAM_CHAT_ID = os.environ.get("ARGE_TELEGRAM_CHAT_ID", "")
@@ -396,6 +396,17 @@ def _hisse_durumu(veri, ticker):
         # barin (kapanis x hacim) toplami = yaklasik TL islem hacmi.
         tl_hacim = float((bugun_barlar["Close"] * bugun_barlar["Volume"]).sum())
 
+        # 2026-08-28 EKLENDI: KAPANIS KONUMU - gun ici aralikta fiyat nerede.
+        # Test (bist_alt_grup_kural.py, 1297 olay) bunu EN GUCLU filtre
+        # olarak buldu: gun zirvesinde kapananlar (>=0.9) ertesi gun
+        # net %0.474 verirken, TUM grup %0.281 veriyordu - neredeyse 2 kat.
+        # Mantigi: tepede kapaniyorsa alici hala baskin, satici bastiramamis.
+        # 1.00 = gunun en yuksegi | 0.00 = gunun en dusugu
+        gun_yuksek = float(bugun_barlar["High"].max())
+        gun_dusuk = float(bugun_barlar["Low"].min())
+        aralik = gun_yuksek - gun_dusuk
+        kapanis_konumu = ((son_fiyat - gun_dusuk) / aralik) if aralik > 0 else None
+
         # son 1 saatte (4 bar) ne kadar hizlandi
         son4 = bugun_barlar["Close"].tail(5)
         hiz = ((son4.iloc[-1] - son4.iloc[0]) / son4.iloc[0] * 100) if len(son4) >= 2 and son4.iloc[0] > 0 else None
@@ -405,6 +416,7 @@ def _hisse_durumu(veri, ticker):
                 "tavana_kalan_pct": round(10.0 - getiri, 2),
                 "hacim_orani": round(hacim_orani, 2) if hacim_orani else None,
                 "tl_hacim": tl_hacim,
+                "kapanis_konumu": round(kapanis_konumu, 2) if kapanis_konumu is not None else None,
                 "son1saat_pct": round(hiz, 2) if hiz is not None else None,
                 "son_bar_saati": bugun_barlar.index[-1].strftime("%H:%M")}
     except Exception:
@@ -528,18 +540,32 @@ def taramayi_calistir(elle=False):
                 satirlar.append(f"\n{isaret} {d['ticker']}: %{d['getiri_pct']} "
                                 f"(tavana %{d['tavana_kalan_pct']} kaldı)"
                                 + (f" — kilitlenme ihtimali ~%{ki}" if ki is not None else ""))
+            kk = d.get("kapanis_konumu")
+            if kk is None:
+                kk_metin = ""
+            elif kk >= 0.9:
+                kk_metin = f" | 🔝 ZİRVEDE kapanıyor ({kk})"
+            elif kk >= 0.5:
+                kk_metin = f" | ↗️ üst yarıda ({kk})"
+            else:
+                kk_metin = f" | ↘️ zirveden gerilemiş ({kk})"
             satirlar.append(f"   Fiyat: {d['fiyat']}" +
                             (f" | Hacim: {d['hacim_orani']}x ort." if d.get("hacim_orani") else "") +
                             (f" | İşlem: {d['tl_hacim']/1_000_000:.1f}M TL" if d.get("tl_hacim") else "") +
-                            (f" | Son 1sa: %{d['son1saat_pct']}" if d.get("son1saat_pct") is not None else ""))
+                            (f" | Son 1sa: %{d['son1saat_pct']}" if d.get("son1saat_pct") is not None else "")
+                            + kk_metin)
         satirlar.append("\n⏰ Veri ~15 dk gecikmeli olabilir - karar verirken hesaba kat.")
         satirlar.append(
             "📊 Kilitlenme ihtimali = bu hissenin KAPANIŞTA tavan yapma tahmini "
             "(2284 geçmiş sinyalin ölçümünden). 🟢 ≥%40 | 🟡 %25-40 | ⚪ <%25\n"
+            "🔝 KAPANIŞ KONUMU: 1297 olaylık testte EN GÜÇLÜ filtre çıktı. "
+            "Gün zirvesinde kapananlar (≥0.9) ertesi gün net %0.47 verirken "
+            "tüm grup %0.28 veriyordu - yaklaşık 2 kat. Zirvede kapanış = "
+            "alıcı hâlâ baskın demek.\n"
             "ÖNEMLİ: Testler, tavan KAPANIŞINDA alıp ertesi sabah +%2 satmanın "
-            "kazandırdığını (+%2.51 net, %90) ama tavan OLMADAN alıp beklemenin "
-            "kazandırmadığını gösterdi. Bu yüzden bu bir 'al' sinyali DEĞİL, "
-            "sadece öncelik sıralaması - karar senin.")
+            "kazandırdığını (+%2.51 net, %90) gösterdi - bu en güçlü kanal. "
+            "Tavan olmayanlar çok daha zayıf (+%0.28-0.47). Bu bir 'al' "
+            "sinyali DEĞİL, öncelik sıralaması - karar senin.")
         send_telegram_message("\n".join(satirlar))
     elif elle:
         kapali_uyari = _piyasa_kapali_uyarisi()
