@@ -37,7 +37,7 @@ import numpy as np
 import pandas as pd
 import requests
 
-ARGE_KOD_SURUMU = "tavan-tarayici-v7-kilitlenme-ihtimali-2026-08-28"
+ARGE_KOD_SURUMU = "tavan-tarayici-v8-esikler-tersine-hafta-sonu-uyarisi-2026-08-28"
 
 TELEGRAM_TOKEN = os.environ.get("ARGE_TELEGRAM_TOKEN", "")
 TELEGRAM_CHAT_ID = os.environ.get("ARGE_TELEGRAM_CHAT_ID", "")
@@ -79,10 +79,23 @@ PENCERE_BITIS = 18 * 60 + 15     # 18:15 TR
 #     bir gösterge → eşik gevşiyor
 # Format: (bitiş_dakikası, min_getiri_pct, min_son1saat_hiz_pct, etiket)
 SAAT_ESIKLERI = [
-    (12 * 60,        8.5, 2.5, "🌅 ERKEN (10:00-12:00)"),
-    (15 * 60,        8.0, 2.0, "☀️ ÖĞLE (12:00-15:00)"),
-    (17 * 60,        7.5, 1.0, "🌇 İKİNDİ (15:00-17:00)"),
-    (18 * 60 + 15,   7.0, 0.0, "🌆 KAPANIŞA YAKIN (17:00-18:15)"),
+    # 2026-08-28 TERSİNE ÇEVRİLDİ. Önceki ayar varsayıma dayanıyordu
+    # ("kapanışa yakın daha güvenilir"). ÖLÇÜM BUNUN TERSİNİ GÖSTERDİ
+    # (bist_tavan_kilitlenme.py, 1495 sinyal + bist_sabah_penceresi.py, 789):
+    #     Kapanışa 4+ saat kala yakalanan → %32.2 tavana kilitleniyor
+    #     2-4 saat kala                    → %22.1
+    #     1-2 saat kala                    → %16.1
+    #     30-60 dk kala                    → %12.7
+    #     Son 30 dk kala                   →  %5.1  (neredeyse değersiz)
+    # Yani ERKEN sinyal 6 KAT daha değerli. Bu yüzden artık sabah eşiği
+    # GEVŞEK (daha çok sinyal yakala), kapanışa doğru SIKI (değersiz
+    # bildirimlerle uğraşma). Hız şartı da kaldırıldı - ölçümde fark
+    # yaratmadı (hız≥%2 → %21.0 vs hız<%0 → %18.7).
+    (12 * 60,        6.5, 0.0, "🌅 ERKEN (10:00-12:00) — en değerli pencere"),
+    (15 * 60,        7.0, 0.0, "☀️ ÖĞLE (12:00-15:00)"),
+    (17 * 60,        7.5, 0.0, "🌇 İKİNDİ (15:00-17:00)"),
+    (17 * 60 + 30,   8.0, 0.0, "🌆 KAPANIŞA YAKIN (17:00-17:30)"),
+    (18 * 60 + 15,   9.0, 0.0, "🌙 SON 30 DK (17:30-18:15) — kilitlenme %5, çok seçici"),
 ]
 UST_ESIK_PCT = 9.49         # bunun ustu zaten TAVAN, gec kalmis olurduk
 TEKRAR_BILDIRIM_ARTIS = 0.5 # tekrar bildirim icin en az bu kadar yukselmeli
@@ -228,6 +241,30 @@ def pencere_icinde_mi():
     if u.weekday() >= 5:
         return False
     return PENCERE_BASLANGIC <= _tr_dakika() <= PENCERE_BITIS
+
+
+def _piyasa_kapali_uyarisi():
+    """Piyasa kapalıysa NEDEN kapalı olduğunu açıklayan uyarı döner,
+    açıksa None. 2026-08-28 eklendi: kullanıcı pazar günü /tara yaptı ve
+    gelen rakamların CANLI sanılması kafa karıştırdı - aslında cuma
+    kapanışının eski verisiydi."""
+    u = datetime.now(timezone.utc)
+    gunler = ["Pazartesi", "Salı", "Çarşamba", "Perşembe", "Cuma",
+              "Cumartesi", "Pazar"]
+    if u.weekday() >= 5:
+        return (f"⚠️ BUGÜN {gunler[u.weekday()].upper()} — BIST KAPALI!\n"
+                f"Aşağıdaki rakamlar CANLI DEĞİL, son işlem gününün "
+                f"(Cuma) kapanış verileri. Karar vermek için kullanma.")
+    dk = _tr_dakika()
+    if dk < PENCERE_BASLANGIC:
+        return (f"⚠️ Piyasa henüz AÇILMADI (BIST 10:00'da açılır, şu an "
+                f"{dk//60:02d}:{dk%60:02d} TR).\nAşağıdaki rakamlar dünkü "
+                f"kapanışa ait, canlı değil.")
+    if dk > PENCERE_BITIS:
+        return (f"⚠️ Piyasa KAPANDI (şu an {dk//60:02d}:{dk%60:02d} TR).\n"
+                f"Aşağıdaki rakamlar bugünkü KAPANIŞ verileri - artık "
+                f"değişmeyecek.")
+    return None
 
 
 def _toplu_veri_cek(tickers=None, sert_sure=90):
@@ -468,7 +505,9 @@ def taramayi_calistir(elle=False):
         _gunluk_kayitlar.append({**d, "bildirim_saati": datetime.now().strftime("%H:%M")})
 
     if yeni_bildirimler:
-        satirlar = [f"🔺 TAVANA YAKLAŞANLAR ({len(yeni_bildirimler)} hisse) "
+        kapali_uyari = _piyasa_kapali_uyarisi()
+        satirlar = ([kapali_uyari, ""] if kapali_uyari else []) + [
+                    f"🔺 TAVANA YAKLAŞANLAR ({len(yeni_bildirimler)} hisse) "
                     f"— veri saati ~{yeni_bildirimler[0].get('son_bar_saati','?')}",
                     f"{dilim_etiketi} | eşik: %{min_getiri}+ ve son 1sa %{min_hiz}+",
                     f"⬇️ EN YÜKSEK KİLİTLENME İHTİMALİ ÜSTTE"]
@@ -503,7 +542,9 @@ def taramayi_calistir(elle=False):
             "sadece öncelik sıralaması - karar senin.")
         send_telegram_message("\n".join(satirlar))
     elif elle:
-        send_telegram_message(f"🔍 Tarama bitti ({dilim_etiketi}): {taranan} hisse tarandı, "
+        kapali_uyari = _piyasa_kapali_uyarisi()
+        send_telegram_message((f"{kapali_uyari}\n\n" if kapali_uyari else "")
+                               + f"🔍 Tarama bitti ({dilim_etiketi}): {taranan} hisse tarandı, "
                                f"%{min_getiri}+ ve son 1sa %{min_hiz}+ koşulunu sağlayan "
                                f"yeni hisse yok."
                                + (f"\n({hacim_elenen} hisse getiri eşiğini geçti ama "
