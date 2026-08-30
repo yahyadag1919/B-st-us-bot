@@ -37,7 +37,7 @@ import numpy as np
 import pandas as pd
 import requests
 
-ARGE_KOD_SURUMU = "tavan-tarayici-v6-dis-ping-duzeltmesi-2026-08-28"
+ARGE_KOD_SURUMU = "tavan-tarayici-v7-kilitlenme-ihtimali-2026-08-28"
 
 TELEGRAM_TOKEN = os.environ.get("ARGE_TELEGRAM_TOKEN", "")
 TELEGRAM_CHAT_ID = os.environ.get("ARGE_TELEGRAM_CHAT_ID", "")
@@ -265,6 +265,57 @@ def _toplu_veri_cek(tickers=None, sert_sure=90):
         ex.shutdown(wait=False)
 
 
+def _kilitlenme_ihtimali(getiri, kalan_dakika, hacim_orani):
+    """Bu hissenin KAPANIŞTA tavana kilitlenme ihtimali (kaba tahmin).
+
+    2026-08-28 EKLENDİ. Rakamlar UYDURMA DEĞİL - iki testten geliyor:
+      bist_tavan_kilitlenme.py (1495 sinyal anı) ve
+      bist_sabah_penceresi.py (789 sinyal):
+        SEVİYE:   %6-7 → %9    %7-8 → %19    %8-9 → %31    %9-9.5 → %37
+        ZAMAN:    4+ saat kala → %32   2-4 saat → %22   1-2 saat → %16
+                  30-60 dk → %13       son 30 dk → %5
+        HACİM:    ≥3x → %22    1-3x → %21    <1x → %12
+    Yani ERKEN + YÜKSEK SEVİYE + HACİM = en yüksek ihtimal.
+    (Hız işe yaramadı - ölçümde fark çıkmadı, o yüzden kullanılmıyor.)
+
+    NOT: Bu bir OLASILIK TAHMİNİ, garanti değil. Sıralama/önceliklendirme
+    için - "hangisine önce bakayım" sorusuna yardım eder. Test, otomatik
+    alım kuralının kâr bırakmadığını gösterdi; karar kullanıcıda."""
+    # seviye taban orani
+    if getiri >= 9.0:
+        p = 37.0
+    elif getiri >= 8.0:
+        p = 31.0
+    elif getiri >= 7.0:
+        p = 19.0
+    else:
+        p = 9.0
+    # zaman carpani (erken = iyi, gec = kotu)
+    if kalan_dakika >= 240:
+        p *= 1.7
+    elif kalan_dakika >= 120:
+        p *= 1.15
+    elif kalan_dakika >= 60:
+        p *= 0.85
+    elif kalan_dakika >= 30:
+        p *= 0.67
+    else:
+        p *= 0.27
+    # hacim carpani
+    if hacim_orani is not None:
+        if hacim_orani >= 3:
+            p *= 1.10
+        elif hacim_orani < 1:
+            p *= 0.60
+    return max(2.0, min(75.0, p))
+
+
+def _kalan_dakika():
+    """BIST kapanışına (18:00 TR) kalan dakika."""
+    return max(0, (18 * 60) - _tr_dakika())
+
+
+
 def _hisse_durumu(veri, ticker):
     """Bir hissenin bugunku getirisini ve hacim oranini hesaplar.
     Doner: dict ya da None."""
@@ -392,6 +443,14 @@ def taramayi_calistir(elle=False):
                               "bulunan": 0, "taranan": 0, "hata": "veri alınamadı"}
         return []
 
+    # 2026-08-28: her bulunana KİLİTLENME İHTİMALİ ekle ve ona göre sırala.
+    # Önceki sıralama ham getiriye göreydi; ama ölçümler gösterdi ki asıl
+    # belirleyici seviye + KALAN SÜRE birlikte (erken %8, geç %9'dan iyi).
+    kalan_dk = _kalan_dakika()
+    for d in bulunanlar:
+        d["kilit_ihtimali"] = round(_kilitlenme_ihtimali(
+            d["getiri_pct"], kalan_dk, d.get("hacim_orani")), 1)
+
     _son_tarama_ozeti = {"zaman": datetime.now().strftime("%H:%M:%S"),
                           "bulunan": len(bulunanlar), "taranan": taranan,
                           "hacim_elenen": hacim_elenen, "hiz_elenen": hiz_elenen,
@@ -400,7 +459,7 @@ def taramayi_calistir(elle=False):
                           "hata": None}
 
     yeni_bildirimler = []
-    for d in sorted(bulunanlar, key=lambda x: -x["getiri_pct"]):
+    for d in sorted(bulunanlar, key=lambda x: -x.get("kilit_ihtimali", 0)):
         onceki = _bugun_bildirilen.get(d["ticker"])
         if onceki is not None and d["getiri_pct"] < onceki + TEKRAR_BILDIRIM_ARTIS:
             continue  # zaten bildirdik, kayda deger yukselis yok
@@ -411,22 +470,37 @@ def taramayi_calistir(elle=False):
     if yeni_bildirimler:
         satirlar = [f"🔺 TAVANA YAKLAŞANLAR ({len(yeni_bildirimler)} hisse) "
                     f"— veri saati ~{yeni_bildirimler[0].get('son_bar_saati','?')}",
-                    f"{dilim_etiketi} | eşik: %{min_getiri}+ ve son 1sa %{min_hiz}+"]
+                    f"{dilim_etiketi} | eşik: %{min_getiri}+ ve son 1sa %{min_hiz}+",
+                    f"⬇️ EN YÜKSEK KİLİTLENME İHTİMALİ ÜSTTE"]
         for d in yeni_bildirimler:
+            ki = d.get("kilit_ihtimali")
+            if ki is None:
+                isaret = ""
+            elif ki >= 40:
+                isaret = "🟢"
+            elif ki >= 25:
+                isaret = "🟡"
+            else:
+                isaret = "⚪"
             if d.get("tavan_oldu"):
                 satirlar.append(f"\n🔒 {d['ticker']}: %{d['getiri_pct']} — TAVAN OLDU "
                                 f"(fiyat {d['fiyat']})")
             else:
-                satirlar.append(f"\n📈 {d['ticker']}: %{d['getiri_pct']} "
-                                f"(tavana %{d['tavana_kalan_pct']} kaldı)")
+                satirlar.append(f"\n{isaret} {d['ticker']}: %{d['getiri_pct']} "
+                                f"(tavana %{d['tavana_kalan_pct']} kaldı)"
+                                + (f" — kilitlenme ihtimali ~%{ki}" if ki is not None else ""))
             satirlar.append(f"   Fiyat: {d['fiyat']}" +
                             (f" | Hacim: {d['hacim_orani']}x ort." if d.get("hacim_orani") else "") +
                             (f" | İşlem: {d['tl_hacim']/1_000_000:.1f}M TL" if d.get("tl_hacim") else "") +
                             (f" | Son 1sa: %{d['son1saat_pct']}" if d.get("son1saat_pct") is not None else ""))
         satirlar.append("\n⏰ Veri ~15 dk gecikmeli olabilir - karar verirken hesaba kat.")
-        if _tr_dakika() < 15 * 60:
-            satirlar.append("⚠️ Erken saat: tavana kilitlenmeden sönme ihtimali "
-                            "kapanışa yakın saatlere göre daha yüksek.")
+        satirlar.append(
+            "📊 Kilitlenme ihtimali = bu hissenin KAPANIŞTA tavan yapma tahmini "
+            "(2284 geçmiş sinyalin ölçümünden). 🟢 ≥%40 | 🟡 %25-40 | ⚪ <%25\n"
+            "ÖNEMLİ: Testler, tavan KAPANIŞINDA alıp ertesi sabah +%2 satmanın "
+            "kazandırdığını (+%2.51 net, %90) ama tavan OLMADAN alıp beklemenin "
+            "kazandırmadığını gösterdi. Bu yüzden bu bir 'al' sinyali DEĞİL, "
+            "sadece öncelik sıralaması - karar senin.")
         send_telegram_message("\n".join(satirlar))
     elif elle:
         send_telegram_message(f"🔍 Tarama bitti ({dilim_etiketi}): {taranan} hisse tarandı, "
