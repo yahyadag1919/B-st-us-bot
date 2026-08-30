@@ -54,7 +54,7 @@ TARAMA_ARALIGI_SANIYE = int(os.environ.get("TARAMA_ARALIGI_SANIYE", "300"))  # 5
 # seçildi - 5dk, Yahoo'nun hız sınırına ("Too Many Requests") takılma
 # riskini ciddi artırıyordu; 10dk hem sık hem güvenli.
 
-BOT_KOD_SURUMU = "v9-otomatik-arastirma-kapatildi-2026-08-19"
+BOT_KOD_SURUMU = "v10-dis-ping-duzeltmesi-2026-08-19"
 
 US_TICKERS = [
     "AAPL", "MSFT", "GOOGL", "AMZN", "NVDA", "META", "TSLA", "BRK-B", "JPM",
@@ -955,18 +955,39 @@ def health():
 
 
 def kendi_kendine_ping():
-    """Render'ın ücretsiz katmanı 15 dk hareketsizlikte servisi uyutuyor -
-    bu, botun kendi /health endpoint'ine düzenli istek atıp uyanık
-    kalmasını sağlıyor. 2026-08-19: bu, önceki sistemde vardı ama yeni
-    botta unutulmuştu - ilk canlı denemede servis uykuya dalıp hiç
-    tarama yapmadı, bu yüzden eklendi."""
+    """Render'ın ücretsiz katmanı ~15 dk hareketsizlikte servisi uyutuyor.
+
+    2026-08-19 KRİTİK DÜZELTME: Bu fonksiyon önce 127.0.0.1'e (kendi
+    içine) istek atıyordu - İŞE YARAMIYORDU. Render, uyutma kararını
+    DIŞARIDAN gelen trafiğe bakarak veriyor; container'ın kendi içindeki
+    loopback isteği Render'ın yük dengeleyicisine hiç ulaşmıyor, yani
+    Render açısından "hiç trafik yok" görünüyordu.
+    Belirti tam buydu: deploy'dan sonra ~15 dk çalışıyor, sonra tamamen
+    susuyor (loglarda hiçbir şey kalmıyor), manuel deploy ile canlanıyor.
+    Artık DIŞ adrese istek atıyor - bu gerçek trafik sayılır.
+
+    RENDER_EXTERNAL_URL değişkenini Render otomatik sağlıyor; yoksa
+    HARICI_URL ile elle verilebilir."""
+    harici_url = (os.environ.get("RENDER_EXTERNAL_URL", "").rstrip("/")
+                  or os.environ.get("HARICI_URL", "").rstrip("/"))
+    if not harici_url:
+        print("[Kendi kendine ping] UYARI: RENDER_EXTERNAL_URL/HARICI_URL "
+              "tanımlı değil - dış ping yapılamıyor, servis uyuyabilir!",
+              flush=True)
     time.sleep(30)  # once uygulamanin tam ayaga kalkmasini bekle
     while True:
         try:
-            requests.get(f"http://127.0.0.1:{PORT}/health", timeout=10)
+            if harici_url:
+                r = requests.get(f"{harici_url}/health", timeout=20)
+                print(f"[Kendi kendine ping] Dış ping OK ({harici_url}) "
+                      f"durum={r.status_code}", flush=True)
+            else:
+                # son care: loopback (Render'da uyutmayi ENGELLEMEZ ama
+                # en azindan uygulama canli mi gorurüz)
+                requests.get(f"http://127.0.0.1:{PORT}/health", timeout=10)
         except Exception as e:
             print(f"[Kendi kendine ping] Hata: {e}", flush=True)
-        time.sleep(600)  # 10 dakika
+        time.sleep(600)  # 10 dakika (Render'in ~15 dk esiginin altinda)
 
 
 def send_startup_message():

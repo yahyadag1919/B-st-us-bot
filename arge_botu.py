@@ -37,7 +37,7 @@ import numpy as np
 import pandas as pd
 import requests
 
-ARGE_KOD_SURUMU = "tavan-tarayici-v5-bellek-duzeltmesi-2026-08-28"
+ARGE_KOD_SURUMU = "tavan-tarayici-v6-dis-ping-duzeltmesi-2026-08-28"
 
 TELEGRAM_TOKEN = os.environ.get("ARGE_TELEGRAM_TOKEN", "")
 TELEGRAM_CHAT_ID = os.environ.get("ARGE_TELEGRAM_CHAT_ID", "")
@@ -580,10 +580,21 @@ if __name__ == "__main__":
             time.sleep(5)
 
     def _ping():
+        # 2026-08-19 DUZELTME: loopback (127.0.0.1) ping Render'da
+        # uyutmayi ENGELLEMIYOR - dis trafik gerekiyor. Ayrintili
+        # aciklama us_sinyal_botu.py:kendi_kendine_ping icinde.
+        harici = (os.environ.get("RENDER_EXTERNAL_URL", "").rstrip("/")
+                  or os.environ.get("HARICI_URL", "").rstrip("/"))
+        if not harici:
+            print("[TARAYICI ping] UYARI: RENDER_EXTERNAL_URL yok - "
+                  "servis uyuyabilir!", flush=True)
         time.sleep(30)
         while True:
             try:
-                requests.get(f"http://127.0.0.1:{_PORT}/health", timeout=10)
+                if harici:
+                    requests.get(f"{harici}/health", timeout=20)
+                else:
+                    requests.get(f"http://127.0.0.1:{_PORT}/health", timeout=10)
             except Exception:
                 pass
             time.sleep(600)
