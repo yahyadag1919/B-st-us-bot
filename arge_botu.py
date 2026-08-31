@@ -37,7 +37,7 @@ import numpy as np
 import pandas as pd
 import requests
 
-ARGE_KOD_SURUMU = "tavan-tarayici-v9-kapanis-konumu-2026-08-28"
+ARGE_KOD_SURUMU = "tavan-tarayici-v10-hisse-listesi-genisletildi-2026-08-31"
 
 TELEGRAM_TOKEN = os.environ.get("ARGE_TELEGRAM_TOKEN", "")
 TELEGRAM_CHAT_ID = os.environ.get("ARGE_TELEGRAM_CHAT_ID", "")
@@ -113,7 +113,6 @@ def _gecerli_esikler():
 
 
 BIST_HISSELER = [
-    # --- buyuk/orta olcekli (mevcut liste) ---
     "THYAO.IS", "GARAN.IS", "AKBNK.IS", "ISCTR.IS", "YKBNK.IS", "VAKBN.IS",
     "HALKB.IS", "SISE.IS", "EREGL.IS", "KRDMD.IS", "TUPRS.IS", "PETKM.IS",
     "ASELS.IS", "TCELL.IS", "TTKOM.IS", "BIMAS.IS", "MGROS.IS", "SOKM.IS",
@@ -126,13 +125,6 @@ BIST_HISSELER = [
     "KONTR.IS", "ISDMR.IS", "CIMSA.IS", "AKCNS.IS", "OYAKC.IS", "BRSAN.IS",
     "MAVI.IS", "BRYAT.IS", "AGHOL.IS", "KARSN.IS", "OTKAR.IS", "KLSER.IS",
     "EGEEN.IS", "ALTNY.IS", "REEDR.IS", "IZINV.IS", "MIATK.IS", "FORTE.IS",
-    # --- 2026-08-19 EKLENDİ: KÜÇÜK/ORTA ölçekli hisseler ---
-    # Kullanıcının haklı tespiti: tavan hareketleri ağırlıklı olarak
-    # KÜÇÜK hisselerde oluyor, büyüklerde nadir. Liste bu yüzden ciddi
-    # şekilde genişletildi.
-    # DÜRÜST NOT: bu liste genel bilgime dayanıyor, canlı bir BIST
-    # taraması değil - bazı kodlar değişmiş/işlemden kalkmış olabilir.
-    # Veri gelmeyen hisseler otomatik atlanır (kod bunu zaten yapıyor).
     "ADESE.IS", "AFYON.IS", "AGYO.IS", "AHGAZ.IS", "AKFGY.IS", "AKSA.IS",
     "AKSUE.IS", "ALCAR.IS", "ALKIM.IS", "ANELE.IS", "ARENA.IS", "ARSAN.IS",
     "ASUZU.IS", "ATAKP.IS", "ATEKS.IS", "AVOD.IS", "AYCES.IS", "AYDEM.IS",
@@ -190,6 +182,16 @@ BIST_HISSELER = [
     "VERTU.IS", "VERUS.IS", "VKGYO.IS", "VKING.IS", "YAPRK.IS", "YATAS.IS",
     "YAYLA.IS", "YEOTK.IS", "YESIL.IS", "YGGYO.IS", "YIGIT.IS", "YKSLN.IS",
     "YONGA.IS", "YUNSA.IS", "YYAPI.IS", "YYLGD.IS", "ZEDUR.IS", "ZRGYO.IS",
+    "ADEL.IS", "ALCTL.IS", "BFREN.IS", "BJKAS.IS", "DEVA.IS", "ISATR.IS",
+    "ISBTR.IS", "KRDMA.IS", "KRDMB.IS", "AKENR.IS", "AKGRT.IS", "AKMGY.IS",
+    "ALMAD.IS", "ALKA.IS", "ANHYT.IS", "ATAGY.IS", "AVGYO.IS", "AVTUR.IS",
+    "BASCM.IS", "BIZIM.IS", "BRKO.IS", "BRMEN.IS", "BSPRO.IS", "BVSAN.IS",
+    "CMENT.IS", "DNISI.IS", "DOGUB.IS", "DZGYO.IS", "ECZYT.IS", "EDIP.IS",
+    "EGSER.IS", "EMNIS.IS", "FORMT.IS", "GEDZA.IS", "KARYE.IS", "KENT.IS",
+    "KERVN.IS", "KERVT.IS", "KLNMA.IS", "KRTEK.IS", "KSTUR.IS", "LMKDC.IS",
+    "MEGMT.IS", "MNDTR.IS", "MTRYO.IS", "NETAS.IS", "NUGYO.IS", "OBAMS.IS",
+    "ODINE.IS", "POLHO.IS", "RYGYO.IS", "RYSAS.IS", "SEKFK.IS", "TARKM.IS",
+    "TETMT.IS", "TRCAS.IS", "VAKFN.IS", "VKFYO.IS", "YBTAS.IS", "YGYO.IS",
 ]
 BIST_HISSELER = list(dict.fromkeys(BIST_HISSELER))  # tekrarlari at, sirayi koru
 
