@@ -37,7 +37,7 @@ import numpy as np
 import pandas as pd
 import requests
 
-ARGE_KOD_SURUMU = "tavan-tarayici-v10-hisse-listesi-genisletildi-2026-08-31"
+ARGE_KOD_SURUMU = "tavan-tarayici-v11-risk-uyarilari-2026-08-31"
 
 TELEGRAM_TOKEN = os.environ.get("ARGE_TELEGRAM_TOKEN", "")
 TELEGRAM_CHAT_ID = os.environ.get("ARGE_TELEGRAM_CHAT_ID", "")
@@ -409,6 +409,33 @@ def _hisse_durumu(veri, ticker):
         aralik = gun_yuksek - gun_dusuk
         kapanis_konumu = ((son_fiyat - gun_dusuk) / aralik) if aralik > 0 else None
 
+        # 2026-08-31 EKLENDI: RISK OLCUTLERI.
+        # Test (bist_cokenleri_ayirt_et.py, 1443 olay) ertesi gun SERT
+        # DUSENLERI onceden ayirt edebildigimizi gosterdi. Taban cokme
+        # orani %36.9 iken:
+        #   Son 5 gunde >=%25 kosmus  -> cokme %62.7 (EN RISKLI)
+        #   Gun araligi genis (>=%9)  -> cokme %50.7
+        #   Gun ici tavana degip dusmus -> cokme %48.3
+        #   Gun araligi DAR (<%5)     -> cokme %18.8 (EN GUVENLI)
+        #   Zirvede kapandi + dar aralik -> cokme %19.6, patlama %35.1
+        # Yani "sakin yukselen" hisse guvenli, "cok kosmus/cok dalgalanan"
+        # riskli. Kapanis konumu TEK BASINA anlamsiz (p=0.60) ama dar
+        # aralikla birleşince cok guclu.
+        gun_araligi_pct = (aralik / son_fiyat * 100) if son_fiyat > 0 else None
+
+        # son 5 gunde ne kadar kosmus (bugun dahil)
+        son5gun_getiri = None
+        if len(gunler) >= 6:
+            bes_once = df[df["gun"] == gunler[-6]]
+            if not bes_once.empty:
+                ref = float(bes_once.iloc[-1]["Close"])
+                if ref > 0:
+                    son5gun_getiri = (son_fiyat - ref) / ref * 100
+
+        # gun ici tavana degip dusmus mu
+        tavana_degdi = int((gun_yuksek - onceki_kapanis) / onceki_kapanis * 100 >= 9.5) \
+            if onceki_kapanis > 0 else 0
+
         # son 1 saatte (4 bar) ne kadar hizlandi
         son4 = bugun_barlar["Close"].tail(5)
         hiz = ((son4.iloc[-1] - son4.iloc[0]) / son4.iloc[0] * 100) if len(son4) >= 2 and son4.iloc[0] > 0 else None
@@ -419,6 +446,9 @@ def _hisse_durumu(veri, ticker):
                 "hacim_orani": round(hacim_orani, 2) if hacim_orani else None,
                 "tl_hacim": tl_hacim,
                 "kapanis_konumu": round(kapanis_konumu, 2) if kapanis_konumu is not None else None,
+                "gun_araligi_pct": round(gun_araligi_pct, 2) if gun_araligi_pct is not None else None,
+                "son5gun_getiri_pct": round(son5gun_getiri, 1) if son5gun_getiri is not None else None,
+                "tavana_degdi": tavana_degdi,
                 "son1saat_pct": round(hiz, 2) if hiz is not None else None,
                 "son_bar_saati": bugun_barlar.index[-1].strftime("%H:%M")}
     except Exception:
@@ -556,6 +586,27 @@ def taramayi_calistir(elle=False):
                             (f" | İşlem: {d['tl_hacim']/1_000_000:.1f}M TL" if d.get("tl_hacim") else "") +
                             (f" | Son 1sa: %{d['son1saat_pct']}" if d.get("son1saat_pct") is not None else "")
                             + kk_metin)
+
+            # 2026-08-31: RISK UYARILARI (olculen cokme oranlariyla)
+            riskler, guvenli = [], []
+            s5 = d.get("son5gun_getiri_pct")
+            ga = d.get("gun_araligi_pct")
+            if s5 is not None and s5 >= 25:
+                riskler.append(f"son 5 günde %{s5} koşmuş (çökme %62.7)")
+            if ga is not None and ga >= 9:
+                riskler.append(f"gün aralığı çok geniş %{ga} (çökme %50.7)")
+            if d.get("tavana_degdi"):
+                riskler.append("gün içi tavana değip düşmüş (çökme %48.3)")
+            if d.get("hacim_orani") is not None and d["hacim_orani"] >= 3:
+                riskler.append(f"hacim {d['hacim_orani']}x - aşırı (çökme %44.4)")
+            if ga is not None and ga < 5:
+                guvenli.append(f"sakin yükseliş, dar aralık %{ga} (çökme sadece %18.8)")
+            if (kk is not None and kk >= 0.9 and ga is not None and ga < 6):
+                guvenli.append("zirvede kapanış + dar aralık (çökme %19.6, patlama %35.1)")
+            if riskler:
+                satirlar.append("   ⚠️ RİSKLİ: " + " | ".join(riskler))
+            if guvenli:
+                satirlar.append("   ✅ OLUMLU: " + " | ".join(guvenli))
         satirlar.append("\n⏰ Veri ~15 dk gecikmeli olabilir - karar verirken hesaba kat.")
         satirlar.append(
             "📊 Kilitlenme ihtimali = bu hissenin KAPANIŞTA tavan yapma tahmini "
@@ -564,6 +615,10 @@ def taramayi_calistir(elle=False):
             "Gün zirvesinde kapananlar (≥0.9) ertesi gün net %0.47 verirken "
             "tüm grup %0.28 veriyordu - yaklaşık 2 kat. Zirvede kapanış = "
             "alıcı hâlâ baskın demek.\n"
+            "⚠️/✅ RİSK UYARILARI: 1443 olaylık ÇÖKME testinden. Ertesi gün "
+            "sert düşenlerin (dip ≤-%3) ortak özellikleri ölçüldü. Taban "
+            "çökme oranı %36.9; 'çok koşmuş' %62.7'ye çıkarıyor, 'sakin "
+            "yükseliş/dar aralık' ise %18.8'e düşürüyor.\n"
             "ÖNEMLİ: Testler, tavan KAPANIŞINDA alıp ertesi sabah +%2 satmanın "
             "kazandırdığını (+%2.51 net, %90) gösterdi - bu en güçlü kanal. "
             "Tavan olmayanlar çok daha zayıf (+%0.28-0.47). Bu bir 'al' "
