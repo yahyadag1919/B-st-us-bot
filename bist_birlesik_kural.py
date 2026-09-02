@@ -51,7 +51,7 @@ TELEGRAM_TOKEN = os.environ.get("ARGE_TELEGRAM_TOKEN", "")
 TELEGRAM_CHAT_ID = os.environ.get("ARGE_TELEGRAM_CHAT_ID", "")
 DATA_DIR = os.environ.get("DATA_DIR", ".")
 PORT = int(os.environ.get("PORT", "10000"))
-KOD_SURUMU = "birlesik-kural-v1-2026-08-31"
+KOD_SURUMU = "birlesik-kural-v2-tuple-hatasi-duzeltildi-2026-08-31"
 
 MALIYET_PCT = float(os.environ.get("MALIYET_PCT", "0.10"))  # Midas: komisyon yok
 BANT_ALT, BANT_UST = 6.0, 9.49
@@ -256,7 +256,7 @@ def calistir():
                 continue
             for hedef in [1.5, 2.0, 2.5]:
                 for stop in [None, 1.0, 2.0]:
-                    g = [_cikis(r[kol], r.e_yuksek, r.e_dusuk, r.e_kapanis, hedef, stop) - MALIYET_PCT
+                    g = [_cikis(getattr(r, kol), r.e_yuksek, r.e_dusuk, r.e_kapanis, hedef, stop) - MALIYET_PCT
                          for r in veri.itertuples()]
                     a = np.array(g)
                     satirlar.append({
