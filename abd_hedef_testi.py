@@ -54,7 +54,7 @@ TELEGRAM_TOKEN = os.environ.get("TELEGRAM_TOKEN", "")
 TELEGRAM_CHAT_ID = os.environ.get("TELEGRAM_CHAT_ID", "")
 DATA_DIR = os.environ.get("DATA_DIR", ".")
 PORT = int(os.environ.get("PORT", "10000"))
-KOD_SURUMU = "abd-hedef-testi-v1-2026-09-01"
+KOD_SURUMU = "abd-hedef-testi-v2-bellek-ve-hiz-duzeltmesi-2026-09-02"
 
 MALIYET_PCT = float(os.environ.get("MALIYET_PCT", "0.10"))
 HEDEFLER = [3.0, 5.0, 7.0, 10.0]
@@ -139,24 +139,30 @@ def send_telegram_document(dosya_yolu: str, caption: str = ""):
         print(f"[Telegram dosya hatası] {e}", flush=True)
 
 
-def _veri_cek(ticker, sert_sure=30):
+def _toplu_veri_cek(tickers, sert_sure=120):
+    """2026-09-02 DEGISTI: onceden hisse basina AYRI istek atiliyordu -
+    401 hisse x ~30sn = 3+ saat suruyordu. Artik yf.download ile TOPLU
+    cekiliyor (50'lik gruplar), bu 9 istege dusuruyor."""
     import concurrent.futures
     import yfinance as yf
 
     def _cek():
-        return yf.Ticker(ticker).history(period="2y", interval="1d", timeout=20)
+        return yf.download(tickers, period="2y", interval="1d",
+                           group_by="ticker", auto_adjust=True,
+                           progress=False, threads=True, timeout=30)
 
     ex = concurrent.futures.ThreadPoolExecutor(max_workers=1)
     try:
         return ex.submit(_cek).result(timeout=sert_sure)
     except concurrent.futures.TimeoutError:
-        print(f"[SERT zaman aşımı] {ticker}", flush=True)
+        print(f"[SERT zaman asimi] {len(tickers)} hisselik grup", flush=True)
         return None
     except Exception as e:
-        print(f"[Veri hatası] {ticker}: {e}", flush=True)
+        print(f"[Veri hatasi] grup: {e}", flush=True)
         return None
     finally:
         ex.shutdown(wait=False)
+
 
 
 def _ema(s, n):
@@ -273,83 +279,100 @@ def _kademeli(df, i, yon):
 
 
 def calistir():
-    kayitlar = []
-    islenen, atlanan = 0, 0
-    for n_i, ticker in enumerate(US_TICKERS, 1):
-        print(f"[Hedef Testi {n_i}/{len(US_TICKERS)}] {ticker}...", flush=True)
-        ham = _veri_cek(ticker)
-        if ham is None or ham.empty or len(ham) < 120:
-            atlanan += 1
-            time.sleep(0.25)
+    """2026-09-02 YENIDEN YAZILDI - BELLEK TASMASI DUZELTMESI.
+    Onceki surum TUM sinyal kayitlarini (yuz binlerce, her biri 29
+    alanli) bellekte biriktiriyordu. Render'in 512MB sinirini asinca
+    servis olduruluyor ve bastan basliyordu - kullanici 3 saat boyunca
+    testi bitiremedi, surekli 148/401 civarinda yeniden basliyordu.
+    Artik kayitlar biriktirilmiyor: her sinyal ISLENIR ISLENMEZ
+    toplayicilara (accumulator) ekleniyor. Bellek kullanimi sabit."""
+    # toplayicilar: anahtar -> [n, getiri_toplami, tutma_toplami]
+    topla = {}
+
+    def _ekle(gosterge, sistem, hedef, sure, getiri, tuttu):
+        a = (gosterge, sistem, hedef, sure)
+        if a not in topla:
+            topla[a] = [0, 0.0, 0]
+        topla[a][0] += 1
+        topla[a][1] += getiri
+        topla[a][2] += int(tuttu)
+
+    islenen, atlanan, toplam_sinyal = 0, 0, 0
+    GRUP = 50
+    gruplar = [US_TICKERS[i:i + GRUP] for i in range(0, len(US_TICKERS), GRUP)]
+
+    for gi, grup in enumerate(gruplar, 1):
+        print(f"[Grup {gi}/{len(gruplar)}] {len(grup)} hisse cekiliyor...", flush=True)
+        veri = _toplu_veri_cek(grup)
+        if veri is None or len(veri) == 0:
+            atlanan += len(grup)
             continue
         try:
-            df = ham.rename(columns={"Open": "open", "High": "high", "Low": "low",
-                                      "Close": "close", "Volume": "volume"})
-            df = df[["open", "high", "low", "close", "volume"]].dropna().reset_index(drop=True)
-            if len(df) < 120:
-                atlanan += 1
-                time.sleep(0.25)
-                continue
-            df = _gostergeler(df)
-            for i in range(40, len(df) - 21):
-                r, o = df.iloc[i], df.iloc[i - 1]
-                tetik = _sinyaller(r, o)
-                # KOR temel cizgi - her gun kosulsuz LONG
-                tetik.append(("[KÖR] Koşulsuz LONG", "LONG"))
-                for gosterge, yon in tetik:
-                    kayit = {"ticker": ticker, "gosterge": gosterge, "yon": yon}
-                    k = _kademeli(df, i, yon)
-                    if k:
-                        kayit["kademeli_getiri"] = round(k[0], 3)
-                        kayit["kademeli_tuttu"] = int(k[1])
-                    for h in HEDEFLER:
-                        for s in SURELER:
-                            res = _sabit_hedef(df, i, yon, h, s)
-                            if res:
-                                kayit[f"h{h}_s{s}_getiri"] = round(res[0], 3)
-                                kayit[f"h{h}_s{s}_tuttu"] = int(res[1])
-                    kayitlar.append(kayit)
-            islenen += 1
-        except Exception as e:
-            print(f"[Hedef Testi] {ticker} hata: {e}", flush=True)
-            atlanan += 1
-        time.sleep(0.25)
+            send_telegram_message(f"🎯 İlerleme: {gi}/{len(gruplar)} grup "
+                                   f"({islenen} hisse işlendi, "
+                                   f"{toplam_sinyal:,} sinyal)")
+        except Exception:
+            pass
 
-    if not kayitlar:
-        return None, "Hiç kayıt üretilemedi."
-    tum = pd.DataFrame(kayitlar)
-    dosya = os.path.join(DATA_DIR, "abd_hedef_testi.csv")
-    tum.to_csv(dosya, index=False, encoding="utf-8-sig")
+        for ticker in grup:
+            try:
+                if isinstance(veri.columns, pd.MultiIndex):
+                    if ticker not in veri.columns.get_level_values(0):
+                        atlanan += 1
+                        continue
+                    ham = veri[ticker]
+                else:
+                    ham = veri
+                df = ham.rename(columns={"Open": "open", "High": "high", "Low": "low",
+                                          "Close": "close", "Volume": "volume"})
+                if not set(["open", "high", "low", "close"]).issubset(df.columns):
+                    atlanan += 1
+                    continue
+                df = df[["open", "high", "low", "close", "volume"]].dropna().reset_index(drop=True)
+                if len(df) < 120:
+                    atlanan += 1
+                    continue
+                df = _gostergeler(df)
+
+                for i in range(40, len(df) - 21):
+                    r, o = df.iloc[i], df.iloc[i - 1]
+                    tetik = _sinyaller(r, o)
+                    tetik.append(("[KOR] Kosulsuz LONG", "LONG"))
+                    for gosterge, yon in tetik:
+                        toplam_sinyal += 1
+                        k = _kademeli(df, i, yon)
+                        if k:
+                            _ekle(gosterge, "KADEMELI (mevcut)", "1/2/3/5", 10, k[0], k[1])
+                        for h in HEDEFLER:
+                            for s in SURELER:
+                                res = _sabit_hedef(df, i, yon, h, s)
+                                if res:
+                                    _ekle(gosterge, "SABIT", h, s, res[0], res[1])
+                islenen += 1
+            except Exception as e:
+                print(f"[Hedef Testi] {ticker} hata: {e}", flush=True)
+                atlanan += 1
+        del veri
+
+    if not topla:
+        return None, "Hic kayit uretilemedi."
 
     satirlar = []
-    for gosterge in sorted(tum.gosterge.unique()):
-        alt = tum[tum.gosterge == gosterge]
-        if len(alt) < 100:
+    for (gosterge, sistem, hedef, sure), (n, gt, tt) in topla.items():
+        if n < 100:
             continue
-        if "kademeli_getiri" in alt:
-            a = alt["kademeli_getiri"].dropna()
-            if len(a) >= 100:
-                satirlar.append({"gosterge": gosterge, "sistem": "KADEMELİ (mevcut)",
-                                  "hedef": "1/2/3/5", "sure": 10, "n": len(a),
-                                  "net": round(float(a.mean() - MALIYET_PCT), 4),
-                                  "tutma": round(float(alt["kademeli_tuttu"].mean() * 100), 1)})
-        for h in HEDEFLER:
-            for s in SURELER:
-                kg, kt = f"h{h}_s{s}_getiri", f"h{h}_s{s}_tuttu"
-                if kg not in alt:
-                    continue
-                a = alt[kg].dropna()
-                if len(a) < 100:
-                    continue
-                satirlar.append({"gosterge": gosterge, "sistem": "SABİT",
-                                  "hedef": h, "sure": s, "n": len(a),
-                                  "net": round(float(a.mean() - MALIYET_PCT), 4),
-                                  "tutma": round(float(alt[kt].mean() * 100), 1)})
-    ozet = pd.DataFrame(satirlar)
-    ozet.to_csv(os.path.join(DATA_DIR, "abd_hedef_ozet.csv"),
-                index=False, encoding="utf-8-sig")
+        satirlar.append({"gosterge": gosterge, "sistem": sistem,
+                          "hedef": hedef, "sure": sure, "n": n,
+                          "net": round(gt / n - MALIYET_PCT, 4),
+                          "tutma": round(tt / n * 100, 1)})
+    if not satirlar:
+        return None, "Yeterli ornek yok."
+    ozet = pd.DataFrame(satirlar).sort_values("net", ascending=False)
+    dosya = os.path.join(DATA_DIR, "abd_hedef_ozet.csv")
+    ozet.to_csv(dosya, index=False, encoding="utf-8-sig")
     return dosya, {"islenen": islenen, "atlanan": atlanan,
-                    "toplam_sinyal": len(tum), "satirlar": satirlar}
+                    "toplam_sinyal": toplam_sinyal, "satirlar": satirlar}
+
 
 
 def _rapor(o):
