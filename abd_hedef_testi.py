@@ -54,7 +54,7 @@ TELEGRAM_TOKEN = os.environ.get("TELEGRAM_TOKEN", "")
 TELEGRAM_CHAT_ID = os.environ.get("TELEGRAM_CHAT_ID", "")
 DATA_DIR = os.environ.get("DATA_DIR", ".")
 PORT = int(os.environ.get("PORT", "10000"))
-KOD_SURUMU = "abd-hedef-testi-v2-bellek-ve-hiz-duzeltmesi-2026-09-02"
+KOD_SURUMU = "abd-hedef-testi-v3-numpy-hizlandirma-2026-09-02"
 
 MALIYET_PCT = float(os.environ.get("MALIYET_PCT", "0.10"))
 HEDEFLER = [3.0, 5.0, 7.0, 10.0]
@@ -239,42 +239,44 @@ def _sinyaller(r, o):
     return s
 
 
-def _sabit_hedef(df, i, yon, hedef, sure):
-    """Tek sabit hedef. Döner (getiri_pct, tuttu_mu)."""
-    giris = float(df.iloc[i]["close"])
+def _sabit_hedef(hi, lo, cl, i, yon, hedef, sure):
+    """Tek sabit hedef. 2026-09-02: pandas .iloc yerine NUMPY dizileri.
+    .iloc her çağrıda çok yavaş ve bu fonksiyon milyonlarca kez
+    çağrılıyor - kullanıcı testin saatlerce sürdüğünü bildirdi.
+    Döner (getiri_pct, tuttu_mu)."""
+    giris = cl[i]
     if giris <= 0:
         return None
-    son = min(i + sure, len(df) - 1)
+    son = min(i + sure, len(cl) - 1)
     if son <= i:
         return None
-    for j in range(i + 1, son + 1):
-        if yon == "LONG" and float(df.iloc[j]["high"]) >= giris * (1 + hedef / 100):
+    if yon == "LONG":
+        if hi[i + 1:son + 1].max() >= giris * (1 + hedef / 100):
             return hedef, True
-        if yon == "SHORT" and float(df.iloc[j]["low"]) <= giris * (1 - hedef / 100):
+    else:
+        if lo[i + 1:son + 1].min() <= giris * (1 - hedef / 100):
             return hedef, True
-    kap = float(df.iloc[son]["close"])
-    g = (kap - giris) / giris * 100
+    g = (cl[son] - giris) / giris * 100
     return (g if yon == "LONG" else -g), False
 
 
-def _kademeli(df, i, yon):
-    """Mevcut sistemin kademeli hedefi - hangisi tutarsa o."""
-    giris = float(df.iloc[i]["close"])
+def _kademeli(hi, lo, cl, i, yon):
+    """Mevcut sistemin kademeli hedefi - hangisi önce tutarsa o."""
+    giris = cl[i]
     if giris <= 0:
         return None
     for gun, hedef in KADEMELI:
         j = i + gun
-        if j >= len(df):
+        if j >= len(cl):
             break
-        if yon == "LONG" and float(df.iloc[j]["high"]) >= giris * (1 + hedef / 100):
+        if yon == "LONG" and hi[j] >= giris * (1 + hedef / 100):
             return hedef, True
-        if yon == "SHORT" and float(df.iloc[j]["low"]) <= giris * (1 - hedef / 100):
+        if yon == "SHORT" and lo[j] <= giris * (1 - hedef / 100):
             return hedef, True
-    son = min(i + 10, len(df) - 1)
+    son = min(i + 10, len(cl) - 1)
     if son <= i:
         return None
-    kap = float(df.iloc[son]["close"])
-    g = (kap - giris) / giris * 100
+    g = (cl[son] - giris) / giris * 100
     return (g if yon == "LONG" else -g), False
 
 
@@ -307,13 +309,6 @@ def calistir():
         if veri is None or len(veri) == 0:
             atlanan += len(grup)
             continue
-        try:
-            send_telegram_message(f"🎯 İlerleme: {gi}/{len(gruplar)} grup "
-                                   f"({islenen} hisse işlendi, "
-                                   f"{toplam_sinyal:,} sinyal)")
-        except Exception:
-            pass
-
         for ticker in grup:
             try:
                 if isinstance(veri.columns, pd.MultiIndex):
@@ -333,26 +328,40 @@ def calistir():
                     atlanan += 1
                     continue
                 df = _gostergeler(df)
+                # numpy dizileri - ic dongulerde pandas'tan cok daha hizli
+                hi = df["high"].to_numpy(dtype=float)
+                lo = df["low"].to_numpy(dtype=float)
+                cl = df["close"].to_numpy(dtype=float)
+                satirlar_l = [df.iloc[i] for i in range(39, len(df) - 21)]
 
-                for i in range(40, len(df) - 21):
-                    r, o = df.iloc[i], df.iloc[i - 1]
-                    tetik = _sinyaller(r, o)
+                for idx, i in enumerate(range(40, len(df) - 21)):
+                    tetik = _sinyaller(satirlar_l[idx + 1], satirlar_l[idx])
                     tetik.append(("[KOR] Kosulsuz LONG", "LONG"))
                     for gosterge, yon in tetik:
                         toplam_sinyal += 1
-                        k = _kademeli(df, i, yon)
+                        k = _kademeli(hi, lo, cl, i, yon)
                         if k:
                             _ekle(gosterge, "KADEMELI (mevcut)", "1/2/3/5", 10, k[0], k[1])
                         for h in HEDEFLER:
                             for s in SURELER:
-                                res = _sabit_hedef(df, i, yon, h, s)
+                                res = _sabit_hedef(hi, lo, cl, i, yon, h, s)
                                 if res:
                                     _ekle(gosterge, "SABIT", h, s, res[0], res[1])
                 islenen += 1
+                if islenen % 10 == 0:
+                    print(f"   ...{islenen} hisse islendi, "
+                          f"{toplam_sinyal:,} sinyal", flush=True)
             except Exception as e:
                 print(f"[Hedef Testi] {ticker} hata: {e}", flush=True)
                 atlanan += 1
         del veri
+        # ilerleme mesaji artik grup BITTIKTEN sonra - gercek sayilarla
+        try:
+            send_telegram_message(f"🎯 İlerleme: {gi}/{len(gruplar)} grup bitti "
+                                   f"({islenen} hisse işlendi, "
+                                   f"{toplam_sinyal:,} sinyal)")
+        except Exception:
+            pass
 
     if not topla:
         return None, "Hic kayit uretilemedi."
