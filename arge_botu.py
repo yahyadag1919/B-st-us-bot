@@ -37,7 +37,7 @@ import numpy as np
 import pandas as pd
 import requests
 
-ARGE_KOD_SURUMU = "tavan-tarayici-v11-risk-uyarilari-2026-08-31"
+ARGE_KOD_SURUMU = "tavan-tarayici-v12-vwap-gucu-2026-09-01"
 
 TELEGRAM_TOKEN = os.environ.get("ARGE_TELEGRAM_TOKEN", "")
 TELEGRAM_CHAT_ID = os.environ.get("ARGE_TELEGRAM_CHAT_ID", "")
@@ -436,6 +436,23 @@ def _hisse_durumu(veri, ticker):
         tavana_degdi = int((gun_yuksek - onceki_kapanis) / onceki_kapanis * 100 >= 9.5) \
             if onceki_kapanis > 0 else 0
 
+        # 2026-09-01 EKLENDI: VWAP UZAKLIGI - kapanis, gunun ortalama
+        # islem fiyatindan ne kadar uzakta.
+        # Test (bist_kapanis_baskisi.py, n=89 TAVAN olayi) BEKLENMEDIK
+        # ama guclu bir bulgu verdi (korelasyon -0.43, p=0.000):
+        #   TAVAN yapip VWAP'a YAKIN kapananlar  -> ertesi gun +%5.89
+        #   TAVAN yapip VWAP'tan UZAK kapananlar -> ertesi gun +%1.23
+        #   Fark %4.67 - cok buyuk.
+        # Yorum: VWAP'a yakin kapanan tavan, gun icinde GEC tavana
+        # ulasmis demek - talep hala taze. Erkenden firlayip butun gun
+        # tavanda oturan hisse ise talebini tuketmis oluyor.
+        # NOT: bu SADECE tavan grubunda gecerli; %6-9.5 grubunda
+        # hicbir vekil anlamli cikmadi (p=0.12-0.91).
+        tipik = (bugun_barlar["High"] + bugun_barlar["Low"] + bugun_barlar["Close"]) / 3
+        toplam_hacim = float(bugun_barlar["Volume"].sum())
+        vwap = float((tipik * bugun_barlar["Volume"]).sum() / toplam_hacim) if toplam_hacim > 0 else None
+        vwap_uzaklik = ((son_fiyat - vwap) / vwap * 100) if (vwap and vwap > 0) else None
+
         # son 1 saatte (4 bar) ne kadar hizlandi
         son4 = bugun_barlar["Close"].tail(5)
         hiz = ((son4.iloc[-1] - son4.iloc[0]) / son4.iloc[0] * 100) if len(son4) >= 2 and son4.iloc[0] > 0 else None
@@ -449,6 +466,7 @@ def _hisse_durumu(veri, ticker):
                 "gun_araligi_pct": round(gun_araligi_pct, 2) if gun_araligi_pct is not None else None,
                 "son5gun_getiri_pct": round(son5gun_getiri, 1) if son5gun_getiri is not None else None,
                 "tavana_degdi": tavana_degdi,
+                "vwap_uzaklik": round(vwap_uzaklik, 2) if vwap_uzaklik is not None else None,
                 "son1saat_pct": round(hiz, 2) if hiz is not None else None,
                 "son_bar_saati": bugun_barlar.index[-1].strftime("%H:%M")}
     except Exception:
@@ -568,6 +586,21 @@ def taramayi_calistir(elle=False):
             if d.get("tavan_oldu"):
                 satirlar.append(f"\n🔒 {d['ticker']}: %{d['getiri_pct']} — TAVAN OLDU "
                                 f"(fiyat {d['fiyat']})")
+                # 2026-09-01: VWAP uzakligi SADECE tavan grubunda anlamli
+                # (n=89, korelasyon -0.43, p=0.000). YAKIN kapanan daha
+                # guclu aciyor - talep taze demek.
+                vu = d.get("vwap_uzaklik")
+                if vu is not None:
+                    if vu <= 2.0:
+                        satirlar.append(f"   💪 GÜÇLÜ: VWAP'a yakın kapandı (%{vu}) — "
+                                        f"geçmişte bu grup ertesi gün ort. +%5.89 açtı "
+                                        f"(uzak kapananlar sadece +%1.23)")
+                    elif vu >= 4.0:
+                        satirlar.append(f"   😐 ZAYIF: VWAP'tan uzak kapandı (%{vu}) — "
+                                        f"talep tükenmiş olabilir, geçmişte bu grup "
+                                        f"ertesi gün ort. sadece +%1.23 açtı")
+                    else:
+                        satirlar.append(f"   VWAP uzaklığı: %{vu} (orta)")
             else:
                 satirlar.append(f"\n{isaret} {d['ticker']}: %{d['getiri_pct']} "
                                 f"(tavana %{d['tavana_kalan_pct']} kaldı)"
