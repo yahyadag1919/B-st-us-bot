@@ -1462,3 +1462,149 @@ def maybe_send_daily_summary():
 
 def run_results_update():
     return update_results()
+
+
+# ============================================================
+# 11. ÇALIŞTIRICI — 2026-09-04 EKLENDİ
+# ============================================================
+# Bu dosyada model, değer motoru, sonuç takibi, komutlar - hepsi
+# VARDI ama onları periyodik çağıracak ANA DÖNGÜ yoktu. Eskiden
+# stock_screener_bot.py `import football_bot as fb` deyip çağırıyordu;
+# o dosya kaldırılınca bot çalışamaz hale geldi (fonksiyonlar duruyor
+# ama kimse tetiklemiyor).
+# Aşağısı o eksik parçayı tamamlıyor: kendi başına çalışabilen,
+# Render'da ayakta kalan bir servis.
+
+import traceback
+from flask import Flask
+
+_fb_app = Flask(__name__)
+_FB_PORT = int(os.environ.get("PORT", "10000"))
+FB_SURUM = "football-bot-v2-calistirici-2026-09-04"
+
+
+@_fb_app.route("/health")
+def _fb_health():
+    return "OK (football bot)", 200
+
+
+@_fb_app.route("/")
+def _fb_ana():
+    try:
+        s = compute_stats()
+        gecmis = get_recent_history(15)
+        h = [f"<h2>SPO-QUANT Futbol Botu</h2><p>{FB_SURUM}</p>",
+             f"<p>Toplam sinyal: {s['total']} | Bekleyen: {s['pending']} | "
+             f"Kazanan: {s.get('won', 0)} | Kaybeden: {s.get('lost', 0)}</p>",
+             "<h3>Son sinyaller</h3><pre>"]
+        for r in gecmis:
+            h.append(str(r))
+        h.append("</pre>")
+        return "\n".join(h)
+    except Exception as e:
+        return f"<pre>{e}</pre>"
+
+
+def _fb_dis_ping():
+    """Render ücretsiz katmanı hareketsizlikte uyutuyor. Loopback ping
+    İŞE YARAMIYOR (Render dış trafiğe bakıyor) - bu yüzden dış adrese."""
+    harici = (os.environ.get("RENDER_EXTERNAL_URL", "").rstrip("/")
+              or os.environ.get("HARICI_URL", "").rstrip("/"))
+    if not harici:
+        print("[Futbol ping] UYARI: RENDER_EXTERNAL_URL/HARICI_URL yok - "
+              "servis uyuyabilir!", flush=True)
+    time.sleep(30)
+    while True:
+        try:
+            if harici:
+                requests.get(f"{harici}/health", timeout=20)
+        except Exception:
+            pass
+        time.sleep(600)
+
+
+def _fb_komut_dongusu():
+    """Telegram komutlarını dinler (/stats /rapor /status).
+    Ayrı thread - tarama donsa bile komutlar çalışmaya devam eder."""
+    while True:
+        try:
+            poll_and_respond()
+        except Exception as e:
+            print(f"[Futbol komut] Hata: {e}", flush=True)
+        time.sleep(5)
+
+
+def _fb_ana_dongu():
+    """Model taraması, oran taraması, sonuç güncelleme ve günlük özet.
+    Her biri AYRI try/except - biri hata verse diğerleri etkilenmez."""
+    son_model = son_oran = son_sonuc = 0.0
+    model_ara = FOOTBALL_MODEL_SCAN_INTERVAL_MINUTES * 60
+    oran_ara = FOOTBALL_ODDS_SCAN_INTERVAL_MINUTES * 60
+    sonuc_ara = 3600      # saatte bir sonuc kontrolu
+
+    while True:
+        simdi = time.time()
+        if simdi - son_model >= model_ara:
+            son_model = simdi
+            try:
+                n = run_model_scan()
+                print(f"[Futbol] Model taraması bitti: {n}", flush=True)
+            except Exception as e:
+                print(f"[Futbol] Model tarama hatası: {e}", flush=True)
+                traceback.print_exc()
+        if simdi - son_oran >= oran_ara:
+            son_oran = simdi
+            try:
+                n = run_odds_scan()
+                print(f"[Futbol] Oran taraması bitti: {n}", flush=True)
+            except Exception as e:
+                print(f"[Futbol] Oran tarama hatası: {e}", flush=True)
+                traceback.print_exc()
+        if simdi - son_sonuc >= sonuc_ara:
+            son_sonuc = simdi
+            try:
+                run_results_update()
+            except Exception as e:
+                print(f"[Futbol] Sonuç güncelleme hatası: {e}", flush=True)
+        try:
+            maybe_send_daily_summary()
+        except Exception as e:
+            print(f"[Futbol] Günlük özet hatası: {e}", flush=True)
+        time.sleep(60)
+
+
+if __name__ == "__main__":
+    print(f"[BAŞLANGIÇ] football_bot.py — {FB_SURUM}", flush=True)
+    eksikler = validate_football_config()
+    if eksikler:
+        print(f"[UYARI] Eksik ayar: {eksikler}", flush=True)
+    try:
+        rapor = self_check_football()
+        print(f"[Öz kontrol] {rapor}", flush=True)
+    except Exception as e:
+        rapor = f"öz kontrol hatası: {e}"
+        print(f"[Öz kontrol] {e}", flush=True)
+
+    send_football_message(
+        f"⚽ SPO-QUANT FUTBOL BOTU başlatıldı — {FB_SURUM}\n\n"
+        f"Bu bot, maçları Poisson modeliyle analiz edip bahis oranlarıyla "
+        f"karşılaştırıyor ve matematiksel avantajı (değer) olan maçları "
+        f"bildiriyor.\n\n"
+        f"📊 Takip edilen ligler: {', '.join(TRACKED_COMPETITIONS)} + Süper Lig\n"
+        f"🎯 Değer eşiği: EV ≥ %{EV_THRESHOLD*100:.0f} | "
+        f"Kelly çarpanı: {KELLY_FRACTION}\n"
+        f"⏱️ Model taraması: {FOOTBALL_MODEL_SCAN_INTERVAL_MINUTES} dk | "
+        f"Oran taraması: {FOOTBALL_ODDS_SCAN_INTERVAL_MINUTES} dk\n"
+        f"🔁 Kendi kendine ping: 10 dk (Render uyumasın diye)\n\n"
+        f"Komutlar: /stats  /rapor  /status\n\n"
+        f"{('⚠️ Eksik ayar: ' + str(eksikler)) if eksikler else '✅ Ayarlar tam'}\n"
+        f"Öz kontrol: {rapor}"
+    )
+
+    threading.Thread(target=_fb_ana_dongu, daemon=True).start()
+    print("[BAŞLANGIÇ] Ana tarama döngüsü başlatıldı.", flush=True)
+    threading.Thread(target=_fb_komut_dongusu, daemon=True).start()
+    print("[BAŞLANGIÇ] Komut dinleme thread'i başlatıldı.", flush=True)
+    threading.Thread(target=_fb_dis_ping, daemon=True).start()
+    print("[BAŞLANGIÇ] Dış ping thread'i başlatıldı.", flush=True)
+    _fb_app.run(host="0.0.0.0", port=_FB_PORT)
