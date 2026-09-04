@@ -13,10 +13,10 @@ Daha önce Ar-Ge botunu us_sinyal_botu'na bağlarken kullandığımız
 desenin aynısı - orada işe yaramıştı.
 
 ÇALIŞAN SİSTEMLER:
-  1. ABD SİNYAL BOTU (us_sinyal_botu.py)
-       • 🔔 Swing sinyalleri (8 gösterge, 1-10 gün)
-       • ⚡ Gün-içi sinyalleri (5 gösterge, aynı gün)
-       • 📡 BIST tavan tarayıcısı (arge_botu.py üzerinden, 10:00-18:15 TR)
+  1. 📡 BIST TAVAN TARAYICISI (us_sinyal_botu.py → arge_botu.py)
+       • 10:00-18:15 TR, tavana koşan hisseler
+       • ABD sinyal botu (swing + gün-içi) KAPATILDI - testte
+         göstergeler kör temel çizgiyi geçemedi (bkz. aşağıdaki not)
   2. ABD SOSYAL DUYGU (abd_sosyal_duygu.py)
        • StockTwits long/short etiketleri, seans dilimlerine göre
   3. FUTBOL BOTU (football_bot.py)
@@ -42,7 +42,7 @@ import requests
 from flask import Flask
 
 PORT = int(os.environ.get("PORT", "10000"))
-ANA_SURUM = "ana-v1-hepsi-birlikte-2026-09-04"
+ANA_SURUM = "ana-v2-abd-sinyal-kapatildi-2026-09-04"
 
 app = Flask(__name__)
 _durum = {"us": "yüklenmedi", "sosyal": "yüklenmedi", "futbol": "yüklenmedi"}
@@ -142,7 +142,9 @@ def health():
 def ana_sayfa():
     h = [f"<h2>Ana Başlatıcı — {ANA_SURUM}</h2>",
          "<h3>Sistem durumu</h3><ul>",
-         f"<li>ABD Sinyal Botu: {_durum['us']}</li>",
+         f"<li>ABD Sinyal Botu: ❌ KAPALI (test: göstergeler kör "
+         f"çizgiyi geçemedi)</li>",
+         f"<li>BIST Tavan Tarayıcı: {_durum['us']}</li>",
          f"<li>ABD Sosyal Duygu: {_durum['sosyal']}</li>",
          f"<li>Futbol Botu: {_durum['futbol']}</li>",
          "</ul>"]
@@ -166,24 +168,33 @@ if __name__ == "__main__":
     print(f"[ANA] {ANA_SURUM} başlıyor...", flush=True)
     print(f"[ANA] Modül durumu: {_durum}", flush=True)
 
-    # --- 1) ABD SİNYAL BOTU ---
+    # --- 1) ABD SİNYAL BOTU — KAPATILDI (2026-09-04) ---
+    # Test sonucu (abd_hedef_testi.py, 401 hisse × 2 yıl, 168.871 sinyal):
+    # 8 göstergenin HİÇBİRİ kör temel çizgiyi geçemedi. Kör "koşulsuz al"
+    # %10 hedef/20 gün ile net +%0.963 verirken, en iyi gösterge
+    # (Bollinger) -%0.087 ile GERİDE kaldı; Donchian -%1.43'e kadar
+    # düştü. Ayrıca mevcut kademeli hedef (%1/2/3/5) net -%0.112 ile
+    # test edilen 13 ayarın EN KÖTÜSÜYDÜ - kullanıcının "10 gün bekleyip
+    # %1 almak anlamsız" şikayeti haklıydı.
+    # Günde 100+ bildirim gönderip değer katmıyordu → kapatıldı.
+    #
+    # ⚠️ AMA us_sinyal_botu.py TAMAMEN kapatılmıyor: BIST TAVAN
+    # TARAYICISI onun içinden çağrılıyor ve ORADA GERÇEK BİR BULGU VAR
+    # (tavan kapanışı → ertesi gün +%2.51 net, %90 isabet). Sadece ABD
+    # tarama ve komut thread'leri başlatılmıyor.
     if US is not None:
-        threading.Thread(target=_tek_seferlik("US başlangıç mesajı",
-                                               US.send_startup_message), daemon=True).start()
-        threading.Thread(target=_guvenli("US tarama", US.arka_plan_dongusu), daemon=True).start()
-        threading.Thread(target=_guvenli("US komut", US.poll_telegram_commands), daemon=True).start()
-        print("[ANA] ABD sinyal botu thread'leri başlatıldı.", flush=True)
-        # Ar-Ge / BIST tavan tarayıcısı
+        print("[ANA] ABD sinyal botu KAPALI (test: göstergeler kör çizgiyi "
+              "geçemedi) - sadece BIST tavan tarayıcısı çalışacak.", flush=True)
         try:
-            threading.Thread(target=_tek_seferlik("Ar-Ge başlangıç",
+            threading.Thread(target=_tek_seferlik("BIST tarayıcı başlangıç",
                                                    US.arge_botu_baslangic), daemon=True).start()
-            threading.Thread(target=_guvenli("Ar-Ge komut",
+            threading.Thread(target=_guvenli("BIST tarayıcı komut",
                                               US.arge_botu_komut_dongusu), daemon=True).start()
             threading.Thread(target=_guvenli("BIST tavan tarayıcı",
                                               US.arge_botu_tarama_dongusu), daemon=True).start()
             print("[ANA] BIST tavan tarayıcı thread'leri başlatıldı.", flush=True)
         except AttributeError as e:
-            print(f"[ANA] Ar-Ge thread'leri başlatılamadı: {e}", flush=True)
+            print(f"[ANA] BIST tarayıcı thread'leri başlatılamadı: {e}", flush=True)
 
     # --- 2) ABD SOSYAL DUYGU ---
     if SOSYAL is not None:
