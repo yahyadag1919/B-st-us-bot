@@ -45,7 +45,7 @@ from flask import Flask
 TELEGRAM_TOKEN = os.environ.get("TELEGRAM_TOKEN", "")
 TELEGRAM_CHAT_ID = os.environ.get("TELEGRAM_CHAT_ID", "")
 PORT = int(os.environ.get("PORT", "10000"))
-KOD_SURUMU = "abd-sosyal-duygu-v3-basit-rapor-2026-09-02"
+KOD_SURUMU = "abd-sosyal-duygu-v4-taban-oran-ve-sapma-2026-09-03"
 
 SIK_ARALIK_SN = int(os.environ.get("SIK_ARALIK_SN", "600"))
 SEYREK_ARALIK_SN = int(os.environ.get("SEYREK_ARALIK_SN", "1800"))
@@ -270,15 +270,40 @@ def _bugun_ozet():
         o, a = satir["SEANS_ONCESI_oran"], satir["ASIL_SEANS_oran"]
         satir["degisim"] = round(a - o, 1) if (o is not None and a is not None) else None
         satirlar.append(satir)
-    satirlar.sort(key=lambda x: -x["toplam"])
-    return satirlar
+
+    # 2026-09-03 EKLENDI: TABAN ORAN.
+    # Kullanici hakli bir sey fark etti: neredeyse HER hissede long
+    # daha fazla cikiyordu. Sebep sistemde degil, VERININ KENDISINDE:
+    # StockTwits'te long etiketi baştan daha yaygin (cogu bireysel
+    # yatirimci sadece alim yapiyor, acaga satis yapmiyor; bir hisseyi
+    # takip edip mesaj yazan kisi genelde ona zaten inanan kisi).
+    # Yani %65 long "olumlu" DEGIL, NORMAL. Taban bilinmeden okunursa
+    # her hisse iyi gorunur.
+    # Cozum: gunun GENEL ortalamasini hesaplayip her hisseyi ona gore
+    # kiyasliyoruz. Artik "%85 long" degil, "ortalamanin 17 puan
+    # ustunde" diyebiliyoruz.
+    t_long = sum(x["ASIL_SEANS_long"] + x["SEANS_ONCESI_long"] for x in satirlar)
+    t_short = sum(x["ASIL_SEANS_short"] + x["SEANS_ONCESI_short"] for x in satirlar)
+    taban = round(t_long / (t_long + t_short) * 100, 1) if (t_long + t_short) else None
+
+    for x in satirlar:
+        # hissenin genel orani (seans oncesi + seans birlikte)
+        hl = x["ASIL_SEANS_long"] + x["SEANS_ONCESI_long"]
+        hs = x["ASIL_SEANS_short"] + x["SEANS_ONCESI_short"]
+        x["genel_oran"] = round(hl / (hl + hs) * 100, 1) if (hl + hs) else None
+        x["karar_veren"] = hl + hs
+        x["sapma"] = (round(x["genel_oran"] - taban, 1)
+                      if (x["genel_oran"] is not None and taban is not None) else None)
+    return satirlar, taban
 
 
 def rapor_gonder():
-    """2026-09-02: kullanıcı raporun kafa karıştırıcı olduğunu söyledi.
-    Artık tablo/yüzde yığını yerine, hisse hisse DÜZ TÜRKÇE cümle:
-    kaç kişi LONG dedi, kaç kişi SHORT dedi, seans açılınca ne değişti."""
-    satirlar = _bugun_ozet()
+    """2026-09-03: kullanıcı 'hep long çıkıyor' dedi - haklıydı.
+    Artık her hisse GÜNÜN TABAN ORANINA göre kıyaslanıyor ve sıralama
+    'en çok konuşulan' yerine 'tabandan en çok SAPAN' şeklinde.
+    Böylece hem aşırı long hem aşırı SHORT tarafı öne çıkıyor -
+    short tarafı seyrek olduğu için daha da değerli bir bilgi."""
+    satirlar, taban = _bugun_ozet()
     ny = _ny_simdi()
     tr = ny + timedelta(hours=7)
     if not satirlar:
@@ -289,39 +314,68 @@ def rapor_gonder():
         return
 
     s = [f"💬 İNSANLAR NE DİYOR? — {tr.strftime('%d.%m %H:%M')} TR",
-         f"Şu an: {DILIM_ADI[_dilim_bul(ny)]}\n"]
+         f"Şu an: {DILIM_ADI[_dilim_bul(ny)]}"]
+    if taban is not None:
+        s.append(f"\n📊 BUGÜNÜN GENEL HAVASI: %{taban:.0f} long")
+        s.append(f"   (StockTwits'te long etiketi zaten daha yaygın - "
+                 f"bir hisse ancak BU ORANDAN saparsa dikkat çeker)")
+    s.append("")
 
-    for x in satirlar[:12]:
+    yeterli = [x for x in satirlar if x["karar_veren"] >= 8 and x["sapma"] is not None]
+    if not yeterli:
+        s.append("Henüz yeterli long/short etiketi toplanmadı.")
+        send_telegram_message("\n".join(s))
+        return
+
+    def _yaz(x, isaret):
         ob, os_ = x["SEANS_ONCESI_long"], x["SEANS_ONCESI_short"]
         ab, as_ = x["ASIL_SEANS_long"], x["ASIL_SEANS_short"]
-        s.append(f"━━━ {x['hisse']} ━━━")
+        r = [f"{isaret} {x['hisse']} — ortalamadan {x['sapma']:+.0f} puan "
+             f"(%{x['genel_oran']:.0f} long)"]
         if ob + os_ > 0:
-            s.append(f"🌅 Seans öncesi: {ob} kişi LONG, {os_} kişi SHORT")
+            r.append(f"    🌅 Seans öncesi: {ob} LONG / {os_} SHORT")
         if ab + as_ > 0:
-            s.append(f"📈 Seans içinde: {ab} kişi LONG, {as_} kişi SHORT")
-        # tek cumlelik yorum
+            r.append(f"    📈 Seans içinde: {ab} LONG / {as_} SHORT")
         o, a = x["SEANS_ONCESI_oran"], x["ASIL_SEANS_oran"]
         if o is not None and a is not None:
-            fark = a - o
-            if fark >= 15:
-                s.append(f"   → Seans açılınca fikir İYİLEŞTİ "
-                         f"(%{o:.0f} → %{a:.0f} long)")
-            elif fark <= -15:
-                s.append(f"   → Seans açılınca fikir BOZULDU "
-                         f"(%{o:.0f} → %{a:.0f} long)")
-            else:
-                s.append(f"   → Fikir değişmedi (%{a:.0f} long)")
-        elif a is not None:
-            if a >= 70:
-                s.append(f"   → Çoğunluk LONG tarafında (%{a:.0f})")
-            elif a <= 30:
-                s.append(f"   → Çoğunluk SHORT tarafında (%{a:.0f} long)")
-            else:
-                s.append(f"   → Görüşler bölünmüş (%{a:.0f} long)")
+            f = a - o
+            if f >= 15:
+                r.append(f"    → Seans açılınca İYİLEŞTİ (%{o:.0f} → %{a:.0f})")
+            elif f <= -15:
+                r.append(f"    → Seans açılınca BOZULDU (%{o:.0f} → %{a:.0f})")
+        return r
+
+    # 2026-09-03: iki kusur duzeltildi -
+    # (1) ayni hisse hem yesil hem kirmizi listede cikabiliyordu
+    # (2) yesil listeye sapmasi cok kucuk olanlar (+6, +7) doluyordu -
+    #     bunlar zaten "normal", dikkat cekmeye deger degil
+    ESIK = 12   # tabandan en az bu kadar puan sapmali
+    ustte = [x for x in sorted(yeterli, key=lambda x: -x["sapma"])
+             if x["sapma"] >= ESIK][:7]
+    altta = [x for x in sorted(yeterli, key=lambda x: x["sapma"])
+             if x["sapma"] <= -ESIK][:7]
+    ust_kodlar = {x["hisse"] for x in ustte}
+    altta = [x for x in altta if x["hisse"] not in ust_kodlar]
+
+    if not ustte and not altta:
+        s.append(f"Bugün hiçbir hisse ortalamadan {ESIK} puandan fazla "
+                 f"sapmıyor - herkes ortalama havada.")
+    if ustte:
+        s.append("🟢 ORTALAMADAN ÇOK DAHA OLUMLU:")
+        for x in ustte:
+            s.extend(_yaz(x, "  "))
+        s.append("")
+    if altta:
+        s.append("🔴 ORTALAMADAN ÇOK DAHA OLUMSUZ (short tarafı ağır):")
+        for x in altta:
+            s.extend(_yaz(x, "  "))
         s.append("")
 
-    s.append("ℹ️ Bu rakamlar StockTwits kullanıcılarının kendi "
-             "işaretlediği LONG/SHORT etiketleridir - tahmin değil.\n"
+    s.append("ℹ️ Rakamlar StockTwits kullanıcılarının KENDİ işaretlediği "
+             "LONG/SHORT etiketleri - tahmin değil.\n"
+             "'ortalamadan +X puan' = günün genel havasına göre ne kadar "
+             "sapıyor. Asıl bilgi bu; ham yüzde yanıltıcı çünkü long "
+             "etiketi baştan daha yaygın.\n"
              "⚠️ AL/SAT tavsiyesi DEĞİL. Kalabalığın coşkusu genelde "
              "tepe noktalarında en yüksektir.")
     send_telegram_message("\n".join(s))
@@ -350,7 +404,7 @@ def health():
 
 @app.route("/")
 def ana():
-    satirlar = _bugun_ozet()
+    satirlar, taban = _bugun_ozet()
     ny = _ny_simdi()
     h = ["<h2>ABD Sosyal Duygu — Seans Dilimlerine Göre</h2>",
          f"<p>NY {ny.strftime('%H:%M')} | Şu an: {DILIM_ADI[_dilim_bul(ny)]} | "
