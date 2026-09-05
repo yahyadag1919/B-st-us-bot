@@ -1167,10 +1167,24 @@ def _format_status():
         model_line = f"Son model taraması: {generated_at} ({entry_count} maç analiz edildi)"
 
     s = compute_stats()
-    return (
-        f"💗 [DURUM] Bot çalışıyor.\n{model_line}\n"
-        f"Bekleyen sinyal: {s['pending']} | Toplam sinyal: {s['total']}"
-    )
+    satirlar = [f"💗 [DURUM] Bot çalışıyor.", model_line,
+                f"Bekleyen sinyal: {s['pending']} | Toplam sinyal: {s['total']}"]
+    if _SON_TARAMA:
+        satirlar.append(f"\n🔍 Son tarama teşhisi:")
+        satirlar.append(f"   API'den gelen maç: {_SON_TARAMA['ham_mac']}")
+        satirlar.append(f"   Oynanacak (SCHEDULED/TIMED): {_SON_TARAMA['oynanacak']}")
+        satirlar.append(f"   Modellenen: {_SON_TARAMA['modellenen']}")
+        if _SON_TARAMA["durumlar"]:
+            d = ", ".join(f"{k}={v}" for k, v in _SON_TARAMA["durumlar"].items())
+            satirlar.append(f"   Maç durumları: {d}")
+        if _SON_TARAMA["hatalar"]:
+            satirlar.append(f"   ⚠️ Hatalar:")
+            for h in _SON_TARAMA["hatalar"]:
+                satirlar.append(f"      • {h[:120]}")
+    else:
+        satirlar.append("\n(Model taraması henüz bu oturumda çalışmadı - "
+                        "ilk tarama 10 dk içinde olur)")
+    return "\n".join(satirlar)
 
 
 def poll_and_respond():
@@ -1288,6 +1302,9 @@ def _get_team_history(fixture, team_role):
     return get_team_recent_matches_main(team_id)
 
 
+_SON_TARAMA = None
+
+
 def run_model_scan(days_ahead=3):
     errors = []
     today = datetime.now(timezone.utc).date()
@@ -1295,7 +1312,15 @@ def run_model_scan(days_ahead=3):
     date_to = (today + timedelta(days=days_ahead)).isoformat()
 
     fixtures = _fetch_all_fixtures(date_from, date_to)
-    scheduled_fixtures = [f for f in fixtures if not f.get("_error") and f.get("status") == "SCHEDULED"]
+    # 2026-09-05 KRİTİK DÜZELTME: önceden SADECE status == "SCHEDULED"
+    # olan maçlar alınıyordu. Ama football-data.org'da maçın kesin
+    # başlama saati belli olunca durum "TIMED"a dönüyor - yani YAKIN
+    # tarihli maçların neredeyse hepsi TIMED oluyor ve bu filtre onları
+    # ELİYORDU. Belirti: kullanıcı 5 Eylül'de "bugün Premier Lig maçı
+    # var ama bot 0 maç analiz etti" dedi. Sebep buydu.
+    OYNANACAK = {"SCHEDULED", "TIMED"}
+    scheduled_fixtures = [f for f in fixtures
+                          if not f.get("_error") and f.get("status") in OYNANACAK]
     for f in fixtures:
         if f.get("_error"):
             errors.append(f"{f['competition']}: {f['message']}")
@@ -1315,6 +1340,21 @@ def run_model_scan(days_ahead=3):
         model_entries.append({"fixture": fixture, "quant_result": quant_result})
 
     _save_model_cache(model_entries)
+    # 2026-09-05: son tarama teşhisini sakla - /status'ta gösterilecek.
+    # Kullanıcı "0 maç analiz edildi" görüp neden olduğunu anlayamadı;
+    # ham maç sayısı ve hatalar görünmediği için körlemesine kalmıştık.
+    global _SON_TARAMA
+    _SON_TARAMA = {
+        "ham_mac": len([f for f in fixtures if not f.get("_error")]),
+        "oynanacak": len(scheduled_fixtures),
+        "modellenen": len(model_entries),
+        "durumlar": {},
+        "hatalar": errors[:5],
+    }
+    for f in fixtures:
+        if not f.get("_error"):
+            d = f.get("status", "?")
+            _SON_TARAMA["durumlar"][d] = _SON_TARAMA["durumlar"].get(d, 0) + 1
     return {"fixtures_checked": len(scheduled_fixtures), "model_computed": len(model_entries), "errors": errors}
 
 
@@ -1480,7 +1520,7 @@ from flask import Flask
 
 _fb_app = Flask(__name__)
 _FB_PORT = int(os.environ.get("PORT", "10000"))
-FB_SURUM = "football-bot-v2-calistirici-2026-09-04"
+FB_SURUM = "football-bot-v3-TIMED-durumu-duzeltmesi-2026-09-05"
 
 
 @_fb_app.route("/health")
