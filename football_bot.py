@@ -49,7 +49,25 @@ FOOTBALL_TELEGRAM_CHAT_ID = os.environ.get("FOOTBALL_TELEGRAM_CHAT_ID", "")
 DATA_DIR = os.environ.get("DATA_DIR", ".")
 
 EV_THRESHOLD = float(os.environ.get("FOOTBALL_EV_THRESHOLD", "0.05"))
+# 2026-09-05 EKLENDİ: EV ÜST SINIRI.
+# Kullanıcı EV %315 gibi sinyaller aldı. Profesyonel bahiste %5-10 EV
+# zaten çok iyidir; %50 üstü bir "avantaj" piyasada YOKTUR - böyle bir
+# rakam çıkıyorsa model hatalıdır (sezon başı az veri, eksik kadro
+# bilgisi vb.). Bu sinyaller ELENMELİ, çünkü Kelly onlara bakiyenin
+# %22'sini yatırmayı önerir ve gerçek zarar doğurur.
+EV_UST_SINIR = float(os.environ.get("FOOTBALL_EV_UST_SINIR", "0.50"))
+# Model olasiligi da gercekci sinirlarda kalmali - futbolda tek sonuca
+# %85+ verilemez (en dengesiz maclarda bile %70-75 tavandir).
+OLASILIK_UST_SINIR = float(os.environ.get("FOOTBALL_OLASILIK_UST_SINIR", "0.85"))
 KELLY_FRACTION = float(os.environ.get("FOOTBALL_KELLY_FRACTION", "0.25"))
+# 2026-09-05 EKLENDI: tek maca konabilecek EN FAZLA bakiye orani.
+# Kelly formulu olasilik yanlissa yikici olabiliyor; profesyonel
+# bahiste tek maca %2-5'ten fazlasi konmaz.
+KELLY_MAX_STAKE = float(os.environ.get("FOOTBALL_KELLY_MAX_STAKE", "0.03"))
+# Ust EV siniri: bunun ustundeki "deger" gercek degil, MODEL HATASIDIR.
+# Profesyonel bahiste %5-10 EV zaten cok iyidir; %100+ EV bulduysan
+# model bozuktur. Bu sinyaller sessizce eleniyor.
+EV_UST_SINIR = float(os.environ.get("FOOTBALL_EV_UST_SINIR", "0.35"))
 
 TRACKED_COMPETITIONS = [
     "PL", "PD", "SA", "BL1", "FL1", "CL", "DED", "PPL", "ELC",
@@ -595,16 +613,59 @@ def compute_team_scoring_stats(matches, team_id):
     }
 
 
+def _yumusat(takim_ort, lig_ort, mac_sayisi, agirlik=6.0):
+    """2026-09-05 EKLENDİ — KRİTİK DÜZELTME (küçülterek yumuşatma).
+
+    SORUN: Önceden takımın HAM ortalaması doğrudan kullanılıyordu.
+    Sezon başında bir takım 3 maçta 8 gol attıysa model "maç başına
+    2.67 gol atar" sanıyor ve rakibini ezeceğini hesaplıyordu.
+    Sonuç: Arsenal-Chelsea'de %95.9 ev sahibi, EV %315 gibi GERÇEK
+    DIŞI rakamlar. Gerçek futbolda hiçbir maça tek sonuç için %95
+    verilemez (en dengesizde bile %70-75 tavandır) ve profesyonel
+    bahiste %5-10 EV zaten çok iyidir.
+
+    ÇÖZÜM: İstatistikte standart olan "ortalamaya çekme" yöntemi.
+    Az maç varsa tahmin LİG ORTALAMASINA yakın kalır; maç sayısı
+    arttıkça takımın kendi verisine ağırlık verilir.
+
+        sonuç = (takım_ort × maç_sayısı + lig_ort × ağırlık)
+                / (maç_sayısı + ağırlık)
+
+    ağırlık=6 demek: takımın kendi verisinin lig ortalamasına eşit
+    ağırlık kazanması için 6 maç gerekir. 3 maçta model hâlâ büyük
+    ölçüde lig ortalamasına dayanır (doğru davranış), 20 maçta
+    neredeyse tamamen takımın kendi verisine döner.
+    """
+    if not mac_sayisi or mac_sayisi <= 0:
+        return lig_ort
+    return (takim_ort * mac_sayisi + lig_ort * agirlik) / (mac_sayisi + agirlik)
+
+
 def compute_expected_goals(home_stats, away_stats,
                             league_avg_home_goals=DEFAULT_LEAGUE_AVG_HOME_GOALS,
                             league_avg_away_goals=DEFAULT_LEAGUE_AVG_AWAY_GOALS):
-    home_attack = home_stats["goals_scored_avg"] / league_avg_home_goals
-    home_defense = home_stats["goals_conceded_avg"] / league_avg_away_goals
-    away_attack = away_stats["goals_scored_avg"] / league_avg_away_goals
-    away_defense = away_stats["goals_conceded_avg"] / league_avg_home_goals
+    hn = home_stats.get("matches_count") or 0
+    an = away_stats.get("matches_count") or 0
+
+    # ham ortalamalar YERINE yumusatilmis ortalamalar
+    h_attilan = _yumusat(home_stats["goals_scored_avg"], league_avg_home_goals, hn)
+    h_yenilen = _yumusat(home_stats["goals_conceded_avg"], league_avg_away_goals, hn)
+    a_attilan = _yumusat(away_stats["goals_scored_avg"], league_avg_away_goals, an)
+    a_yenilen = _yumusat(away_stats["goals_conceded_avg"], league_avg_home_goals, an)
+
+    home_attack = h_attilan / league_avg_home_goals
+    home_defense = h_yenilen / league_avg_away_goals
+    away_attack = a_attilan / league_avg_away_goals
+    away_defense = a_yenilen / league_avg_home_goals
 
     lambda_home = home_attack * away_defense * league_avg_home_goals
     lambda_away = away_attack * home_defense * league_avg_away_goals
+
+    # Ek guvenlik: beklenen gol sayisi gercekci sinirlarda kalsin.
+    # Futbolda bir takimin beklenen golu 0.2'nin altina ya da 4'un
+    # ustune pratikte cikmaz; cikiyorsa veri/model hatasidir.
+    lambda_home = max(0.2, min(4.0, lambda_home))
+    lambda_away = max(0.2, min(4.0, lambda_away))
 
     confidence = "low_sample" if (home_stats.get("low_sample") or away_stats.get("low_sample")) else "normal"
     return lambda_home, lambda_away, confidence
@@ -733,7 +794,14 @@ def compute_kelly_fraction(probability, decimal_odds, fractional_multiplier=None
     if raw_kelly <= 0:
         return 0.0
     multiplier = fractional_multiplier if fractional_multiplier is not None else KELLY_FRACTION
-    return raw_kelly * multiplier
+    kelly = raw_kelly * multiplier
+    # 2026-09-05 EKLENDI: KELLY UST SINIRI.
+    # Kullanicinin aldigi bildirimlerde "bakiyenin %22.67'si" gibi
+    # oneriler vardi. Kelly formulu matematiksel olarak dogru ama
+    # OLASILIK YANLISSA yikici olur - ve model olasiliklari her zaman
+    # bir tahmindir. Profesyonel bahiste tek maca bakiyenin %2-5'inden
+    # fazlasi konmaz. Bu sinir, model hata yaptiginda hasari kisitliyor.
+    return min(kelly, KELLY_MAX_STAKE)
 
 
 def _best_price_for_outcome(bookmakers, outcome_name):
@@ -771,6 +839,16 @@ def find_value_bets(fixture, quant_result, odds_event, ev_threshold=None):
         probability = probs[prob_key]
         ev = compute_ev(probability, price)
         if ev < threshold:
+            continue
+        # 2026-09-05: UST SINIR. Kullanicinin aldigi bildirimlerde
+        # EV %315 gibi degerler vardi - bahis piyasasinda boyle bir
+        # sey YOKTUR. Bu kadar yuksek EV, degerli bahis degil MODEL
+        # HATASI demektir (genelde az orneklemden gelen uc olasilik).
+        # Sessizce eleniyor ki kullanici bunlara para koymasin.
+        if ev > EV_UST_SINIR:
+            print(f"football_bot: EV %{ev*100:.0f} gerçek dışı, elendi "
+                  f"({fixture.get('home_team')} vs {fixture.get('away_team')}, "
+                  f"model %{probability*100:.1f})", flush=True)
             continue
 
         kelly = compute_kelly_fraction(probability, price)
@@ -879,16 +957,25 @@ def _previous_ev(signal):
     return None
 
 
+def _secim_metni(signal):
+    """2026-09-05: kullanıcı 'Ev Sahibi Kazanır' ifadesinin kafa
+    karıştırdığını söyledi - hangi takım olduğu belli olmuyordu.
+    Artık doğrudan TAKIM ADI yazılıyor."""
+    o = signal.get("outcome")
+    if o == "home_win":
+        return f"🏠 {signal['home_team']} KAZANIR"
+    if o == "away_win":
+        return f"✈️ {signal['away_team']} KAZANIR"
+    if o == "draw":
+        return "🤝 BERABERLİK"
+    return signal.get("outcome_label", o)
+
+
 def format_value_bet_message(signal):
-    outcome_labels = {
-        "home_win": "Ev Sahibi Kazanır (1)",
-        "draw": "Beraberlik (X)",
-        "away_win": "Deplasman Kazanır (2)",
-    }
     warning = "\n⚠️ Az örneklem — düşük güven, dikkatli değerlendir" if signal.get("low_sample_warning") else ""
     return (
         f"⚽ [VALUE BET] {signal['home_team']} - {signal['away_team']} ({signal['competition']})\n"
-        f"Seçim: {outcome_labels.get(signal['outcome'], signal['outcome_label'])}\n"
+        f"Seçim: {_secim_metni(signal)}\n"
         f"Model olasılığı: %{signal['model_probability']*100:.1f} | "
         f"Oran: {signal['odds']} ({signal['bookmaker']})\n"
         f"EV: %{signal['ev']*100:.1f} | Önerilen Kelly bahis: bakiyenin %{signal['kelly_fraction']*100:.2f}'i"
@@ -908,22 +995,75 @@ def send_football_message(text):
         print(f"football_bot: Telegram gönderim hatası ({e})")
 
 
+def _mac_tarihi(signal):
+    """Maçın oynanacağı tarihi TR saatine göre döner."""
+    ham = signal.get("utc_date") or signal.get("commence_time") or ""
+    try:
+        z = datetime.strptime(ham[:19], "%Y-%m-%dT%H:%M:%S").replace(tzinfo=timezone.utc)
+        return (z + timedelta(hours=3)).date(), (z + timedelta(hours=3))
+    except Exception:
+        return None, None
+
+
+_GUN_ADI = ["Pazartesi", "Salı", "Çarşamba", "Perşembe", "Cuma",
+            "Cumartesi", "Pazar"]
+
+
 def notify_value_bets(signals):
+    """2026-09-05 DEĞİŞTİ: önceden her sinyal AYRI mesaj olarak
+    gidiyordu - kullanıcı 'çok dağınık, tek listede gelsin, başında
+    tarih yazsın' dedi. Artık maçlar OYNANACAĞI GÜNE göre gruplanıp
+    her gün için TEK mesaj gönderiliyor."""
+    gonderilecek = [s for s in signals if should_notify(s)]
+    if not gonderilecek:
+        return []
+
+    gruplar = {}
+    for s in gonderilecek:
+        tarih, _ = _mac_tarihi(s)
+        gruplar.setdefault(tarih, []).append(s)
+
     sent_signals = []
-    for signal in signals:
-        if should_notify(signal):
-            prev = _previous_ev(signal)
-            msg = format_value_bet_message(signal)
+    for tarih in sorted(gruplar.keys(), key=lambda d: (d is None, d)):
+        grup = gruplar[tarih]
+        # maçları saatine göre sırala
+        grup.sort(key=lambda s: (_mac_tarihi(s)[1] or datetime.max.replace(tzinfo=timezone.utc)))
+
+        if tarih is None:
+            baslik = "📅 TARİHİ BELİRSİZ MAÇLAR"
+        else:
+            bugun = (datetime.now(timezone.utc) + timedelta(hours=3)).date()
+            fark = (tarih - bugun).days
+            etiket = ("BUGÜN" if fark == 0 else "YARIN" if fark == 1
+                      else f"{fark} GÜN SONRA")
+            baslik = (f"📅 {tarih.strftime('%d.%m.%Y')} "
+                      f"{_GUN_ADI[tarih.weekday()]} — {etiket}")
+
+        satirlar = [f"⚽ DEĞER BAHİSLERİ", baslik,
+                    f"{len(grup)} maç\n"]
+        for s in grup:
+            _, saat = _mac_tarihi(s)
+            saat_str = saat.strftime("%H:%M") if saat else "??:??"
+            prev = _previous_ev(s)
+            satirlar.append(f"━━━━━━━━━━━━━━━━━━")
+            satirlar.append(f"🕐 {saat_str}  |  {s['competition']}")
+            satirlar.append(f"{s['home_team']} - {s['away_team']}")
+            satirlar.append(f"➡️ {_secim_metni(s)}")
+            satirlar.append(f"   Model: %{s['model_probability']*100:.1f}  |  "
+                            f"Oran: {s['odds']} ({s['bookmaker']})")
+            satirlar.append(f"   Avantaj (EV): %{s['ev']*100:.1f}  |  "
+                            f"Kelly: bakiyenin %{s['kelly_fraction']*100:.2f}'i")
+            if s.get("low_sample_warning"):
+                satirlar.append(f"   ⚠️ Az örneklem — düşük güven")
             if prev is not None:
-                # Tekrar bildirimi ancak EV belirgin iyilestiginde olur -
-                # kullanici bunun yeni bir sinyal degil, ayni bahsin
-                # iyilesmis hali oldugunu gormeli.
-                msg += (f"\n\n🔁 Bu bahis daha önce bildirilmişti "
-                        f"(EV %{prev * 100:.1f} → %{signal['ev'] * 100:.1f}). "
-                        f"Oran lehine döndüğü için tekrar hatırlatılıyor.")
-            send_football_message(msg)
-            mark_notified(signal)
-            sent_signals.append(signal)
+                satirlar.append(f"   🔁 Daha önce bildirildi "
+                                f"(EV %{prev*100:.1f} → %{s['ev']*100:.1f})")
+            mark_notified(s)
+            sent_signals.append(s)
+        satirlar.append("━━━━━━━━━━━━━━━━━━")
+        satirlar.append("\nℹ️ Kelly önerisi matematiksel üst sınırdır; "
+                        "pratikte çok daha küçük tutmak güvenlidir.")
+        send_football_message("\n".join(satirlar))
     return sent_signals
 
 
@@ -1382,6 +1522,7 @@ def run_odds_scan():
             errors.append(f"odds({comp}): {e}")
             odds_cache[comp] = []
 
+    elenen_ev, elenen_olasilik = [], []
     for entry in model_entries:
         fixture = entry["fixture"]
         quant_result = entry["quant_result"]
@@ -1397,7 +1538,28 @@ def run_odds_scan():
         # sadece esigi gecenler kullanilir - davranis degismiyor.
         candidates = find_value_bets(fixture, quant_result, matched_event, ev_threshold=-99)
         all_candidates.extend(candidates)
-        all_signals.extend([c for c in candidates if c.get("ev", -99) >= EV_THRESHOLD])
+        # 2026-09-05: AKIL SAGLIGI FILTRESI. Sadece alt esik degil, UST
+        # sinir da var - EV %315 veya olasilik %95.9 gibi degerler model
+        # hatasidir, gercek firsat degil. Bunlar elenmezse Kelly bakiyenin
+        # %22'sini yatirmayi onerir ve gercek zarar dogar.
+        for c in candidates:
+            ev = c.get("ev", -99)
+            olasilik = c.get("model_probability", 0)
+            if ev < EV_THRESHOLD:
+                continue
+            if ev > EV_UST_SINIR:
+                elenen_ev.append((c, ev))
+                continue
+            if olasilik > OLASILIK_UST_SINIR:
+                elenen_olasilik.append((c, olasilik))
+                continue
+            all_signals.append(c)
+
+    if elenen_ev or elenen_olasilik:
+        print(f"[Futbol] Akıl sağlığı filtresi: {len(elenen_ev)} sinyal EV "
+              f"çok yüksek (>%{EV_UST_SINIR*100:.0f}), {len(elenen_olasilik)} "
+              f"sinyal olasılık çok yüksek (>%{OLASILIK_UST_SINIR*100:.0f}) "
+              f"olduğu için ELENDİ - model hatası olduğu için.", flush=True)
 
     sent_signals = notify_value_bets(all_signals)
     for signal in sent_signals:
@@ -1520,7 +1682,7 @@ from flask import Flask
 
 _fb_app = Flask(__name__)
 _FB_PORT = int(os.environ.get("PORT", "10000"))
-FB_SURUM = "football-bot-v3-TIMED-durumu-duzeltmesi-2026-09-05"
+FB_SURUM = "football-bot-v4-yumusatma-gunluk-liste-takim-adi-2026-09-05"
 
 
 @_fb_app.route("/health")
