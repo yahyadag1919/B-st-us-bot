@@ -181,7 +181,12 @@ def _gemini_gorsel_oku(image_bytes: bytes, prompt: str) -> dict:
         "generationConfig": {"response_mime_type": "application/json"},
     }
     resp = requests.post(GEMINI_URL, json=body, timeout=45)
-    resp.raise_for_status()
+    if resp.status_code != 200:
+        # Google'ın gönderdiği GERÇEK hata açıklamasını (sadece durum kodu
+        # değil) göster - "404 Not Found" gibi genel başlıklar yerine asıl
+        # sebebi (API_KEY_INVALID, model devre dışı, kota aşımı vb.) net
+        # olarak Telegram'a düşürüyor.
+        raise RuntimeError(f"Gemini API {resp.status_code}: {resp.text[:600]}")
     data = resp.json()
     metin = data["candidates"][0]["content"]["parts"][0]["text"]
     # Bazen model kod bloğu (```json ... ```) ile sarıyor - temizle.
