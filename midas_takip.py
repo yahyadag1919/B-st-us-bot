@@ -60,12 +60,12 @@ GEMINI_API_KEY = os.environ.get("GEMINI_API_KEY", "")
 DATA_DIR = os.environ.get("DATA_DIR", ".")
 
 # NOT: Model adı Gemini tarafında değişebilir/API anahtarına göre
-# kullanılabilirlik farklı olabilir. "gemini-2.5-flash" 404 verdi
-# (2026-09-10), "gemini-2.0-flash" ile geçici olarak değiştirildi.
+# kullanılabilirlik farklı olabilir. İlk denemede "gemini-2.5-flash"
+# 404 vermişti ama sebep model adı değil, o anki geçersiz/iptal
+# edilmiş API anahtarıymış (2026-09-10 doğrulandı: yeni anahtarla
+# modeller listesinde gemini-2.5-flash generateContent destekliyor).
 # Sorun sürerse: https://generativelanguage.googleapis.com/v1beta/models?key=ANAHTAR
-# adresinden kullanılabilir modelleri kontrol et ve MIDAS_GEMINI_MODEL
-# ortam değişkeniyle geçersiz kıl.
-GEMINI_MODEL = os.environ.get("MIDAS_GEMINI_MODEL", "gemini-2.0-flash")
+GEMINI_MODEL = os.environ.get("MIDAS_GEMINI_MODEL", "gemini-2.5-flash")
 GEMINI_URL = (f"https://generativelanguage.googleapis.com/v1beta/models/"
               f"{GEMINI_MODEL}:generateContent?key={GEMINI_API_KEY}")
 
