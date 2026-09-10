@@ -59,10 +59,13 @@ TELEGRAM_CHAT_ID = os.environ.get("ARGE_TELEGRAM_CHAT_ID", "")
 GEMINI_API_KEY = os.environ.get("GEMINI_API_KEY", "")
 DATA_DIR = os.environ.get("DATA_DIR", ".")
 
-# NOT: Model adı Gemini tarafında değişebilir. Bu yazıldığı tarihte
-# (2026-09) "gemini-2.5-flash" hızlı + görsel destekli + ucuz. Sorun
-# çıkarsa Google AI Studio'dan güncel model adını kontrol et.
-GEMINI_MODEL = os.environ.get("GEMINI_MODEL", "gemini-2.5-flash")
+# NOT: Model adı Gemini tarafında değişebilir/API anahtarına göre
+# kullanılabilirlik farklı olabilir. "gemini-2.5-flash" 404 verdi
+# (2026-09-10), "gemini-2.0-flash" ile geçici olarak değiştirildi.
+# Sorun sürerse: https://generativelanguage.googleapis.com/v1beta/models?key=ANAHTAR
+# adresinden kullanılabilir modelleri kontrol et ve MIDAS_GEMINI_MODEL
+# ortam değişkeniyle geçersiz kıl.
+GEMINI_MODEL = os.environ.get("MIDAS_GEMINI_MODEL", "gemini-2.0-flash")
 GEMINI_URL = (f"https://generativelanguage.googleapis.com/v1beta/models/"
               f"{GEMINI_MODEL}:generateContent?key={GEMINI_API_KEY}")
 
