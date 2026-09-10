@@ -59,13 +59,12 @@ TELEGRAM_CHAT_ID = os.environ.get("ARGE_TELEGRAM_CHAT_ID", "")
 GEMINI_API_KEY = os.environ.get("GEMINI_API_KEY", "")
 DATA_DIR = os.environ.get("DATA_DIR", ".")
 
-# NOT: Model adı Gemini tarafında değişebilir/API anahtarına göre
-# kullanılabilirlik farklı olabilir. İlk denemede "gemini-2.5-flash"
-# 404 vermişti ama sebep model adı değil, o anki geçersiz/iptal
-# edilmiş API anahtarıymış (2026-09-10 doğrulandı: yeni anahtarla
-# modeller listesinde gemini-2.5-flash generateContent destekliyor).
-# Sorun sürerse: https://generativelanguage.googleapis.com/v1beta/models?key=ANAHTAR
-GEMINI_MODEL = os.environ.get("MIDAS_GEMINI_MODEL", "gemini-2.5-flash")
+# NOT: Google, "gemini-2.5-flash" modelini yeni kullanıcılar için
+# kapattı (2026-09-10, bot hatasından öğrenildi - Google'ın kendi mesajı:
+# "This model models/gemini-2.5-flash is no longer available to new
+# users. Please update your code to use models/gemini-3.6-flash").
+# Sorun tekrar ederse: https://generativelanguage.googleapis.com/v1beta/models?key=ANAHTAR
+GEMINI_MODEL = os.environ.get("MIDAS_GEMINI_MODEL", "gemini-3.6-flash")
 GEMINI_URL = (f"https://generativelanguage.googleapis.com/v1beta/models/"
               f"{GEMINI_MODEL}:generateContent?key={GEMINI_API_KEY}")
 
