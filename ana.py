@@ -45,7 +45,8 @@ PORT = int(os.environ.get("PORT", "10000"))
 ANA_SURUM = "ana-v2-abd-sinyal-kapatildi-2026-09-04"
 
 app = Flask(__name__)
-_durum = {"us": "yüklenmedi", "sosyal": "yüklenmedi", "futbol": "yüklenmedi"}
+_durum = {"us": "yüklenmedi", "sosyal": "yüklenmedi", "futbol": "yüklenmedi",
+          "midas": "yüklenmedi"}
 
 
 # =====================================================================
@@ -77,6 +78,27 @@ except Exception as e:
     _durum["futbol"] = f"❌ {e}"
     print(f"[ANA] football_bot yüklenemedi: {e}", flush=True)
     traceback.print_exc()
+
+try:
+    import midas_takip as MIDAS
+    _durum["midas"] = "✅ yüklendi"
+except Exception as e:
+    MIDAS = None
+    _durum["midas"] = f"❌ {e}"
+    print(f"[ANA] midas_takip yüklenemedi: {e}", flush=True)
+    traceback.print_exc()
+
+# Midas'ı arge_botu'nun MEVCUT Telegram getUpdates döngüsüne bağlıyoruz -
+# 2026-09-10: aynı token'dan (ARGE_TELEGRAM_TOKEN) ikinci bir eşzamanlı
+# getUpdates açmak Telegram'da "409 Conflict" hatası verir ve tavan
+# tarayıcının /tara, /durum komutlarını kaçırmasına yol açabilirdi.
+if MIDAS is not None and US is not None:
+    try:
+        US.arge_botu.ek_update_isleyici_ekle(MIDAS.midas_update_isle)
+        print("[ANA] Midas, arge_botu'nun Telegram döngüsüne bağlandı.", flush=True)
+    except Exception as e:
+        print(f"[ANA] Midas arge_botu'na bağlanamadı: {e}", flush=True)
+        traceback.print_exc()
 
 
 def _guvenli(ad, fonk):
@@ -147,6 +169,7 @@ def ana_sayfa():
          f"<li>BIST Tavan Tarayıcı: {_durum['us']}</li>",
          f"<li>ABD Sosyal Duygu: {_durum['sosyal']}</li>",
          f"<li>Futbol Botu: {_durum['futbol']}</li>",
+         f"<li>Midas Takip: {_durum['midas']}</li>",
          "</ul>"]
     if SOSYAL is not None:
         try:
@@ -218,6 +241,15 @@ if __name__ == "__main__":
         except Exception as e:
             print(f"[ANA] Futbol başlangıç mesajı gönderilemedi: {e}", flush=True)
         print("[ANA] Futbol botu thread'leri başlatıldı.", flush=True)
+
+    # --- 4) MIDAS PRO MANUEL TAKİP ---
+    # Ayrı bir komut/fotoğraf döngüsü YOK - update'ler arge_botu'nun
+    # Telegram döngüsünden geliyor (yukarıda kaydedildi). Burada sadece
+    # tek seferlik başlangıç mesajı gönderiliyor.
+    if MIDAS is not None:
+        threading.Thread(target=_tek_seferlik("Midas başlangıç",
+                                               MIDAS.midas_baslangic), daemon=True).start()
+        print("[ANA] Midas başlangıç mesajı thread'i başlatıldı.", flush=True)
 
     # --- TEK DIŞ PING (hepsi için) ---
     threading.Thread(target=dis_ping, daemon=True).start()

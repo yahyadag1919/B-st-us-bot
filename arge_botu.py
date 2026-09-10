@@ -723,6 +723,24 @@ def send_startup_message():
     )
 
 
+# =============================================================================
+# EK UPDATE İŞLEYİCİLERİ (2026-09-10) — dış modüllerin (örn. midas_takip.py)
+# aynı Telegram akışına KENDİ getUpdates döngüsünü açmadan erişmesi için.
+# GEREKÇE: Aynı bot token'ından birden fazla eşzamanlı getUpdates isteği
+# Telegram'da "409 Conflict" hatası verir - bu da bu tavan tarayıcının
+# /tara, /durum gibi komutları kaçırmasına yol açabilir. Bu yüzden TEK
+# döngü (aşağıdaki poll_arge_commands) tüm update'leri çekip isteyen
+# herkese dağıtıyor. Mevcut tarama/komut mantığı HİÇ değişmiyor.
+_ek_update_isleyiciler = []
+
+
+def ek_update_isleyici_ekle(fn):
+    """Her Telegram update'inde (mesaj veya fotoğraf, filtre uygulanmadan
+    ÖNCE) çağrılacak ek bir fonksiyon kaydeder. fn(update_dict) imzasında
+    olmalı. fn hata verirse sadece loglanır, tarayıcı botu ETKİLENMEZ."""
+    _ek_update_isleyiciler.append(fn)
+
+
 def poll_arge_commands():
     """Ana botun komut dongusu bunu cagirir."""
     global _son_update_id, _poll_sayac
@@ -753,6 +771,13 @@ def poll_arge_commands():
 
     for u in data.get("result", []):
         _son_update_id = u["update_id"]
+
+        for _isleyici in _ek_update_isleyiciler:
+            try:
+                _isleyici(u)
+            except Exception as e:
+                print(f"[TARAYICI] Ek update işleyici hatası: {e}", flush=True)
+
         msg = u.get("message", {})
         chat_id = str(msg.get("chat", {}).get("id", ""))
         text = (msg.get("text") or "").strip()
