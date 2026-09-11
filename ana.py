@@ -46,7 +46,7 @@ ANA_SURUM = "ana-v2-abd-sinyal-kapatildi-2026-09-04"
 
 app = Flask(__name__)
 _durum = {"us": "yüklenmedi", "sosyal": "yüklenmedi", "futbol": "yüklenmedi",
-          "midas": "yüklenmedi"}
+          "midas": "yüklenmedi", "akilli_para": "yüklenmedi"}
 
 
 # =====================================================================
@@ -99,6 +99,15 @@ if MIDAS is not None and US is not None:
     except Exception as e:
         print(f"[ANA] Midas arge_botu'na bağlanamadı: {e}", flush=True)
         traceback.print_exc()
+
+try:
+    import abd_akilli_para as AKILLI_PARA
+    _durum["akilli_para"] = "✅ yüklendi"
+except Exception as e:
+    AKILLI_PARA = None
+    _durum["akilli_para"] = f"❌ {e}"
+    print(f"[ANA] abd_akilli_para yüklenemedi: {e}", flush=True)
+    traceback.print_exc()
 
 
 def _guvenli(ad, fonk):
@@ -170,6 +179,7 @@ def ana_sayfa():
          f"<li>ABD Sosyal Duygu: {_durum['sosyal']}</li>",
          f"<li>Futbol Botu: {_durum['futbol']}</li>",
          f"<li>Midas Takip: {_durum['midas']}</li>",
+         f"<li>ABD Akıllı Para: {_durum['akilli_para']}</li>",
          "</ul>"]
     if SOSYAL is not None:
         try:
@@ -250,6 +260,16 @@ if __name__ == "__main__":
         threading.Thread(target=_tek_seferlik("Midas başlangıç",
                                                MIDAS.midas_baslangic), daemon=True).start()
         print("[ANA] Midas başlangıç mesajı thread'i başlatıldı.", flush=True)
+
+    # --- 5) ABD AKILLI PARA (SEC Form 4 + Finnhub + Alpaca) ---
+    if AKILLI_PARA is not None:
+        threading.Thread(target=_tek_seferlik("Akıllı Para başlangıç",
+                                               AKILLI_PARA.baslangic), daemon=True).start()
+        threading.Thread(target=_guvenli("Akıllı Para Form4",
+                                          AKILLI_PARA._form4_kontrol_dongusu), daemon=True).start()
+        threading.Thread(target=_guvenli("Akıllı Para Haber",
+                                          AKILLI_PARA._haber_kontrol_dongusu), daemon=True).start()
+        print("[ANA] ABD Akıllı Para thread'leri başlatıldı.", flush=True)
 
     # --- TEK DIŞ PING (hepsi için) ---
     threading.Thread(target=dis_ping, daemon=True).start()
