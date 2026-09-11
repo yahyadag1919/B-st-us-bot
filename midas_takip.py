@@ -41,6 +41,7 @@ import os
 import re
 import csv
 import json
+import time
 import base64
 import threading
 from datetime import datetime, timedelta
@@ -128,8 +129,10 @@ def _telegram_dosya_indir(file_id: str) -> bytes:
 # GEMINI VISION — GÖRÜNTÜDEN VERİ ÇIKARMA
 # =============================================================================
 PROMPT_DERINLIK = """Bu bir Midas Pro uygulamasından BIST hissesi emir
-defteri (derinlik) ekran görüntüsü. Aşağıdaki alanları SADECE JSON olarak
-çıkar, başka hiçbir metin ekleme:
+defteri (derinlik) ekran görüntüsü. Görüntüyü DİKKATLİCE incele; her
+sayıyı okuduktan sonra kendi kendine kontrol et, emin olamadığın bir
+rakam olursa görüntünün o bölgesine tekrar bak ve en doğru değeri yaz.
+Aşağıdaki alanları SADECE JSON olarak çıkar, başka hiçbir metin ekleme:
 
 {
   "piyasa_fiyati": <sayı>,
@@ -147,8 +150,11 @@ Sayılardaki nokta/virgül Türkçe format olabilir (286,50 = 286.50,
 okuyamıyorsan null koy, alanı atlama."""
 
 PROMPT_TAKAS = """Bu bir Midas Pro uygulamasından BIST hissesi Takas
-Analizi (aracı kurum dağılımı) ekran görüntüsü. Aşağıdaki alanları
-SADECE JSON olarak çıkar, başka hiçbir metin ekleme:
+Analizi (aracı kurum dağılımı) ekran görüntüsü. Görüntüyü DİKKATLİCE
+incele; her sayıyı okuduktan sonra kendi kendine kontrol et, emin
+olamadığın bir rakam olursa görüntünün o bölgesine tekrar bak ve en
+doğru değeri yaz. Aşağıdaki alanları SADECE JSON olarak çıkar, başka
+hiçbir metin ekleme:
 
 {
   "ilk5_toplam_pct": <sayı>,
@@ -166,7 +172,11 @@ Sayılardaki nokta/virgül Türkçe format olabilir - normal ondalık sayıya
 
 def _gemini_gorsel_oku(image_bytes: bytes, prompt: str) -> dict:
     """Görüntüyü Gemini Vision'a gönderip yapılandırılmış JSON döner.
-    Hata durumunda None döner, çağıran taraf kullanıcıya bildirmeli."""
+    Sadece GERÇEKTEN geçici olan 503 (sunucu yoğunluğu) hatasında, az
+    sayıda (2) ve kısa aralıkla tekrar dener. 429 (kota/limit dolu)
+    hatasında TEKRAR DENEMEZ - kota tükenmişse denemek işe yaramaz,
+    sadece kullanıcıya net mesaj verir. Diğer kalıcı hatalarda (404,
+    400 vb.) da hemen durur."""
     if not GEMINI_API_KEY:
         raise RuntimeError("GEMINI_API_KEY tanımlı değil.")
     b64 = base64.b64encode(image_bytes).decode("utf-8")
@@ -179,18 +189,38 @@ def _gemini_gorsel_oku(image_bytes: bytes, prompt: str) -> dict:
         }],
         "generationConfig": {"response_mime_type": "application/json"},
     }
-    resp = requests.post(GEMINI_URL, json=body, timeout=45)
-    if resp.status_code != 200:
-        # Google'ın gönderdiği GERÇEK hata açıklamasını (sadece durum kodu
-        # değil) göster - "404 Not Found" gibi genel başlıklar yerine asıl
-        # sebebi (API_KEY_INVALID, model devre dışı, kota aşımı vb.) net
-        # olarak Telegram'a düşürüyor.
-        raise RuntimeError(f"Gemini API {resp.status_code}: {resp.text[:600]}")
-    data = resp.json()
-    metin = data["candidates"][0]["content"]["parts"][0]["text"]
-    # Bazen model kod bloğu (```json ... ```) ile sarıyor - temizle.
-    metin = re.sub(r"^```json\s*|\s*```$", "", metin.strip())
-    return json.loads(metin)
+
+    GECICI_HATA_KODLARI = {503}  # sadece sunucu-taraflı geçici yoğunluk
+    MAX_DENEME = 2               # kota tüketimini sınırlı tutmak için az
+    BEKLEME_SN = 6
+
+    son_hata = None
+    for deneme in range(1, MAX_DENEME + 1):
+        resp = requests.post(GEMINI_URL, json=body, timeout=45)
+        if resp.status_code == 200:
+            data = resp.json()
+            metin = data["candidates"][0]["content"]["parts"][0]["text"]
+            # Bazen model kod bloğu (```json ... ```) ile sarıyor - temizle.
+            metin = re.sub(r"^```json\s*|\s*```$", "", metin.strip())
+            return json.loads(metin)
+
+        if resp.status_code == 429:
+            # Kota/dakikalık limit dolmuş - tekrar denemek işe yaramaz,
+            # sadece kalan kotayı boşuna tüketir. Hemen ve net bildir.
+            raise RuntimeError(
+                "Gemini istek kotası doldu (429) - bir süre bekleyip "
+                "tekrar dene. Kota genelde dakikalık/günlük sıfırlanır.")
+
+        son_hata = RuntimeError(f"Gemini API {resp.status_code}: {resp.text[:600]}")
+        if resp.status_code in GECICI_HATA_KODLARI and deneme < MAX_DENEME:
+            print(f"[Midas] Gemini geçici hata ({resp.status_code}), "
+                  f"{deneme}/{MAX_DENEME} - {BEKLEME_SN}sn sonra tekrar denenecek",
+                  flush=True)
+            time.sleep(BEKLEME_SN)
+            continue
+        break
+
+    raise son_hata
 
 
 # =============================================================================
@@ -352,6 +382,18 @@ def _kayit_csv_yaz(hisse, derinlik, takas):
         print(f"[Midas] CSV yazılamadı: {e}", flush=True)
 
 
+def _fotograf_isle_arkaplan(hisse: str, tip: str, file_id: str):
+    """_fotograf_isle'yi ayrı bir thread'de çalıştırır - indirme ve Gemini
+    çağrısı (tekrar denemelerle birlikte) burada, arge_botu'nun Telegram
+    döngüsünden bağımsız olarak yürütülür."""
+    try:
+        img_bytes = _telegram_dosya_indir(file_id)
+    except Exception as e:
+        send_midas_message(f"❌ {hisse} — fotoğraf indirilemedi: {e}")
+        return
+    _fotograf_isle(hisse, tip, img_bytes)
+
+
 def _fotograf_isle(hisse: str, tip: str, image_bytes: bytes):
     hisse = hisse.upper()
     try:
@@ -438,12 +480,11 @@ def midas_update_isle(update: dict):
         hisse, tip = ayrisim
         # en büyük boyutlu fotoğrafı al (liste küçükten büyüğe sıralı)
         file_id = fotograflar[-1]["file_id"]
-        try:
-            img_bytes = _telegram_dosya_indir(file_id)
-        except Exception as e:
-            send_midas_message(f"❌ {hisse} — fotoğraf indirilemedi: {e}")
-            return
-        _fotograf_isle(hisse, tip, img_bytes)
+        # Gemini'nin yanıtı (özellikle yoğunluk anında tekrar denemelerle)
+        # birkaç saniye sürebilir - bunu AYRI bir thread'de yapıyoruz ki
+        # arge_botu'nun Telegram döngüsü bu süre boyunca hiç bloklanmasın.
+        threading.Thread(target=_fotograf_isle_arkaplan,
+                          args=(hisse, tip, file_id), daemon=True).start()
         return
 
     text = (mesaj.get("text") or "").strip().lower()
