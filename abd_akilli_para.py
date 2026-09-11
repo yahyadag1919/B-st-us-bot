@@ -317,7 +317,7 @@ def _form4_kontrol_dongusu():
     gorulen = _json_yukle(FORM4_GORULEN_DOSYASI, {})
     while True:
         degisti = False
-        for ticker in US_TICKERS:
+        for i, ticker in enumerate(US_TICKERS):
             cik = _cik_map.get(ticker.replace("-", ".")) or _cik_map.get(ticker)
             if not cik:
                 continue
@@ -326,6 +326,8 @@ def _form4_kontrol_dongusu():
                     degisti = True
             except Exception as e:
                 print(f"[AkilliPara] {ticker} Form4 tarama hatası: {e}", flush=True)
+            if degisti and i % 10 == 0:
+                _json_kaydet(FORM4_GORULEN_DOSYASI, gorulen)
             time.sleep(FORM4_TICKER_ARASI_BEKLEME_SN)
         if degisti:
             _json_kaydet(FORM4_GORULEN_DOSYASI, gorulen)
@@ -351,6 +353,31 @@ def _haber_bildir(ticker: str, haber: dict):
     _durum["son_haber"] = datetime.now(timezone.utc).isoformat(timespec="seconds")
 
 
+# Başlıkta bu kelimelerden EN AZ BİRİ geçmiyorsa haber "gürültü" (genel
+# yorum/analiz yazısı) sayılıp gönderilmez - sadece gerçek bir OLAYI
+# işaret eden haberler geçer. Hepsi İngilizce çünkü Finnhub'ın kaynakları
+# (Yahoo, Reuters, Motley Fool vb.) İngilizce yayın yapıyor.
+ONEMLI_HABER_ANAHTAR_KELIMELERI = {
+    "earnings", "beats", "misses", "guidance", "forecast", "revenue",
+    "acquisition", "acquire", "merger", "merges", "takeover", "buyout",
+    "lawsuit", "sues", "sued", "investigation", "probe", "fine", "settlement",
+    "fda", "approval", "approved", "rejected", "recall",
+    "upgrade", "downgrade", "price target", "initiates coverage",
+    "bankruptcy", "chapter 11", "default", "layoff", "layoffs", "job cuts",
+    "ceo", "cfo", "resign", "resigns", "resignation", "steps down", "fired",
+    "hack", "breach", "data leak", "cyberattack",
+    "partnership", "contract", "deal worth", "patent", "lawsuit",
+    "buyback", "dividend", "stock split", "ipo", "spinoff",
+    "sec filing", "insider", "short seller", "delisted", "halted",
+    "strike", "union", "sanction", "tariff", "antitrust",
+}
+
+
+def _onemli_haber_mi(baslik: str) -> bool:
+    b = baslik.lower()
+    return any(kelime in b for kelime in ONEMLI_HABER_ANAHTAR_KELIMELERI)
+
+
 def _haber_ticker_tara(ticker: str, gorulen: dict):
     if not FINNHUB_API_KEY:
         return
@@ -373,7 +400,10 @@ def _haber_ticker_tara(ticker: str, gorulen: dict):
         if hid is None or hid in gorulmus:
             continue
         yeni_idler.append(hid)
-        if not ilk_calisma:
+        # ID'yi HER ZAMAN "görüldü" say (aynı haberi tekrar tekrar
+        # değerlendirmeyelim) ama sadece önemliyse VE ilk çalıştırma
+        # değilse bildir.
+        if not ilk_calisma and _onemli_haber_mi(h.get("headline", "")):
             _haber_bildir(ticker, h)
 
     if yeni_idler or ilk_calisma:
@@ -387,11 +417,17 @@ def _haber_kontrol_dongusu():
         return
     gorulen = _json_yukle(HABER_GORULEN_DOSYASI, {})
     while True:
-        for ticker in US_TICKERS:
+        for i, ticker in enumerate(US_TICKERS):
             try:
                 _haber_ticker_tara(ticker, gorulen)
             except Exception as e:
                 print(f"[AkilliPara] {ticker} haber tarama hatası: {e}", flush=True)
+            # Her 10 hissede bir kaydet - işlem yarıda kesilirse (Render
+            # yeniden başlatması vb.) ilerleme kaybolmasın, "ilk kez
+            # görülüyor" koruması sıfırlanıp eski haberleri tekrar
+            # bildirmesin diye.
+            if i % 10 == 0:
+                _json_kaydet(HABER_GORULEN_DOSYASI, gorulen)
             time.sleep(HABER_TICKER_ARASI_BEKLEME_SN)
         _json_kaydet(HABER_GORULEN_DOSYASI, gorulen)
         _durum["haber_tur"] += 1
