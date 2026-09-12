@@ -378,13 +378,37 @@ def _onemli_haber_mi(baslik: str) -> bool:
     return any(kelime in b for kelime in ONEMLI_HABER_ANAHTAR_KELIMELERI)
 
 
-def _haber_ticker_tara(ticker: str, gorulen: dict):
+# İçerik fabrikası/genel yorum sitesi olarak bilinen kaynaklar - bunlar
+# "revenue", "earnings" gibi kelimeleri gerçek bir olay olmadan da sık
+# kullanıyor, anahtar kelime filtresini atlatıyorlar. Gerçek kurumsal
+# olaylar genelde resmi tellerden (Reuters, PR Newswire vb.) gelir.
+DUSUK_DEGERLI_KAYNAKLAR = {
+    "motley fool", "zacks", "simply wall st", "benzinga", "insider monkey",
+    "investorplace", "seeking alpha", "24/7 wall st", "tipranks",
+    "gurufocus", "barchart", "defense world", "americanbankingnews.com",
+    "etf daily news", "marketbeat",
+}
+
+GUNLUK_HISSE_BASI_HABER_LIMITI = 5  # tüm filtreler geçse bile son emniyet
+
+
+def _kaynak_dusuk_degerli_mi(kaynak: str) -> bool:
+    return (kaynak or "").strip().lower() in DUSUK_DEGERLI_KAYNAKLAR
+
+
+def _haber_ticker_tara(ticker: str, gorulen: dict, gunluk_sayac: dict, bugun_str: str):
     if not FINNHUB_API_KEY:
         return
-    bugun = datetime.now(timezone.utc).strftime("%Y-%m-%d")
+    # Hafta sonu piyasalar kapalı - gerçek kurumsal olay (kazanç, dava,
+    # FDA onayı vb.) neredeyse hiç çıkmaz, akan şey sadece içerik
+    # fabrikalarının dolgu yazıları oluyor. Taramayı tamamen atla.
+    if datetime.now(timezone.utc).weekday() >= 5:  # 5=Cumartesi, 6=Pazar
+        return
+
     r = requests.get(
         "https://finnhub.io/api/v1/company-news",
-        params={"symbol": ticker, "from": bugun, "to": bugun, "token": FINNHUB_API_KEY},
+        params={"symbol": ticker, "from": bugun_str, "to": bugun_str,
+                "token": FINNHUB_API_KEY},
         timeout=15)
     if r.status_code != 200:
         return
@@ -400,11 +424,16 @@ def _haber_ticker_tara(ticker: str, gorulen: dict):
         if hid is None or hid in gorulmus:
             continue
         yeni_idler.append(hid)
-        # ID'yi HER ZAMAN "görüldü" say (aynı haberi tekrar tekrar
-        # değerlendirmeyelim) ama sadece önemliyse VE ilk çalıştırma
-        # değilse bildir.
-        if not ilk_calisma and _onemli_haber_mi(h.get("headline", "")):
-            _haber_bildir(ticker, h)
+        if ilk_calisma:
+            continue
+        if _kaynak_dusuk_degerli_mi(h.get("source", "")):
+            continue
+        if not _onemli_haber_mi(h.get("headline", "")):
+            continue
+        if gunluk_sayac.get(ticker, 0) >= GUNLUK_HISSE_BASI_HABER_LIMITI:
+            continue
+        _haber_bildir(ticker, h)
+        gunluk_sayac[ticker] = gunluk_sayac.get(ticker, 0) + 1
 
     if yeni_idler or ilk_calisma:
         birlesik = list(gorulmus) + yeni_idler
@@ -416,16 +445,18 @@ def _haber_kontrol_dongusu():
         print("[AkilliPara] FINNHUB_API_KEY yok - haber döngüsü başlatılmadı.", flush=True)
         return
     gorulen = _json_yukle(HABER_GORULEN_DOSYASI, {})
+    gunluk_sayac = {}
+    gunluk_sayac_tarihi = None
     while True:
+        bugun_str = datetime.now(timezone.utc).strftime("%Y-%m-%d")
+        if gunluk_sayac_tarihi != bugun_str:
+            gunluk_sayac = {}  # yeni gün - günlük limit sıfırlanır
+            gunluk_sayac_tarihi = bugun_str
         for i, ticker in enumerate(US_TICKERS):
             try:
-                _haber_ticker_tara(ticker, gorulen)
+                _haber_ticker_tara(ticker, gorulen, gunluk_sayac, bugun_str)
             except Exception as e:
                 print(f"[AkilliPara] {ticker} haber tarama hatası: {e}", flush=True)
-            # Her 10 hissede bir kaydet - işlem yarıda kesilirse (Render
-            # yeniden başlatması vb.) ilerleme kaybolmasın, "ilk kez
-            # görülüyor" koruması sıfırlanıp eski haberleri tekrar
-            # bildirmesin diye.
             if i % 10 == 0:
                 _json_kaydet(HABER_GORULEN_DOSYASI, gorulen)
             time.sleep(HABER_TICKER_ARASI_BEKLEME_SN)
