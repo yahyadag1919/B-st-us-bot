@@ -118,6 +118,53 @@ def _load_us_tickers():
 
 US_TICKERS = _load_us_tickers()
 
+# Bu modüle ÖZEL, ayrı ve daha geniş bir hisse listesi - kanıtlanmış
+# sinyal sistemlerinin (ATR kırılımı, RSI vb.) kullandığı 106'lık
+# US_TICKERS'a HİÇ dokunmuyoruz (o listeler test edilmiş, değiştirmek
+# riskli). Burada amaç sadece "önemli haber/içeriden işlem" taraması
+# için tanınmış, likit, büyük/orta ölçekli ~300 şirket - küçük/şüpheli
+# hisseler kasıtlı olarak dışarıda.
+AKILLI_PARA_TICKERS = sorted(set([
+    # Teknoloji
+    "AAPL","MSFT","GOOGL","GOOG","AMZN","NVDA","META","TSLA","AVGO","ORCL",
+    "CRM","ADBE","AMD","CSCO","INTC","QCOM","TXN","IBM","NOW","INTU",
+    "AMAT","MU","ADI","LRCX","KLAC","SNPS","CDNS","PANW","FTNT","CRWD",
+    "PLTR","SNOW","NET","DDOG","ZS","MDB","TEAM","WDAY","ANSS","ROP",
+    "APH","GLW","HPQ","DELL","NXPI","MCHP","ON","SWKS","TER","KEYS",
+    "UBER","LYFT","ABNB","BKNG","EBAY","ETSY","SHOP","SPOT","PYPL","SQ",
+    "NFLX","DIS","CMCSA","CHTR","TMUS","VZ","T",
+    # Finans
+    "JPM","BAC","WFC","C","GS","MS","SCHW","BLK","AXP","USB",
+    "PNC","TFC","COF","BK","STT","SPGI","MCO","ICE","CME","CB",
+    "MMC","AON","AJG","PGR","TRV","ALL","MET","PRU","AIG","V",
+    "MA","FIS","FISV","PAYX","ADP",
+    # Sağlık
+    "UNH","JNJ","LLY","PFE","MRK","ABBV","TMO","ABT","DHR","BMY",
+    "AMGN","GILD","CVS","CI","ELV","HUM","MDT","ISRG","SYK","BSX",
+    "REGN","VRTX","ZTS","BDX","EW","IDXX","MRNA","BIIB",
+    # Tüketici
+    "WMT","PG","KO","PEP","COST","MCD","NKE","SBUX","TGT","LOW",
+    "HD","TJX","BKNG","MAR","CMG","YUM","DG","DLTR","ROST","ULTA",
+    "EL","CL","KMB","GIS","KHC","MDLZ","MNST","STZ","HSY","KR",
+    # Sanayi
+    "BA","CAT","GE","HON","UPS","UNP","LMT","RTX","DE","MMM",
+    "NOC","GD","EMR","ETN","ITW","PH","CSX","NSC","FDX","WM",
+    "PCAR","CMI","ROK","DOV","XYL","IR","JCI","CARR","OTIS",
+    # Enerji
+    "XOM","CVX","COP","SLB","EOG","PXD","OXY","WMB","KMI","PSX",
+    "VLO","MPC","HAL","BKR","DVN","FANG","HES",
+    # Malzeme/Emlak/Kamu Hizmetleri
+    "LIN","APD","SHW","ECL","FCX","NEM","DOW","DD","NUE","VMC",
+    "NEE","DUK","SO","D","AEP","EXC","SRE","XEL","ED","PEG",
+    "PLD","AMT","EQIX","PSA","O","SPG","WELL","DLR","AVB","EQR",
+    # Havacılık/Savunma ek + diğer tanınmış büyükler
+    "COIN","MSTR","SOFI","ROKU","PINS","SNAP","RBLX","DASH","MRVL",
+    "ARM","SMCI","VST","CEG","TTD","APP","AXON","DXCM","ALGN",
+]))
+
+FINNHUB_TICKERS = AKILLI_PARA_TICKERS
+FORM4_TICKERS = AKILLI_PARA_TICKERS
+
 
 # =============================================================================
 # BASİT JSON DURUM DOSYASI YARDIMCILARI
@@ -234,17 +281,23 @@ def _form4_xml_ayristir(xml_bytes: bytes) -> dict:
             "islemler": islemler}
 
 
+FORM4_MIN_TUTAR_USD = 100_000  # bu tutarın altındaki işlemler rutin sayılır, bildirilmez
+
+
 def _form4_bildir(ticker: str, detay: dict):
     for tx in detay["islemler"]:
         if tx["lot"] is None:
+            continue
+        tutar = tx["lot"] * tx["fiyat"] if tx["fiyat"] else None
+        # Tutar hesaplanabiliyorsa ve eşiğin altındaysa atla - hesaplanamıyorsa
+        # (fiyat eksikse) emin olamadığımız için yine de bildiriyoruz.
+        if tutar is not None and tutar < FORM4_MIN_TUTAR_USD:
             continue
         yon_etiketi = "🟢 ALIM (piyasadan satın aldı)" if tx["kod"] == "P" \
             else "🔴 SATIM (piyasada sattı)"
         unvan = detay["unvan"] or ("Yönetim Kurulu Üyesi" if detay["is_director"]
                                     else "İçeriden Kişi")
-        tutar_str = ""
-        if tx["fiyat"]:
-            tutar_str = f" (~${tx['lot'] * tx['fiyat']:,.0f})"
+        tutar_str = f" (~${tutar:,.0f})" if tutar else ""
         fiyat_bilgi = _alpaca_fiyat_al(ticker)
         satirlar = [
             f"🕵️ İÇERİDEN İŞLEM — {ticker}",
@@ -317,7 +370,7 @@ def _form4_kontrol_dongusu():
     gorulen = _json_yukle(FORM4_GORULEN_DOSYASI, {})
     while True:
         degisti = False
-        for i, ticker in enumerate(US_TICKERS):
+        for i, ticker in enumerate(FORM4_TICKERS):
             cik = _cik_map.get(ticker.replace("-", ".")) or _cik_map.get(ticker)
             if not cik:
                 continue
@@ -358,18 +411,23 @@ def _haber_bildir(ticker: str, haber: dict):
 # işaret eden haberler geçer. Hepsi İngilizce çünkü Finnhub'ın kaynakları
 # (Yahoo, Reuters, Motley Fool vb.) İngilizce yayın yapıyor.
 ONEMLI_HABER_ANAHTAR_KELIMELERI = {
-    "earnings", "beats", "misses", "guidance", "forecast", "revenue",
-    "acquisition", "acquire", "merger", "merges", "takeover", "buyout",
-    "lawsuit", "sues", "sued", "investigation", "probe", "fine", "settlement",
-    "fda", "approval", "approved", "rejected", "recall",
-    "upgrade", "downgrade", "price target", "initiates coverage",
-    "bankruptcy", "chapter 11", "default", "layoff", "layoffs", "job cuts",
-    "ceo", "cfo", "resign", "resigns", "resignation", "steps down", "fired",
-    "hack", "breach", "data leak", "cyberattack",
-    "partnership", "contract", "deal worth", "patent", "lawsuit",
-    "buyback", "dividend", "stock split", "ipo", "spinoff",
-    "sec filing", "insider", "short seller", "delisted", "halted",
-    "strike", "union", "sanction", "tariff", "antitrust",
+    "bankruptcy", "chapter 11", "files for bankruptcy",
+    "lawsuit", "sues", "sued", "settlement", "class action",
+    "investigation", "probe", "sec investigates", "doj",
+    "fda approval", "fda rejects", "fda approves", "clinical trial results",
+    "recall",
+    "downgrade", "downgrades", "upgrade", "upgrades", "cuts rating",
+    "guidance cut", "cuts guidance", "raises guidance", "guidance raised",
+    "misses estimates", "beats estimates", "earnings miss", "earnings beat",
+    "layoffs", "job cuts", "workforce reduction",
+    "resigns", "resignation", "steps down", "fired", "ousted", "ceo departure",
+    "data breach", "hack", "cyberattack",
+    "acquisition", "acquires", "to acquire", "merger", "to merge", "takeover",
+    "bid for", "hostile bid",
+    "halted", "trading halt", "delisted", "delisting",
+    "stock split", "buyback", "share repurchase",
+    "credit rating cut", "credit rating downgrade", "default",
+    "activist investor", "activist stake",
 }
 
 
@@ -378,22 +436,23 @@ def _onemli_haber_mi(baslik: str) -> bool:
     return any(kelime in b for kelime in ONEMLI_HABER_ANAHTAR_KELIMELERI)
 
 
-# İçerik fabrikası/genel yorum sitesi olarak bilinen kaynaklar - bunlar
-# "revenue", "earnings" gibi kelimeleri gerçek bir olay olmadan da sık
-# kullanıyor, anahtar kelime filtresini atlatıyorlar. Gerçek kurumsal
-# olaylar genelde resmi tellerden (Reuters, PR Newswire vb.) gelir.
-DUSUK_DEGERLI_KAYNAKLAR = {
-    "motley fool", "zacks", "simply wall st", "benzinga", "insider monkey",
-    "investorplace", "seeking alpha", "24/7 wall st", "tipranks",
-    "gurufocus", "barchart", "defense world", "americanbankingnews.com",
-    "etf daily news", "marketbeat",
+# Sadece bu güvenilir tel/haber ajanslarından gelen haberler geçer -
+# listede olmayan HER kaynak (blog, "analiz" sitesi, içerik fabrikası
+# dahil) otomatik elenir. Bu, "kötüleri engelle" değil "sadece
+# güvenilenlere izin ver" mantığı - çok daha sıkı.
+GUVENILIR_HABER_KAYNAKLARI = {
+    "reuters", "bloomberg", "business wire", "businesswire",
+    "pr newswire", "prnewswire", "globenewswire", "globe newswire",
+    "cnbc", "marketwatch", "barron's", "barrons", "the wall street journal",
+    "wsj", "associated press", "ap news", "dow jones newswires",
+    "yahoo", "yahoo finance",
 }
 
-GUNLUK_HISSE_BASI_HABER_LIMITI = 5  # tüm filtreler geçse bile son emniyet
+GUNLUK_HISSE_BASI_HABER_LIMITI = 2  # tüm filtreler geçse bile son emniyet
 
 
-def _kaynak_dusuk_degerli_mi(kaynak: str) -> bool:
-    return (kaynak or "").strip().lower() in DUSUK_DEGERLI_KAYNAKLAR
+def _kaynak_guvenilir_mi(kaynak: str) -> bool:
+    return (kaynak or "").strip().lower() in GUVENILIR_HABER_KAYNAKLARI
 
 
 def _haber_ticker_tara(ticker: str, gorulen: dict, gunluk_sayac: dict, bugun_str: str):
@@ -426,7 +485,7 @@ def _haber_ticker_tara(ticker: str, gorulen: dict, gunluk_sayac: dict, bugun_str
         yeni_idler.append(hid)
         if ilk_calisma:
             continue
-        if _kaynak_dusuk_degerli_mi(h.get("source", "")):
+        if not _kaynak_guvenilir_mi(h.get("source", "")):
             continue
         if not _onemli_haber_mi(h.get("headline", "")):
             continue
@@ -452,7 +511,7 @@ def _haber_kontrol_dongusu():
         if gunluk_sayac_tarihi != bugun_str:
             gunluk_sayac = {}  # yeni gün - günlük limit sıfırlanır
             gunluk_sayac_tarihi = bugun_str
-        for i, ticker in enumerate(US_TICKERS):
+        for i, ticker in enumerate(FINNHUB_TICKERS):
             try:
                 _haber_ticker_tara(ticker, gorulen, gunluk_sayac, bugun_str)
             except Exception as e:
