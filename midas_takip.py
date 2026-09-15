@@ -76,9 +76,6 @@ KAYIT_CSV = os.path.join(DATA_DIR, "midas_takip_kayitlari.csv")
 # birleştirilecek (dakika).
 BIRLESTIRME_PENCERESI_DK = 30
 
-# Bir kademeyi "duvar" saymak için: önceki kademelerin ortalamasının
-# kaç katı olmalı. Kullanıcı zamanla ayarlayabilir.
-DUVAR_ESIGI_KAT = float(os.environ.get("MIDAS_DUVAR_ESIGI_KAT", "1.5"))
 
 # Takas yorumunda "yabancı kurum" sayılan proxy liste (taslak - piyasa
 # tecrübesine göre düzeltilebilir).
@@ -228,27 +225,22 @@ def _gemini_gorsel_oku(image_bytes: bytes, prompt: str) -> dict:
 # =============================================================================
 def _duvar_bul(kademeler: list, taraf: str):
     """taraf='alis' -> destek (aşağı yön), taraf='satis' -> direnç (yukarı
-    yön). Kademeler listesi, fiyata en yakından en uzağa sıralı olmalı.
-    İlk 'duvar'ı (önceki kademelerin ortalamasının DUVAR_ESIGI_KAT katı
-    veya üzeri) bulunca durur. Duvar yoksa en derin kademeyi döner."""
+    yön). GÖRÜNEN TÜM kademeler içinde en büyük lota sahip olanı döner -
+    yani "ilk gördüğün ortadan büyükçe kademe" değil, gerçekten en kalın
+    duvar hangisiyse o.
+    (2026-09-15 düzeltmesi: eski sürüm önceki kademelerin ortalamasının
+    1.5 katını geçen İLK kademede duruyordu - bu, tabloda daha derinde
+    duran çok daha büyük bir duvarın hiç görülmemesine yol açıyordu,
+    örn. ASELS'te 370.50'deki 39.359 lot "duvar" sayılıp hemen arkasındaki
+    370.00'daki 107.484 lot hiç kontrol edilmemişti.)"""
     lot_alani = f"lot_{taraf}"
     fiyat_alani = f"fiyat_{taraf}"
-    gecmis_lotlar = []
-    for k in kademeler:
-        lot = k.get(lot_alani)
-        fiyat = k.get(fiyat_alani)
-        if lot is None or fiyat is None:
-            continue
-        if gecmis_lotlar:
-            ortalama = sum(gecmis_lotlar) / len(gecmis_lotlar)
-            if lot >= ortalama * DUVAR_ESIGI_KAT:
-                return {"fiyat": fiyat, "lot": lot, "duvar_mi": True}
-        gecmis_lotlar.append(lot)
-    if kademeler:
-        son = kademeler[-1]
-        return {"fiyat": son.get(fiyat_alani), "lot": son.get(lot_alani),
-                "duvar_mi": False}
-    return None
+    gecerli = [(k.get(fiyat_alani), k.get(lot_alani)) for k in kademeler
+               if k.get(fiyat_alani) is not None and k.get(lot_alani) is not None]
+    if not gecerli:
+        return None
+    en_buyuk_fiyat, en_buyuk_lot = max(gecerli, key=lambda x: x[1])
+    return {"fiyat": en_buyuk_fiyat, "lot": en_buyuk_lot, "duvar_mi": True}
 
 
 def _derinlik_analiz_et(veri: dict) -> dict:
@@ -309,14 +301,37 @@ def _takas_analiz_et(veri: dict) -> dict:
 # SKOR VE RAPOR
 # =============================================================================
 def _skor_hesapla(derinlik: dict, takas: dict = None) -> float:
-    """0-100 arası Alıcı Gücü Skoru. 50 nötr. Şeffaf/basit formül -
-    her bileşenin katkısı ayrı ayrı görülebilir olsun diye kasıtlı
-    karmaşık değil."""
-    skor = 50.0
-    skor += (derinlik["alis_pct"] - 50) * 0.6
+    """0-100 arası yön skoru. 50 nötr, 100'e yakın YUKARI, 0'a yakın
+    AŞAĞI. Mevcut bileşenlerin ORTALAMASI alınır (kaçı varsa) - böylece
+    takas eklenmesi diğer bileşenleri haksız yere ezmez, sadece ek bir
+    oy olarak katılır. Bileşenler:
+      1) Üstteki alış/satış oranı
+      2) Destek/direnç duvarlarının büyüklük karşılaştırması
+      3) Takas yönü (gönderildiyse)
+    """
+    katkilar = [(derinlik["alis_pct"] - 50)]  # -50..+50
+
+    destek = derinlik.get("destek")
+    direnc = derinlik.get("direnc")
+    if destek and direnc and (destek["lot"] + direnc["lot"]) > 0:
+        denge = (destek["lot"] - direnc["lot"]) / (destek["lot"] + direnc["lot"])  # -1..+1
+        katkilar.append(denge * 50)  # -50..+50
+
     if takas:
-        skor += takas["yon_skoru"] * 15
+        yon = max(-10.0, min(10.0, takas["yon_skoru"]))  # aşırı uçları kırp
+        katkilar.append(yon * 5)  # -50..+50
+
+    ortalama_katki = sum(katkilar) / len(katkilar)
+    skor = 50 + ortalama_katki * 0.7  # 0.7: aşırı uçlara fazla hızlı gitmesin
     return max(0.0, min(100.0, skor))
+
+
+def _yon_etiketi(skor: float) -> str:
+    if skor >= 60:
+        return "🔼 YUKARI eğilimli"
+    if skor <= 40:
+        return "🔽 AŞAĞI eğilimli"
+    return "➖ NÖTR / belirsiz"
 
 
 def _rapor_olustur(hisse: str, derinlik: dict = None, takas: dict = None) -> str:
@@ -343,15 +358,28 @@ def _rapor_olustur(hisse: str, derinlik: dict = None, takas: dict = None) -> str
         oc = f" ({takas['one_cikan']})" if takas["one_cikan"] else ""
         satirlar.append(f"🏦 Takas: {takas['yon']}{oc}")
     else:
-        satirlar.append("🏦 Takas: gönderilmedi (istersen ekle, skor güçlenir)")
+        satirlar.append("🏦 Takas: gönderilmedi (istersen ekle, yön daha güvenilir olur)")
 
     if derinlik:
         skor = _skor_hesapla(derinlik, takas)
-        satirlar.append(f"⚡ Alıcı Gücü Skoru: {skor:.0f}/100")
+        satirlar.append(f"\n<b>Kural bazlı okuma: {_yon_etiketi(skor)}</b> ({skor:.0f}/100)")
+        gerekce = [f"Alış/satış oranı %{derinlik['alis_pct']:.0f}/%{derinlik['satis_pct']:.0f}"]
+        if derinlik.get("destek") and derinlik.get("direnc"):
+            d_lot, r_lot = derinlik["destek"]["lot"], derinlik["direnc"]["lot"]
+            if d_lot > r_lot:
+                gerekce.append("destek duvarı direnç duvarından daha kalın")
+            elif r_lot > d_lot:
+                gerekce.append("direnç duvarı destek duvarından daha kalın")
+            else:
+                gerekce.append("destek/direnç duvarları dengeli")
+        if takas:
+            gerekce.append(f"takas: {takas['yon']}")
+        satirlar.append("Gerekçe: " + ", ".join(gerekce) + ".")
 
     satirlar.append(
-        "\nℹ️ Tek bir anlık görüntüden çıkarıldı - emir defteri saniyeler "
-        "içinde değişebilir. Kesin hedef değil, referans seviyeleri.")
+        "\nℹ️ Bu bir TEST EDİLMEMİŞ kural, kanıtlanmış bir sistem değil - "
+        "tek bir anlık görüntüden çıkarıldı, emir defteri saniyeler içinde "
+        "değişebilir. Bir görüş, garanti değil.")
     return "\n".join(satirlar)
 
 
