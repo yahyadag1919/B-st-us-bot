@@ -46,7 +46,7 @@ ANA_SURUM = "ana-v2-abd-sinyal-kapatildi-2026-09-04"
 
 app = Flask(__name__)
 _durum = {"us": "yüklenmedi", "sosyal": "yüklenmedi", "futbol": "yüklenmedi",
-          "midas": "yüklenmedi", "akilli_para": "yüklenmedi"}
+          "midas": "yüklenmedi", "akilli_para": "yüklenmedi", "katalizor": "yüklenmedi"}
 
 
 # =====================================================================
@@ -107,6 +107,15 @@ except Exception as e:
     AKILLI_PARA = None
     _durum["akilli_para"] = f"❌ {e}"
     print(f"[ANA] abd_akilli_para yüklenemedi: {e}", flush=True)
+    traceback.print_exc()
+
+try:
+    import bist_katalizor as KATALIZOR
+    _durum["katalizor"] = "✅ yüklendi"
+except Exception as e:
+    KATALIZOR = None
+    _durum["katalizor"] = f"❌ {e}"
+    print(f"[ANA] bist_katalizor yüklenemedi: {e}", flush=True)
     traceback.print_exc()
 
 
@@ -180,6 +189,7 @@ def ana_sayfa():
          f"<li>Futbol Botu: {_durum['futbol']}</li>",
          f"<li>Midas Takip: {_durum['midas']}</li>",
          f"<li>ABD Akıllı Para: {_durum['akilli_para']}</li>",
+         f"<li>BIST Katalizör: {_durum['katalizor']}</li>",
          "</ul>"]
     if SOSYAL is not None:
         try:
@@ -270,6 +280,14 @@ if __name__ == "__main__":
         threading.Thread(target=_guvenli("Akıllı Para Haber",
                                           AKILLI_PARA._haber_kontrol_dongusu), daemon=True).start()
         print("[ANA] ABD Akıllı Para thread'leri başlatıldı.", flush=True)
+
+    # --- 6) BIST KATALİZÖR (iyi haber, henüz fiyatlanmamış) ---
+    if KATALIZOR is not None:
+        threading.Thread(target=_tek_seferlik("Katalizör başlangıç",
+                                               KATALIZOR.baslangic), daemon=True).start()
+        threading.Thread(target=_guvenli("BIST Katalizör",
+                                          KATALIZOR.katalizor_kontrol_dongusu), daemon=True).start()
+        print("[ANA] BIST Katalizör thread'i başlatıldı.", flush=True)
 
     # --- TEK DIŞ PING (hepsi için) ---
     threading.Thread(target=dis_ping, daemon=True).start()
