@@ -241,15 +241,26 @@ def _taze_mi(tarih) -> bool:
 def _fiyat_tepki_kontrolu(hisse_kodu: str, haber_tarihi):
     """Haberden önceki kapanışa göre şu anki fiyatın % değişimini döner.
     None dönerse veri alınamamış demektir - o durumda temkinli davranıp
-    yine de bildiriyoruz (emin olamadığımız için susturmuyoruz)."""
+    yine de bildiriyoruz (emin olamadığımız için susturmuyoruz).
+    (2026-09-17 düzeltmesi: BIST verisi saat dilimi BİLGİLİ (Europe/
+    Istanbul) geliyor, haber_tarihi'nden saat dilimini SİLMEK yerine
+    veri.index'in saat dilimine ÇEVİRİYORUZ - aksi halde pandas
+    karşılaştıramayıp hata veriyor, bu yüzden kontrol hep başarısız
+    oluyordu.)"""
     try:
         veri = yf.Ticker(hisse_kodu).history(period="10d")
         if veri.empty or len(veri) < 2:
             return None
         simdiki_fiyat = veri["Close"].iloc[-1]
         if haber_tarihi:
-            haber_tarihi_naive = haber_tarihi.replace(tzinfo=None)
-            oncesi = veri[veri.index < haber_tarihi_naive]
+            karsilastirma = haber_tarihi
+            if karsilastirma.tzinfo is None:
+                karsilastirma = karsilastirma.replace(tzinfo=timezone.utc)
+            if veri.index.tz is not None:
+                karsilastirma = karsilastirma.astimezone(veri.index.tz)
+            else:
+                karsilastirma = karsilastirma.replace(tzinfo=None)
+            oncesi = veri[veri.index < karsilastirma]
             referans_fiyat = oncesi["Close"].iloc[-1] if not oncesi.empty else veri["Close"].iloc[0]
         else:
             referans_fiyat = veri["Close"].iloc[0]
