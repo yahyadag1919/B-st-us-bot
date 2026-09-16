@@ -56,8 +56,8 @@ DATA_DIR = os.environ.get("DATA_DIR", ".")
 KATALIZOR_SURUM = "bist-katalizor-v1-2026-09-15"
 GORULEN_DOSYASI = os.path.join(DATA_DIR, "bist_katalizor_gorulen.json")
 
-TARAMA_ARALIGI_SN = 30 * 60          # tüm liste her 30 dakikada bir taranır
-TICKER_ARASI_BEKLEME_SN = 1.5        # Google News'e nazik davranmak için
+TARAMA_ARALIGI_SN = 10 * 60          # tam tarama biter bitmez 10 dk bekleyip yeniden başlar
+TICKER_ARASI_BEKLEME_SN = 1.0        # Google News'e nazik davranmak için
 
 # Fiyat "henüz tepki vermemiş" sayılması için: haberden önceki kapanışa
 # göre şu anki fiyatın artış yüzdesi bu eşiğin altında kalmalı.
