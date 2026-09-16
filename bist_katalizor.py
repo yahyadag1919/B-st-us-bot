@@ -212,7 +212,7 @@ def _haber_ara(hisse_kodu: str):
     önceki haberleri de döndürebiliyor (2026-09-17'de yaşanan 2000+
     mesajlık akının sebebi buydu)."""
     kod = hisse_kodu.replace(".IS", "")
-    q = requests.utils.quote(f"{kod} hisse when:2d")
+    q = requests.utils.quote(f"{kod} hisse when:1d")
     url = f"https://news.google.com/rss/search?q={q}&hl=tr&gl=TR&ceid=TR:tr"
     try:
         r = requests.get(url, headers=HEADERS, timeout=20)
@@ -225,7 +225,7 @@ def _haber_ara(hisse_kodu: str):
 # 'when:2d' bir garanti değil (Google'ın kendi belgelemediği bir operatör) -
 # ikinci bir emniyet katmanı olarak, tarihi elimizde olan haberlerde
 # gerçekten yakın zamanlı olduğunu kod tarafında da doğruluyoruz.
-HABER_MAKSIMUM_YAS_SAAT = 48
+HABER_MAKSIMUM_YAS_SAAT = 24
 
 
 def _taze_mi(tarih) -> bool:
