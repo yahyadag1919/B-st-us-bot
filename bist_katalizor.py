@@ -206,9 +206,13 @@ def _item_ayikla(xml: str):
 
 
 def _haber_ara(hisse_kodu: str):
-    """hisse_kodu 'THYAO.IS' formatında - Google News sorgusu için '.IS' atılır."""
+    """hisse_kodu 'THYAO.IS' formatında - Google News sorgusu için '.IS' atılır.
+    'when:2d' operatörü Google News'e SADECE son 2 gündeki haberleri
+    getirmesini söylüyor - bu olmadan Google, aramayla "alakalı" 1-2 yıl
+    önceki haberleri de döndürebiliyor (2026-09-17'de yaşanan 2000+
+    mesajlık akının sebebi buydu)."""
     kod = hisse_kodu.replace(".IS", "")
-    q = requests.utils.quote(f"{kod} hisse")
+    q = requests.utils.quote(f"{kod} hisse when:2d")
     url = f"https://news.google.com/rss/search?q={q}&hl=tr&gl=TR&ceid=TR:tr"
     try:
         r = requests.get(url, headers=HEADERS, timeout=20)
@@ -216,6 +220,19 @@ def _haber_ara(hisse_kodu: str):
     except Exception:
         return []
     return _item_ayikla(r.text)
+
+
+# 'when:2d' bir garanti değil (Google'ın kendi belgelemediği bir operatör) -
+# ikinci bir emniyet katmanı olarak, tarihi elimizde olan haberlerde
+# gerçekten yakın zamanlı olduğunu kod tarafında da doğruluyoruz.
+HABER_MAKSIMUM_YAS_SAAT = 48
+
+
+def _taze_mi(tarih) -> bool:
+    if not tarih:
+        return True  # tarih bilgisi yoksa reddetmiyoruz, aksi halde hiç haber geçemez
+    yas = datetime.now(timezone.utc) - tarih
+    return yas <= timedelta(hours=HABER_MAKSIMUM_YAS_SAAT)
 
 
 # =============================================================================
@@ -272,6 +289,7 @@ def _katalizor_bildir(hisse_kodu: str, haber: dict, degisim_pct, simdiki_fiyat):
 # =============================================================================
 def _hisse_tara(hisse_kodu: str, gorulen: dict):
     haberler = _haber_ara(hisse_kodu)
+    haberler = [h for h in haberler if _taze_mi(h["tarih"])]
     if not haberler:
         return
 
