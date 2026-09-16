@@ -60,7 +60,7 @@ def _running_test_kilit():
 
 
 _kilit = _running_test_kilit()
-_calisiyor = {"haber": False, "gap": False}
+_calisiyor = {"haber": False, "gap": False, "acilis": False}
 
 
 # =============================================================================
@@ -156,6 +156,16 @@ def haber_backtest_calistir():
         baslangic_str = baslangic_dt.strftime("%Y-%m-%d")
         bitis_str = bitis_dt.strftime("%Y-%m-%d")
 
+        # S&P 500'e göre RELATİF getiri hesaplıyoruz - aksi halde "haber
+        # etkisi" dediğimiz şey aslında sadece genel piyasa akıntısı olabilir
+        # (90 günlük dönemde piyasa yükseliyorsa, hem pozitif hem negatif
+        # haberlerden sonra "ortalama getiri pozitif" çıkar, bu haberle
+        # ilgisiz bir yanılgı olur).
+        spy_df = _fiyat_serisi_al("SPY")
+        if spy_df is None:
+            send_telegram_message("❌ SPY (piyasa referansı) verisi alınamadı, test durduruldu.")
+            return
+
         getiriler = {"pozitif": {g: [] for g in UFUK_GUNLERI},
                      "negatif": {g: [] for g in UFUK_GUNLERI}}
         sayim = {"pozitif": 0, "negatif": 0, "belirsiz": 0, "elenen": 0}
@@ -186,15 +196,21 @@ def haber_backtest_calistir():
                 fiyat_df = _fiyat_serisi_al(ticker)
                 if fiyat_df is not None:
                     for tarih, yon in olaylar:
-                        for g, deger in _getirileri_hesapla(fiyat_df, tarih).items():
-                            getiriler[yon][g].append(deger)
+                        hisse_getiri = _getirileri_hesapla(fiyat_df, tarih)
+                        spy_getiri = _getirileri_hesapla(spy_df, tarih)
+                        for g, deger in hisse_getiri.items():
+                            if g not in spy_getiri:
+                                continue
+                            relatif = deger - spy_getiri[g]
+                            getiriler[yon][g].append(relatif)
 
             if i % 20 == 0:
                 print(f"[Backtest] Haber testi {i}/{len(AK.AKILLI_PARA_TICKERS)} hisse", flush=True)
             time.sleep(1.1)  # Finnhub 60/dk limiti
 
         # --- Rapor ---
-        satirlar = [f"📊 HABER GERİYE DÖNÜK TEST SONUCU ({HABER_GERI_TEST_GUN_SAYISI} gün)",
+        satirlar = [f"📊 HABER GERİYE DÖNÜK TEST SONUCU ({HABER_GERI_TEST_GUN_SAYISI} gün, "
+                    f"S&P 500'e göre RELATİF getiri)",
                     f"Toplam sınıflandırılan: {sayim['pozitif']} pozitif, "
                     f"{sayim['negatif']} negatif, {sayim['belirsiz']} belirsiz "
                     f"({sayim['elenen']} kaynak/özne filtresine takıldı)\n"]
@@ -217,8 +233,9 @@ def haber_backtest_calistir():
 
         satirlar.append(
             "ℹ️ 1. gün = haberin açıklandığı gün, referans = bir önceki kapanış. "
-            "✅ ortalama getiri beklenen yönde, ❌ ters yönde çıkmış demek - "
-            "sınıflandırmanın o ufukta işe yaramadığını gösterir.")
+            "Getiriler S&P 500'ün AYNI dönemdeki hareketine göre RELATİF - yani "
+            "genel piyasa akıntısı çıkarılmış hâli. ✅ ortalama getiri beklenen "
+            "yönde, ❌ ters yönde çıkmış demek.")
         send_telegram_message("\n".join(satirlar))
 
     except Exception as e:
@@ -320,6 +337,115 @@ def gap_backtest_calistir():
 
 
 # =============================================================================
+# 3) AÇILIŞTAN SONRAKİ İLK 15 DAKİKA — TERSİNE Mİ DÖNÜYOR, DEVAM MI EDİYOR?
+# (2026-09-17 eklendi - önceki gap testi GÜNLÜK veriyle çalışıyordu, bu
+# soruyu hiç ölçmüyordu. Bu, dakikalık veriyle DOĞRU zaman ölçeğinde
+# test ediyor. yfinance 5 dakikalık mumları en fazla ~60 gün geriye
+# veriyor - bu yüzden örnek boyutu günlük gap testinden daha küçük.)
+# =============================================================================
+ACILIS_PERIYOD = "59d"
+ACILIS_ERKEN_BAR_SAYISI = 3          # 3 x 5dk = ilk 15 dakika
+ACILIS_HEDEF_BAR_SAYILARI = [12, 18, 24]  # 60dk, 90dk, 120dk sonrası
+ACILIS_ERKEN_BUCKETLARI = [(0, 0.3), (0.3, 0.5), (0.5, 1.0), (1.0, 999)]
+ACILIS_MIN_ORNEK = 15
+
+
+def acilis_ilk15dk_backtest_calistir():
+    with _kilit:
+        if _calisiyor.get("acilis"):
+            send_telegram_message("⏳ Açılış geriye dönük testi zaten çalışıyor, bekle.")
+            return
+        _calisiyor["acilis"] = True
+
+    try:
+        tickers = AK.AKILLI_PARA_TICKERS
+        send_telegram_message(
+            f"🔬 Açılış (ilk 15dk) geriye dönük testi başladı ({BACKTEST_SURUM})\n"
+            f"Son {ACILIS_PERIYOD}, {len(tickers)} hisse, 5 dakikalık mumlarla "
+            f"taranıyor - bu birkaç dakika sürebilir...")
+
+        veri = yf.download(tickers=" ".join(tickers), period=ACILIS_PERIYOD,
+                            interval="5m", group_by="ticker", threads=True,
+                            progress=False, auto_adjust=True)
+
+        sonuc = {b: {h: {"n": 0, "ters_yon": 0, "hareket_toplam": 0.0}
+                     for h in ACILIS_HEDEF_BAR_SAYILARI}
+                 for b in ACILIS_ERKEN_BUCKETLARI}
+
+        for t in tickers:
+            try:
+                df = veri[t].dropna(how="all") if len(tickers) > 1 else veri.dropna(how="all")
+            except (KeyError, Exception):
+                continue
+            if df is None or df.empty:
+                continue
+
+            for _, grup in df.groupby(df.index.date):
+                grup = grup.sort_index()
+                if len(grup) < max(ACILIS_HEDEF_BAR_SAYILARI) + 1:
+                    continue
+                acilis = grup["Open"].iloc[0]
+                if pd.isna(acilis) or acilis == 0:
+                    continue
+                erken_fiyat = grup["Close"].iloc[ACILIS_ERKEN_BAR_SAYISI - 1]
+                if pd.isna(erken_fiyat):
+                    continue
+                erken_hareket = (erken_fiyat - acilis) / acilis * 100
+                abs_erken = abs(erken_hareket)
+
+                for (lo, hi) in ACILIS_ERKEN_BUCKETLARI:
+                    if lo <= abs_erken < hi:
+                        for h in ACILIS_HEDEF_BAR_SAYILARI:
+                            if h >= len(grup):
+                                continue
+                            hedef_fiyat = grup["Close"].iloc[h]
+                            if pd.isna(hedef_fiyat):
+                                continue
+                            sonraki_hareket = (hedef_fiyat - erken_fiyat) / erken_fiyat * 100
+                            ters_mi = (erken_hareket > 0 and sonraki_hareket < 0) or \
+                                      (erken_hareket < 0 and sonraki_hareket > 0)
+                            yonlu = sonraki_hareket if erken_hareket >= 0 else -sonraki_hareket
+                            b = sonuc[(lo, hi)][h]
+                            b["n"] += 1
+                            if ters_mi:
+                                b["ters_yon"] += 1
+                            b["hareket_toplam"] += yonlu
+                        break
+
+        # --- Rapor ---
+        satirlar = [f"📊 AÇILIŞ İLK 15DK GERİYE DÖNÜK TEST SONUCU ({ACILIS_PERIYOD})\n"]
+        for (lo, hi) in ACILIS_ERKEN_BUCKETLARI:
+            aralik = f"%{lo:.1f}-{hi:.1f}" if hi < 999 else f"%{lo:.1f}+"
+            satirlar.append(f"İlk 15dk hareket {aralik}:")
+            for h in ACILIS_HEDEF_BAR_SAYILARI:
+                dk = h * 5
+                veri_b = sonuc[(lo, hi)][h]
+                n = veri_b["n"]
+                if n < ACILIS_MIN_ORNEK:
+                    satirlar.append(f"  +{dk}dk: örnek yetersiz (n={n})")
+                    continue
+                ters_oran = veri_b["ters_yon"] / n * 100
+                ort_yonlu = veri_b["hareket_toplam"] / n
+                satirlar.append(
+                    f"  +{dk}dk: n={n}, TERSİNE DÖNME oranı %{ters_oran:.0f}, "
+                    f"ort. hareket (erken yöne göre) %{ort_yonlu:+.2f}")
+            satirlar.append("")
+
+        satirlar.append(
+            "ℹ️ 'Tersine dönme' = ilk 15dk'daki yönün tam tersi yönde kapanmış "
+            "olması. %50 civarı = yazı-tura, anlamlı bir şey yok. 'Ort. hareket' "
+            "pozitifse ilk yönde devam ediyor demek, negatifse tersine dönüyor "
+            "demek (erken harekete göre işaretli).")
+        send_telegram_message("\n".join(satirlar))
+
+    except Exception as e:
+        send_telegram_message(f"❌ Açılış backtest hatası: {e}")
+    finally:
+        with _kilit:
+            _calisiyor["acilis"] = False
+
+
+# =============================================================================
 # KOMUT DİNLEME — bu token'ı başka HİÇBİR modül dinlemiyor, kendi
 # getUpdates döngüsünü açması güvenli (409 Conflict riski yok).
 # =============================================================================
@@ -364,6 +490,8 @@ def backtest_komut_dongusu():
                         threading.Thread(target=haber_backtest_calistir, daemon=True).start()
                     elif text.startswith("/gap_backtest"):
                         threading.Thread(target=gap_backtest_calistir, daemon=True).start()
+                    elif text.startswith("/acilis_backtest"):
+                        threading.Thread(target=acilis_ilk15dk_backtest_calistir, daemon=True).start()
                 _offset_kaydet(offset)
         except Exception as e:
             print(f"[Backtest] Komut döngüsü hatası: {e}", flush=True)
@@ -377,5 +505,7 @@ def baslangic():
         "/haber_backtest — haber pozitif/negatif sınıflandırması gerçekten "
         "fiyatla örtüşüyor mu, kaç gün sonra tutuyor?\n"
         "/gap_backtest — hacimli hisselerde küçük açılış boşluğu tersine mi "
-        "dönüyor, büyük boşluk aynı yönde mi devam ediyor?\n\n"
-        "İkisi de birkaç dakika sürebilir, sonuç hazır olunca ayrı mesaj gelecek.")
+        "dönüyor, büyük boşluk aynı yönde mi devam ediyor?\n"
+        "/acilis_backtest — piyasa açıldıktan sonraki ilk 15 dakikadaki hareket, "
+        "sonraki 1-2 saatte tersine mi dönüyor, devam mı ediyor?\n\n"
+        "Hepsi birkaç dakika sürebilir, sonuç hazır olunca ayrı mesaj gelecek.")
