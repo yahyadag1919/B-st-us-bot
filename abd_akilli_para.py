@@ -392,12 +392,14 @@ def _form4_kontrol_dongusu():
 # =============================================================================
 # FINNHUB — HABER TARAMA
 # =============================================================================
-def _haber_bildir(ticker: str, haber: dict):
+def _haber_bildir(ticker: str, haber: dict, yon: str):
     baslik = haber.get("headline", "")
     kaynak = haber.get("source", "")
     url = haber.get("url", "")
     fiyat_bilgi = _alpaca_fiyat_al(ticker)
-    satirlar = [f"📰 HABER — {ticker} ({kaynak})", baslik]
+    yon_etiket = {"pozitif": "🟢 Olumlu", "negatif": "🔴 Olumsuz",
+                  "belirsiz": "⚪ Belirsiz/karışık"}[yon]
+    satirlar = [f"📰 HABER — {ticker} ({kaynak}) — {yon_etiket}", baslik]
     if fiyat_bilgi:
         satirlar.append(f"Şu anki fiyat (Alpaca/IEX, gerçek zamanlı): ${fiyat_bilgi:.2f}")
     if url:
@@ -406,34 +408,80 @@ def _haber_bildir(ticker: str, haber: dict):
     _durum["son_haber"] = datetime.now(timezone.utc).isoformat(timespec="seconds")
 
 
-# Başlıkta bu kelimelerden EN AZ BİRİ geçmiyorsa haber "gürültü" (genel
-# yorum/analiz yazısı) sayılıp gönderilmez - sadece gerçek bir OLAYI
-# işaret eden haberler geçer. Hepsi İngilizce çünkü Finnhub'ın kaynakları
-# (Yahoo, Reuters, Motley Fool vb.) İngilizce yayın yapıyor.
-ONEMLI_HABER_ANAHTAR_KELIMELERI = {
+# Anahtar kelimeler artık YÖNÜNE göre ayrı - hem "önemli mi" hem
+# "olumlu mu olumsuz mu" tek geçişte belirleniyor. Yön net değilse
+# (örn. satın alma - hedef şirket için iyi, alıcı için değişken)
+# BELIRSIZ_KELIMELER'e konuyor, yine bildiriliyor ama yönü iddia
+# edilmiyor.
+POZITIF_ONEMLI_KELIMELER = {
+    "fda approval", "fda approves",
+    "upgrade", "upgrades", "raises guidance", "guidance raised",
+    "beats estimates", "earnings beat",
+    "stock split", "buyback", "share repurchase",
+}
+
+NEGATIF_ONEMLI_KELIMELER = {
     "bankruptcy", "chapter 11", "files for bankruptcy",
-    "lawsuit", "sues", "sued", "settlement", "class action",
+    "lawsuit", "sues", "sued", "class action",
     "investigation", "probe", "sec investigates", "doj",
-    "fda approval", "fda rejects", "fda approves", "clinical trial results",
-    "recall",
-    "downgrade", "downgrades", "upgrade", "upgrades", "cuts rating",
-    "guidance cut", "cuts guidance", "raises guidance", "guidance raised",
-    "misses estimates", "beats estimates", "earnings miss", "earnings beat",
+    "fda rejects", "recall",
+    "downgrade", "downgrades", "cuts rating",
+    "guidance cut", "cuts guidance",
+    "misses estimates", "earnings miss",
     "layoffs", "job cuts", "workforce reduction",
     "resigns", "resignation", "steps down", "fired", "ousted", "ceo departure",
     "data breach", "hack", "cyberattack",
+    "halted", "trading halt", "delisted", "delisting",
+    "credit rating cut", "credit rating downgrade", "default",
+}
+
+BELIRSIZ_ONEMLI_KELIMELER = {
+    "settlement", "clinical trial results",
     "acquisition", "acquires", "to acquire", "merger", "to merge", "takeover",
     "bid for", "hostile bid",
-    "halted", "trading halt", "delisted", "delisting",
-    "stock split", "buyback", "share repurchase",
-    "credit rating cut", "credit rating downgrade", "default",
     "activist investor", "activist stake",
 }
+
+ONEMLI_HABER_ANAHTAR_KELIMELERI = (
+    POZITIF_ONEMLI_KELIMELER | NEGATIF_ONEMLI_KELIMELER | BELIRSIZ_ONEMLI_KELIMELER)
 
 
 def _onemli_haber_mi(baslik: str) -> bool:
     b = baslik.lower()
     return any(kelime in b for kelime in ONEMLI_HABER_ANAHTAR_KELIMELERI)
+
+
+def _haber_yonu(baslik: str) -> str:
+    b = baslik.lower()
+    if any(k in b for k in NEGATIF_ONEMLI_KELIMELER):
+        return "negatif"
+    if any(k in b for k in POZITIF_ONEMLI_KELIMELER):
+        return "pozitif"
+    return "belirsiz"
+
+
+# Bazı mega-cap şirketler (Microsoft, Apple, Google vb.) SIK SIK başka
+# şirketlerin haberlerinde bağlam olarak anılıyor ("Microsoft-first",
+# "Apple tedarikçisi" gibi) - bu onların KENDİ haberi olduğu anlamına
+# gelmiyor. Bu şirketler için, isim başlığın BAŞINDA (ilk ~6 kelime)
+# geçmiyorsa, haberin gerçek öznesi o şirket sayılmıyor. Listede
+# olmayan tickerlar için bu kontrol uygulanmıyor (küçük şirketlerde bu
+# yanlış-eşleştirme sorunu çok daha nadir).
+SIRKET_ADI_ESLESTIRME = {
+    "AAPL": ["apple"], "MSFT": ["microsoft"],
+    "GOOGL": ["google", "alphabet"], "GOOG": ["google", "alphabet"],
+    "AMZN": ["amazon"], "META": ["meta", "facebook"],
+    "NVDA": ["nvidia"], "TSLA": ["tesla"],
+    "NFLX": ["netflix"], "AMD": ["amd", "advanced micro devices"],
+}
+
+
+def _haber_konusu_dogru_mu(ticker: str, baslik: str) -> bool:
+    isimler = SIRKET_ADI_ESLESTIRME.get(ticker)
+    if not isimler:
+        return True  # eşleştirme tanımlı değilse varsayılan: geçir
+    ilk_kisim = " ".join(baslik.lower().split()[:6])
+    return any(isim in ilk_kisim for isim in isimler)
 
 
 # Sadece bu güvenilir tel/haber ajanslarından gelen haberler geçer -
@@ -489,9 +537,11 @@ def _haber_ticker_tara(ticker: str, gorulen: dict, gunluk_sayac: dict, bugun_str
             continue
         if not _onemli_haber_mi(h.get("headline", "")):
             continue
+        if not _haber_konusu_dogru_mu(ticker, h.get("headline", "")):
+            continue
         if gunluk_sayac.get(ticker, 0) >= GUNLUK_HISSE_BASI_HABER_LIMITI:
             continue
-        _haber_bildir(ticker, h)
+        _haber_bildir(ticker, h, _haber_yonu(h.get("headline", "")))
         gunluk_sayac[ticker] = gunluk_sayac.get(ticker, 0) + 1
 
     if yeni_idler or ilk_calisma:
