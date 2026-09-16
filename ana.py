@@ -46,7 +46,8 @@ ANA_SURUM = "ana-v2-abd-sinyal-kapatildi-2026-09-04"
 
 app = Flask(__name__)
 _durum = {"us": "yüklenmedi", "sosyal": "yüklenmedi", "futbol": "yüklenmedi",
-          "midas": "yüklenmedi", "akilli_para": "yüklenmedi", "katalizor": "yüklenmedi"}
+          "midas": "yüklenmedi", "akilli_para": "yüklenmedi", "katalizor": "yüklenmedi",
+          "backtest": "yüklenmedi"}
 
 
 # =====================================================================
@@ -116,6 +117,15 @@ except Exception as e:
     KATALIZOR = None
     _durum["katalizor"] = f"❌ {e}"
     print(f"[ANA] bist_katalizor yüklenemedi: {e}", flush=True)
+    traceback.print_exc()
+
+try:
+    import abd_backtest as BACKTEST
+    _durum["backtest"] = "✅ yüklendi"
+except Exception as e:
+    BACKTEST = None
+    _durum["backtest"] = f"❌ {e}"
+    print(f"[ANA] abd_backtest yüklenemedi: {e}", flush=True)
     traceback.print_exc()
 
 
@@ -190,6 +200,7 @@ def ana_sayfa():
          f"<li>Midas Takip: {_durum['midas']}</li>",
          f"<li>ABD Akıllı Para: {_durum['akilli_para']}</li>",
          f"<li>BIST Katalizör: {_durum['katalizor']}</li>",
+         f"<li>ABD Backtest: {_durum['backtest']}</li>",
          "</ul>"]
     if SOSYAL is not None:
         try:
@@ -288,6 +299,14 @@ if __name__ == "__main__":
         threading.Thread(target=_guvenli("BIST Katalizör",
                                           KATALIZOR.katalizor_kontrol_dongusu), daemon=True).start()
         print("[ANA] BIST Katalizör thread'i başlatıldı.", flush=True)
+
+    # --- 7) GERİYE DÖNÜK TEST (haber + gap hipotezleri) ---
+    if BACKTEST is not None:
+        threading.Thread(target=_tek_seferlik("Backtest başlangıç",
+                                               BACKTEST.baslangic), daemon=True).start()
+        threading.Thread(target=_guvenli("Backtest komut",
+                                          BACKTEST.backtest_komut_dongusu), daemon=True).start()
+        print("[ANA] Backtest thread'leri başlatıldı.", flush=True)
 
     # --- TEK DIŞ PING (hepsi için) ---
     threading.Thread(target=dis_ping, daemon=True).start()
