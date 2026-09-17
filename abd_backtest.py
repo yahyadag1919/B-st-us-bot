@@ -60,7 +60,7 @@ def _running_test_kilit():
 
 
 _kilit = _running_test_kilit()
-_calisiyor = {"haber": False, "gap": False, "acilis": False}
+_calisiyor = {"haber": False, "gap": False, "acilis": False, "korelasyon": False}
 
 
 # =============================================================================
@@ -446,6 +446,139 @@ def acilis_ilk15dk_backtest_calistir():
 
 
 # =============================================================================
+# 4) BIST-ABD KORELASYONU (GENEL + SEKTÖREL)
+# =============================================================================
+KORELASYON_PERIYOD = "2y"
+
+SEKTOR_ESLESTIRME = {
+    "Gıda/Tüketim": {
+        "bist": ["AEFES.IS", "ULKER.IS", "CCOLA.IS", "TATGD.IS", "BANVT.IS"],
+        "abd_etf": "XLP",
+    },
+    "Bankacılık": {
+        "bist": ["GARAN.IS", "AKBNK.IS", "ISCTR.IS", "YKBNK.IS", "VAKBN.IS", "HALKB.IS"],
+        "abd_etf": "XLF",
+    },
+    "Sanayi": {
+        "bist": ["EREGL.IS", "KRDMD.IS", "SISE.IS", "TKFEN.IS", "ISDMR.IS"],
+        "abd_etf": "XLI",
+    },
+}
+
+
+def _endeks_getirisi(ticker: str, periyod: str):
+    try:
+        df = yf.Ticker(ticker).history(period=periyod)
+        if df.empty:
+            return None
+        seri = df["Close"].pct_change() * 100
+        if seri.index.tz is not None:
+            seri.index = seri.index.tz_localize(None)
+        return seri.dropna()
+    except Exception:
+        return None
+
+
+def _sepet_getirisi(tickers: list, periyod: str):
+    try:
+        veri = yf.download(tickers=" ".join(tickers), period=periyod,
+                            group_by="ticker", threads=True, progress=False,
+                            auto_adjust=True)
+    except Exception:
+        return None
+    kapanislar = {}
+    for t in tickers:
+        try:
+            df = veri[t] if len(tickers) > 1 else veri
+            k = df["Close"].dropna()
+            if not k.empty:
+                kapanislar[t] = k
+        except Exception:
+            continue
+    if not kapanislar:
+        return None
+    ortak = pd.concat(kapanislar, axis=1)
+    if ortak.index.tz is not None:
+        ortak.index = ortak.index.tz_localize(None)
+    getiri = ortak.pct_change().mean(axis=1) * 100  # eşit ağırlıklı sepet
+    return getiri.dropna()
+
+
+def _abd_bir_onceki_getiri(bist_getiri, us_getiri):
+    """Her BIST günü için, o gün açılmadan önce TAMAMLANMIŞ en son ABD
+    seansının getirisini hizalar (basit ama makul bir yaklaşım - hafta
+    sonu/tatil farklarını ffill+shift ile idare ediyor)."""
+    tum_tarihler = sorted(set(bist_getiri.index) | set(us_getiri.index))
+    us_gunluk = us_getiri.reindex(tum_tarihler).ffill()
+    us_bir_onceki = us_gunluk.shift(1)
+    return us_bir_onceki.reindex(bist_getiri.index)
+
+
+def _iliski_raporu(bist_getiri, abd_onceki, isim: str) -> str:
+    birlesik = pd.DataFrame({"bist": bist_getiri, "abd_onceki": abd_onceki}).dropna()
+    if len(birlesik) < 30:
+        return f"{isim}: örnek yetersiz (n={len(birlesik)})"
+    korelasyon = birlesik["bist"].corr(birlesik["abd_onceki"])
+    yukselince = birlesik[birlesik["abd_onceki"] > 0]
+    dusunce = birlesik[birlesik["abd_onceki"] < 0]
+    ayni_yon_orani = ((birlesik["bist"] > 0) == (birlesik["abd_onceki"] > 0)).mean() * 100
+    return (
+        f"{isim}\n"
+        f"  n={len(birlesik)}, korelasyon={korelasyon:+.2f}, aynı yönde hareket %{ayni_yon_orani:.0f}\n"
+        f"  ABD (önceki seans) yükselince → BIST ort. %{yukselince['bist'].mean():+.2f} (n={len(yukselince)})\n"
+        f"  ABD (önceki seans) düşünce → BIST ort. %{dusunce['bist'].mean():+.2f} (n={len(dusunce)})")
+
+
+def korelasyon_backtest_calistir():
+    with _kilit:
+        if _calisiyor.get("korelasyon"):
+            send_telegram_message("⏳ Korelasyon testi zaten çalışıyor, bekle.")
+            return
+        _calisiyor["korelasyon"] = True
+
+    try:
+        send_telegram_message(
+            f"🔬 BIST-ABD korelasyon testi başladı ({BACKTEST_SURUM})\n"
+            f"Son {KORELASYON_PERIYOD} - genel piyasa + 3 sektör taranıyor...")
+
+        satirlar = [f"📊 BIST-ABD KORELASYON TESTİ ({KORELASYON_PERIYOD})\n", "GENEL PİYASA:"]
+
+        bist_genel = _endeks_getirisi("XU100.IS", KORELASYON_PERIYOD)
+        us_genel = _endeks_getirisi("^GSPC", KORELASYON_PERIYOD)
+        if bist_genel is None or us_genel is None:
+            satirlar.append("❌ Genel endeks verisi alınamadı (XU100.IS ve/veya ^GSPC).")
+        else:
+            abd_onceki = _abd_bir_onceki_getiri(bist_genel, us_genel)
+            satirlar.append(_iliski_raporu(bist_genel, abd_onceki, "BIST100 vs S&P500 (bir önceki seans)"))
+        satirlar.append("")
+
+        satirlar.append("SEKTÖREL:")
+        for sektor_adi, eslestirme in SEKTOR_ESLESTIRME.items():
+            bist_sepet = _sepet_getirisi(eslestirme["bist"], KORELASYON_PERIYOD)
+            us_etf = _endeks_getirisi(eslestirme["abd_etf"], KORELASYON_PERIYOD)
+            if bist_sepet is None or us_etf is None:
+                satirlar.append(f"{sektor_adi}: veri alınamadı\n")
+                continue
+            abd_onceki_sektor = _abd_bir_onceki_getiri(bist_sepet, us_etf)
+            satirlar.append(_iliski_raporu(
+                bist_sepet, abd_onceki_sektor,
+                f"{sektor_adi} (BIST sepeti vs ABD {eslestirme['abd_etf']} ETF)"))
+            satirlar.append("")
+
+        satirlar.append(
+            "ℹ️ Korelasyon -1..+1: +1 tam aynı yönde, 0 ilişkisiz, -1 tam ters "
+            "yönde. 'Bir önceki seans' = BIST günü açılmadan önce tamamlanmış "
+            "en son ABD seansı.")
+        send_telegram_message("\n".join(satirlar))
+
+    except Exception as e:
+        send_telegram_message(f"❌ Korelasyon backtest hatası: {e}")
+    finally:
+        with _kilit:
+            _calisiyor["korelasyon"] = False
+
+
+# =============================================================================
 # KOMUT DİNLEME — bu token'ı başka HİÇBİR modül dinlemiyor, kendi
 # getUpdates döngüsünü açması güvenli (409 Conflict riski yok).
 # =============================================================================
@@ -492,6 +625,8 @@ def backtest_komut_dongusu():
                         threading.Thread(target=gap_backtest_calistir, daemon=True).start()
                     elif text.startswith("/acilis_backtest"):
                         threading.Thread(target=acilis_ilk15dk_backtest_calistir, daemon=True).start()
+                    elif text.startswith("/korelasyon_backtest"):
+                        threading.Thread(target=korelasyon_backtest_calistir, daemon=True).start()
                 _offset_kaydet(offset)
         except Exception as e:
             print(f"[Backtest] Komut döngüsü hatası: {e}", flush=True)
@@ -507,5 +642,7 @@ def baslangic():
         "/gap_backtest — hacimli hisselerde küçük açılış boşluğu tersine mi "
         "dönüyor, büyük boşluk aynı yönde mi devam ediyor?\n"
         "/acilis_backtest — piyasa açıldıktan sonraki ilk 15 dakikadaki hareket, "
-        "sonraki 1-2 saatte tersine mi dönüyor, devam mı ediyor?\n\n"
+        "sonraki 1-2 saatte tersine mi dönüyor, devam mı ediyor?\n"
+        "/korelasyon_backtest — BIST, ABD piyasasından (genel + sektörel: "
+        "gıda/bankacılık/sanayi) ne kadar etkileniyor?\n\n"
         "Hepsi birkaç dakika sürebilir, sonuç hazır olunca ayrı mesaj gelecek.")
