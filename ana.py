@@ -47,7 +47,7 @@ ANA_SURUM = "ana-v2-abd-sinyal-kapatildi-2026-09-04"
 app = Flask(__name__)
 _durum = {"us": "yüklenmedi", "sosyal": "yüklenmedi", "futbol": "yüklenmedi",
           "midas": "yüklenmedi", "akilli_para": "yüklenmedi", "katalizor": "yüklenmedi",
-          "backtest": "yüklenmedi"}
+          "backtest": "yüklenmedi", "kapsamli": "yüklenmedi"}
 
 
 # =====================================================================
@@ -118,6 +118,23 @@ except Exception as e:
     _durum["katalizor"] = f"❌ {e}"
     print(f"[ANA] bist_katalizor yüklenemedi: {e}", flush=True)
     traceback.print_exc()
+
+try:
+    import bist_kapsamli_analiz as KAPSAMLI
+    _durum["kapsamli"] = "✅ yüklendi"
+except Exception as e:
+    KAPSAMLI = None
+    _durum["kapsamli"] = f"❌ {e}"
+    print(f"[ANA] bist_kapsamli_analiz yüklenemedi: {e}", flush=True)
+    traceback.print_exc()
+
+if KAPSAMLI is not None and US is not None:
+    try:
+        US.arge_botu.ek_update_isleyici_ekle(KAPSAMLI.kapsamli_analiz_update_isle)
+        print("[ANA] Kapsamlı analiz, arge_botu'nun Telegram döngüsüne bağlandı.", flush=True)
+    except Exception as e:
+        print(f"[ANA] Kapsamlı analiz arge_botu'na bağlanamadı: {e}", flush=True)
+        traceback.print_exc()
 
 try:
     import abd_backtest as BACKTEST
@@ -201,6 +218,7 @@ def ana_sayfa():
          f"<li>ABD Akıllı Para: {_durum['akilli_para']}</li>",
          f"<li>BIST Katalizör: {_durum['katalizor']}</li>",
          f"<li>ABD Backtest: {_durum['backtest']}</li>",
+         f"<li>BIST Kapsamlı Analiz: {_durum['kapsamli']}</li>",
          "</ul>"]
     if SOSYAL is not None:
         try:
@@ -307,6 +325,12 @@ if __name__ == "__main__":
         threading.Thread(target=_guvenli("Backtest komut",
                                           BACKTEST.backtest_komut_dongusu), daemon=True).start()
         print("[ANA] Backtest thread'leri başlatıldı.", flush=True)
+
+    # --- 8) BIST KAPSAMLI ANALİZ (tek seferlik rapor, arge_botu'na kancalı) ---
+    if KAPSAMLI is not None:
+        threading.Thread(target=_tek_seferlik("Kapsamlı analiz başlangıç",
+                                               KAPSAMLI.baslangic), daemon=True).start()
+        print("[ANA] Kapsamlı analiz başlangıç mesajı thread'i başlatıldı.", flush=True)
 
     # --- TEK DIŞ PING (hepsi için) ---
     threading.Thread(target=dis_ping, daemon=True).start()
