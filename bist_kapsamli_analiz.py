@@ -39,7 +39,7 @@ DATA_DIR = os.environ.get("DATA_DIR", ".")
 KAPSAMLI_SURUM = "bist-kapsamli-analiz-v1-2026-09-17"
 
 _kilit = threading.Lock()
-_calisiyor = {"rapor": False}
+_calisiyor = {"rapor": False, "finans_iliski": False}
 
 
 # =============================================================================
@@ -201,6 +201,131 @@ def _karar_sonrasi_getiri(fiyat_serisi, karar_tarihi, gun_sonra):
     return (hedef_fiyat - baz_fiyat) / baz_fiyat * 100
 
 
+# =============================================================================
+# 4) FİNANSAL OKURYAZARLIK TESTİ — "herkesin bildiği" piyasa ilişkileri
+# gerçekten geçerli mi?
+# =============================================================================
+FINANSAL_ILISKI_PERIYOD = "2y"
+
+FINANSAL_ILISKILER = [
+    # (x_ticker, x_isim, y_ticker, y_isim, beklenti: "ayni"/"ters")
+    ("DX-Y.NYB", "Dolar Endeksi", "GC=F", "Altın", "ters"),
+    ("^TNX", "ABD 10Y Tahvil Faizi", "GC=F", "Altın", "ters"),
+    ("^TNX", "ABD 10Y Tahvil Faizi", "QQQ", "Nasdaq/Büyüme Hisseleri", "ters"),
+    ("^TNX", "ABD 10Y Tahvil Faizi", "XLF", "ABD Bankacılık Sektörü", "ayni"),
+    ("CL=F", "Ham Petrol", "XLE", "ABD Enerji Sektörü", "ayni"),
+    ("CL=F", "Ham Petrol", "DAL", "Havayolu (Delta)", "ters"),
+    ("DX-Y.NYB", "Dolar Endeksi", "EEM", "Gelişen Piyasalar", "ters"),
+    ("DX-Y.NYB", "Dolar Endeksi", "XU100.IS", "BIST100", "ters"),
+    ("^VIX", "VIX (Korku Endeksi)", "^GSPC", "S&P 500", "ters"),
+    ("BTC-USD", "Bitcoin", "GC=F", "Altın", "ayni"),
+    ("GC=F", "Altın", "XU100.IS", "BIST100", "ayni"),
+]
+
+FINANSAL_ILISKI_KORELASYON_ESIGI = 0.15  # bunun altı "zayıf/yok" sayılır
+
+
+def _getiri_serisi(ticker: str, periyod: str):
+    try:
+        df = yf.Ticker(ticker).history(period=periyod)
+        if df.empty:
+            return None
+        s = df["Close"].pct_change() * 100
+        if s.index.tz is not None:
+            s.index = s.index.tz_localize(None)
+        return s.dropna()
+    except Exception:
+        return None
+
+
+def _iliski_testi(x_ticker, x_isim, y_ticker, y_isim, beklenti) -> str:
+    x = _getiri_serisi(x_ticker, FINANSAL_ILISKI_PERIYOD)
+    y = _getiri_serisi(y_ticker, FINANSAL_ILISKI_PERIYOD)
+    if x is None or y is None:
+        return f"**{x_isim} → {y_isim}**: veri alınamadı ({x_ticker} ve/veya {y_ticker})\n"
+
+    birlesik = pd.DataFrame({"x": x, "y": y}).dropna()
+    if len(birlesik) < 30:
+        return f"**{x_isim} → {y_isim}**: örnek yetersiz (n={len(birlesik)})\n"
+
+    kor = birlesik["x"].corr(birlesik["y"])
+    x_yukselince = birlesik[birlesik["x"] > 0]
+    x_dusunce = birlesik[birlesik["x"] < 0]
+
+    if beklenti == "ayni":
+        dogrulandi = kor > FINANSAL_ILISKI_KORELASYON_ESIGI
+        beklenti_tr = "aynı yönde hareket"
+    else:
+        dogrulandi = kor < -FINANSAL_ILISKI_KORELASYON_ESIGI
+        beklenti_tr = "ters yönde hareket"
+    isaret = "✅ Beklenti doğrulandı" if dogrulandi else "❌ Beklenti doğrulanmadı / ilişki zayıf"
+
+    return (
+        f"**{x_isim} → {y_isim}** (klasik beklenti: {beklenti_tr})\n"
+        f"  n={len(birlesik)}, korelasyon={kor:+.2f} — {isaret}\n"
+        f"  {x_isim} yükselince → {y_isim} ort. %{x_yukselince['y'].mean():+.2f} (n={len(x_yukselince)})\n"
+        f"  {x_isim} düşünce → {y_isim} ort. %{x_dusunce['y'].mean():+.2f} (n={len(x_dusunce)})\n")
+
+
+def _finansal_okuryazarlik_bolumu() -> str:
+    satirlar = []
+    for x_t, x_i, y_t, y_i, beklenti in FINANSAL_ILISKILER:
+        satirlar.append(_iliski_testi(x_t, x_i, y_t, y_i, beklenti))
+        time.sleep(0.3)
+    return "\n".join(satirlar)
+
+
+def finansal_okuryazarlik_raporu_olustur():
+    with _kilit:
+        if _calisiyor.get("finans_iliski"):
+            send_telegram_message("⏳ Finansal ilişki testi zaten çalışıyor, bekle.")
+            return
+        _calisiyor["finans_iliski"] = True
+
+    try:
+        send_telegram_message(
+            f"🔬 Finansal okuryazarlık testi başladı ({KAPSAMLI_SURUM})\n"
+            f"{len(FINANSAL_ILISKILER)} klasik piyasa ilişkisi test ediliyor...")
+
+        bolum = _finansal_okuryazarlik_bolumu()
+
+        rapor = f"""# Finansal Okuryazarlık Testi — Klasik Piyasa İlişkileri
+Oluşturulma: {datetime.now(timezone.utc).strftime('%Y-%m-%d %H:%M UTC')}
+Dönem: son {FINANSAL_ILISKI_PERIYOD}
+
+## Ne test edildi?
+"Herkesin bildiği" klasik piyasa ilişkileri (altın-dolar, faiz-büyüme
+hisseleri, petrol-enerji vb.) gerçek fiyat verisiyle test edildi.
+Korelasyon ±{FINANSAL_ILISKI_KORELASYON_ESIGI}'in altındaysa "zayıf/yok"
+sayıldı - bu eşiğin keyfi olduğunu unutma, sınırda çıkan sonuçlara
+temkinli yaklaş.
+
+---
+
+{bolum}
+
+---
+
+## Genel Değerlendirme
+Korelasyon -1..+1 arası: +1 tam aynı yönde, 0 ilişkisiz, -1 tam ters
+yönde. "❌ doğrulanmadı" çıkan bir ilişki, klasik kuralın YANLIŞ olduğu
+anlamına gelmez - kısa dönemde (2 yıl) başka faktörlerin baskın
+olabileceği, ya da ilişkinin uzun vadede geçerli olup kısa vadede
+gürültüye karıştığı anlamına da gelebilir.
+"""
+        dosya_yolu = os.path.join(DATA_DIR, "finansal_okuryazarlik_raporu.md")
+        with open(dosya_yolu, "w", encoding="utf-8") as f:
+            f.write(rapor)
+
+        send_telegram_document(dosya_yolu, caption="📄 Finansal Okuryazarlık Testi Raporu")
+
+    except Exception as e:
+        send_telegram_message(f"❌ Finansal ilişki testi hatası: {e}")
+    finally:
+        with _kilit:
+            _calisiyor["finans_iliski"] = False
+
+
 def _faiz_karari_bolumu(karar_listesi, bist_fiyat) -> str:
     satirlar = []
     for yon_kod, yon_tr in [("artis", "Faiz ARTIŞI"), ("indirim", "Faiz İNDİRİMİ"),
@@ -320,6 +445,8 @@ def kapsamli_analiz_update_isle(update: dict):
     text = (mesaj.get("text") or "").strip().lower()
     if text.startswith("/kapsamli_rapor"):
         threading.Thread(target=kapsamli_rapor_olustur, daemon=True).start()
+    elif text.startswith("/finans_iliski_raporu"):
+        threading.Thread(target=finansal_okuryazarlik_raporu_olustur, daemon=True).start()
 
 
 def baslangic():
@@ -327,4 +454,7 @@ def baslangic():
         f"📄 BIST Kapsamlı Analiz Modülü AKTİF — {KAPSAMLI_SURUM}\n\n"
         "Komut: /kapsamli_rapor\n"
         "Fiyat-hacim anomalileri + TCMB/Fed faiz kararı tepkisini tek bir "
-        "dosyada toplar (5-10 dk sürebilir).")
+        "dosyada toplar (5-10 dk sürebilir).\n\n"
+        "Komut: /finans_iliski_raporu\n"
+        "Altın-dolar, faiz-hisse, petrol-enerji gibi klasik piyasa "
+        "ilişkilerini gerçek veriyle test eder.")
