@@ -208,7 +208,7 @@ def _karar_sonrasi_getiri(fiyat_serisi, karar_tarihi, gun_sonra):
 FINANSAL_ILISKI_PERIYOD = "2y"
 
 FINANSAL_ILISKILER = [
-    # (x_ticker, x_isim, y_ticker, y_isim, beklenti: "ayni"/"ters")
+    # (x_ticker, x_isim, y_ticker, y_isim, beklenti: "ayni"/"ters"/"belirsiz")
     ("DX-Y.NYB", "Dolar Endeksi", "GC=F", "Altın", "ters"),
     ("^TNX", "ABD 10Y Tahvil Faizi", "GC=F", "Altın", "ters"),
     ("^TNX", "ABD 10Y Tahvil Faizi", "QQQ", "Nasdaq/Büyüme Hisseleri", "ters"),
@@ -220,6 +220,21 @@ FINANSAL_ILISKILER = [
     ("^VIX", "VIX (Korku Endeksi)", "^GSPC", "S&P 500", "ters"),
     ("BTC-USD", "Bitcoin", "GC=F", "Altın", "ayni"),
     ("GC=F", "Altın", "XU100.IS", "BIST100", "ayni"),
+    # --- Ek: emtialar ---
+    ("SI=F", "Gümüş", "GC=F", "Altın", "ayni"),
+    ("HG=F", "Bakır ('Dr. Copper' - küresel büyüme göstergesi sayılır)", "^GSPC", "S&P 500", "ayni"),
+    ("HG=F", "Bakır", "XU100.IS", "BIST100", "ayni"),
+    ("NG=F", "Doğalgaz", "XLU", "ABD Kamu Hizmetleri (Utilities)", "ters"),
+    # --- Ek: döviz/TL ---
+    ("TRY=X", "Dolar/TL", "XU100.IS", "BIST100", "belirsiz"),
+    ("TRY=X", "Dolar/TL", "GC=F", "Altın (USD)", "ters"),
+    ("EURUSD=X", "Euro/Dolar", "XU100.IS", "BIST100", "belirsiz"),
+    # --- Ek: "garip/şaşırtıcı" kombinasyonlar ---
+    ("BTC-USD", "Bitcoin", "TRY=X", "Dolar/TL", "belirsiz"),
+    ("BTC-USD", "Bitcoin", "QQQ", "Nasdaq ('dijital altın' değil 'riskli teknoloji' mi?)", "ayni"),
+    ("^VIX", "VIX (Korku Endeksi)", "BTC-USD", "Bitcoin", "ters"),
+    ("^VIX", "VIX (Korku Endeksi)", "GC=F", "Altın (güvenli liman mı?)", "ayni"),
+    ("JPY=X", "Dolar/Yen (carry trade göstergesi)", "^GSPC", "S&P 500", "ayni"),
 ]
 
 FINANSAL_ILISKI_KORELASYON_ESIGI = 0.15  # bunun altı "zayıf/yok" sayılır
@@ -255,16 +270,81 @@ def _iliski_testi(x_ticker, x_isim, y_ticker, y_isim, beklenti) -> str:
     if beklenti == "ayni":
         dogrulandi = kor > FINANSAL_ILISKI_KORELASYON_ESIGI
         beklenti_tr = "aynı yönde hareket"
-    else:
+        isaret = "✅ Beklenti doğrulandı" if dogrulandi else "❌ Beklenti doğrulanmadı / ilişki zayıf"
+    elif beklenti == "ters":
         dogrulandi = kor < -FINANSAL_ILISKI_KORELASYON_ESIGI
         beklenti_tr = "ters yönde hareket"
-    isaret = "✅ Beklenti doğrulandı" if dogrulandi else "❌ Beklenti doğrulanmadı / ilişki zayıf"
+        isaret = "✅ Beklenti doğrulandı" if dogrulandi else "❌ Beklenti doğrulanmadı / ilişki zayıf"
+    else:  # "belirsiz" - net bir beklenti yok, keşif amaçlı
+        beklenti_tr = "net bir beklenti yok, keşif amaçlı"
+        if abs(kor) > FINANSAL_ILISKI_KORELASYON_ESIGI:
+            isaret = f"ℹ️ Gerçek bir ilişki bulundu ({'aynı yönde' if kor > 0 else 'ters yönde'})"
+        else:
+            isaret = "ℹ️ Anlamlı bir ilişki bulunamadı"
 
     return (
         f"**{x_isim} → {y_isim}** (klasik beklenti: {beklenti_tr})\n"
         f"  n={len(birlesik)}, korelasyon={kor:+.2f} — {isaret}\n"
         f"  {x_isim} yükselince → {y_isim} ort. %{x_yukselince['y'].mean():+.2f} (n={len(x_yukselince)})\n"
         f"  {x_isim} düşünce → {y_isim} ort. %{x_dusunce['y'].mean():+.2f} (n={len(x_dusunce)})\n")
+
+
+# =============================================================================
+# 5) TAKVİM ANOMALİLERİ — "garip/şaşırtıcı" ama akademik literatürde
+# gerçekten tartışılan örüntüler (bazıları tartışmalı, kanıtlanmış
+# değil - bu yüzden hepsi keşif amaçlı, kesin sonuç değil)
+# =============================================================================
+_AY_REFERANS_YENI_AY = datetime(2000, 1, 6, tzinfo=timezone.utc)
+_SINODIK_AY_GUN = 29.530588853
+
+
+def _ay_evresi(tarih) -> float:
+    """0 = yeni ay, 0.5 = dolunay. Basit astronomik yaklaşım, dış API
+    gerektirmiyor."""
+    if tarih.tzinfo is None:
+        tarih = tarih.replace(tzinfo=timezone.utc)
+    gun_farki = (tarih - _AY_REFERANS_YENI_AY).total_seconds() / 86400
+    return (gun_farki % _SINODIK_AY_GUN) / _SINODIK_AY_GUN
+
+
+def _takvim_anomalileri_bolumu(ticker: str, isim: str, periyod: str = "5y") -> str:
+    getiri = _getiri_serisi(ticker, periyod)
+    if getiri is None or len(getiri) < 100:
+        return f"### {isim}\nVeri alınamadı veya yetersiz.\n"
+
+    satirlar = [f"### {isim} (n={len(getiri)} gün, son {periyod})"]
+
+    satirlar.append("**Haftanın günü etkisi:**")
+    gunler_tr = {0: "Pazartesi", 1: "Salı", 2: "Çarşamba", 3: "Perşembe", 4: "Cuma"}
+    for gun_no, gun_adi in gunler_tr.items():
+        alt = getiri[getiri.index.dayofweek == gun_no]
+        if len(alt) < 10:
+            continue
+        satirlar.append(f"  {gun_adi}: ort %{alt.mean():+.3f}/gün (n={len(alt)})")
+
+    satirlar.append("**'Mayısta Sat' etkisi (Mayıs-Ekim vs Kasım-Nisan):**")
+    yaz = getiri[getiri.index.month.isin([5, 6, 7, 8, 9, 10])]
+    kis = getiri[getiri.index.month.isin([11, 12, 1, 2, 3, 4])]
+    satirlar.append(f"  Mayıs-Ekim: ort %{yaz.mean():+.3f}/gün (n={len(yaz)})")
+    satirlar.append(f"  Kasım-Nisan: ort %{kis.mean():+.3f}/gün (n={len(kis)})")
+
+    satirlar.append("**Ay başı/sonu etkisi (ayın ilk/son 3 günü vs ay ortası):**")
+    ay_ucu = getiri[(getiri.index.day <= 3) | (getiri.index.day >= 28)]
+    ay_ortasi = getiri[(getiri.index.day > 3) & (getiri.index.day < 28)]
+    satirlar.append(f"  Ay başı/sonu: ort %{ay_ucu.mean():+.3f}/gün (n={len(ay_ucu)})")
+    satirlar.append(f"  Ay ortası: ort %{ay_ortasi.mean():+.3f}/gün (n={len(ay_ortasi)})")
+
+    satirlar.append("**Ay evresi etkisi** (akademik literatürde tartışmalı, kanıtlanmamış bir iddia):")
+    evreler = pd.Series([_ay_evresi(t) for t in getiri.index], index=getiri.index)
+    dolunay = getiri[(evreler > 0.45) & (evreler < 0.55)]
+    yeniay = getiri[(evreler < 0.05) | (evreler > 0.95)]
+    diger_maske = ~getiri.index.isin(dolunay.index) & ~getiri.index.isin(yeniay.index)
+    diger = getiri[diger_maske]
+    satirlar.append(f"  Dolunay dönemi (±1.5 gün): ort %{dolunay.mean():+.3f}/gün (n={len(dolunay)})")
+    satirlar.append(f"  Yeni ay dönemi (±1.5 gün): ort %{yeniay.mean():+.3f}/gün (n={len(yeniay)})")
+    satirlar.append(f"  Diğer günler: ort %{diger.mean():+.3f}/gün (n={len(diger)})")
+
+    return "\n".join(satirlar) + "\n"
 
 
 def _finansal_okuryazarlik_bolumu() -> str:
@@ -289,20 +369,39 @@ def finansal_okuryazarlik_raporu_olustur():
 
         bolum = _finansal_okuryazarlik_bolumu()
 
+        send_telegram_message("🔬 Takvim anomalileri (haftanın günü, 'Mayısta sat', ay evresi vb.) test ediliyor...")
+        takvim_bolumu = (_takvim_anomalileri_bolumu("XU100.IS", "BIST100") + "\n" +
+                          _takvim_anomalileri_bolumu("^GSPC", "S&P 500"))
+
         rapor = f"""# Finansal Okuryazarlık Testi — Klasik Piyasa İlişkileri
 Oluşturulma: {datetime.now(timezone.utc).strftime('%Y-%m-%d %H:%M UTC')}
-Dönem: son {FINANSAL_ILISKI_PERIYOD}
+Dönem: son {FINANSAL_ILISKI_PERIYOD} (ilişkiler), son 5y (takvim anomalileri)
 
 ## Ne test edildi?
 "Herkesin bildiği" klasik piyasa ilişkileri (altın-dolar, faiz-büyüme
-hisseleri, petrol-enerji vb.) gerçek fiyat verisiyle test edildi.
+hisseleri, petrol-enerji vb.) VE bazı "garip/şaşırtıcı" takvim
+anomalileri (haftanın günü etkisi, "Mayısta sat", ay evresi/dolunay
+etkisi) gerçek fiyat verisiyle test edildi.
 Korelasyon ±{FINANSAL_ILISKI_KORELASYON_ESIGI}'in altındaysa "zayıf/yok"
 sayıldı - bu eşiğin keyfi olduğunu unutma, sınırda çıkan sonuçlara
 temkinli yaklaş.
 
 ---
 
+## Bölüm A: Klasik Piyasa İlişkileri
+
 {bolum}
+
+---
+
+## Bölüm B: Takvim Anomalileri
+⚠️ Özellikle "ay evresi etkisi" akademik literatürde tartışmalı ve
+kanıtlanmamış bir iddiadır - eğlenceli/keşif amaçlı eklendi, ciddi bir
+temel olarak kullanılmamalı. Diğerleri (haftanın günü, Mayısta sat, ay
+başı/sonu) daha yaygın kabul gören, ama yine de tartışmalı piyasa
+anomalileridir.
+
+{takvim_bolumu}
 
 ---
 
@@ -311,7 +410,10 @@ Korelasyon -1..+1 arası: +1 tam aynı yönde, 0 ilişkisiz, -1 tam ters
 yönde. "❌ doğrulanmadı" çıkan bir ilişki, klasik kuralın YANLIŞ olduğu
 anlamına gelmez - kısa dönemde (2 yıl) başka faktörlerin baskın
 olabileceği, ya da ilişkinin uzun vadede geçerli olup kısa vadede
-gürültüye karıştığı anlamına da gelebilir.
+gürültüye karıştığı anlamına da gelebilir. Takvim anomalilerindeki
+farklar küçükse (binde birkaç), günlük işlem maliyetleriyle kolayca
+silinir - istatistiksel olarak "var" görünse bile ekonomik olarak
+önemsiz olabilir.
 """
         dosya_yolu = os.path.join(DATA_DIR, "finansal_okuryazarlik_raporu.md")
         with open(dosya_yolu, "w", encoding="utf-8") as f:
