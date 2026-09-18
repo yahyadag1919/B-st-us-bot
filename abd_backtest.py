@@ -60,7 +60,7 @@ def _running_test_kilit():
 
 
 _kilit = _running_test_kilit()
-_calisiyor = {"haber": False, "gap": False, "acilis": False, "korelasyon": False}
+_calisiyor = {"haber": False, "gap": False, "acilis": False, "korelasyon": False, "premarket": False}
 
 
 # =============================================================================
@@ -579,6 +579,133 @@ def korelasyon_backtest_calistir():
 
 
 # =============================================================================
+# 5) PRE-MARKET vs ANA SEANS — pre-market'teki (düşük hacimli) hareket, gerçek
+# hacim geldiğinde (ana seans açılışı) devam mı ediyor, siliniyor mu?
+# =============================================================================
+PREMARKET_PERIYOD = "59d"
+PREMARKET_BUCKETLARI = [(0, 0.5), (0.5, 1), (1, 2), (2, 999)]
+PREMARKET_HEDEF_DAKIKALAR = [30, 60, 120]
+PREMARKET_MIN_ORNEK = 15
+
+
+def premarket_backtest_calistir():
+    with _kilit:
+        if _calisiyor.get("premarket"):
+            send_telegram_message("⏳ Pre-market testi zaten çalışıyor, bekle.")
+            return
+        _calisiyor["premarket"] = True
+
+    try:
+        tickers = AK.AKILLI_PARA_TICKERS
+        send_telegram_message(
+            f"🔬 Pre-market vs ana seans testi başladı ({BACKTEST_SURUM})\n"
+            f"Son {PREMARKET_PERIYOD}, {len(tickers)} hisse, 5dk mumlarla "
+            f"(pre-market dahil) taranıyor - bu birkaç dakika sürebilir...")
+
+        sonuc = {b: {dk: {"n": 0, "ters_yon": 0, "hareket_toplam": 0.0}
+                     for dk in PREMARKET_HEDEF_DAKIKALAR}
+                 for b in PREMARKET_BUCKETLARI}
+        veri_alinamayan = 0
+
+        for i, ticker in enumerate(tickers):
+            try:
+                df = yf.Ticker(ticker).history(period=PREMARKET_PERIYOD,
+                                                interval="5m", prepost=True)
+            except Exception:
+                veri_alinamayan += 1
+                continue
+            if df is None or df.empty:
+                veri_alinamayan += 1
+                continue
+
+            try:
+                if df.index.tz is not None:
+                    df.index = df.index.tz_convert("America/New_York")
+            except Exception:
+                pass  # saat dilimi dönüştürülemezse ham veriyle devam et
+
+            for _, grup in df.groupby(df.index.date):
+                grup = grup.sort_index()
+                ana_seans_maske = (grup.index.hour > 9) | \
+                                   ((grup.index.hour == 9) & (grup.index.minute >= 30))
+                if not ana_seans_maske.any() or ana_seans_maske.all():
+                    continue  # pre-market ya da ana seans verisi hiç yok
+                ana_baslangic_konum = ana_seans_maske.argmax()
+
+                premarket_grup = grup.iloc[:ana_baslangic_konum]
+                ana_seans_grup = grup.iloc[ana_baslangic_konum:]
+                if premarket_grup.empty or len(ana_seans_grup) < max(PREMARKET_HEDEF_DAKIKALAR) // 5 + 1:
+                    continue
+
+                pre_ilk = premarket_grup["Open"].iloc[0]
+                pre_son = premarket_grup["Close"].iloc[-1]
+                if pd.isna(pre_ilk) or pre_ilk == 0 or pd.isna(pre_son):
+                    continue
+                premarket_hareket = (pre_son - pre_ilk) / pre_ilk * 100
+                abs_pre = abs(premarket_hareket)
+
+                ana_acilis = ana_seans_grup["Open"].iloc[0]
+                if pd.isna(ana_acilis) or ana_acilis == 0:
+                    continue
+
+                for (lo, hi) in PREMARKET_BUCKETLARI:
+                    if lo <= abs_pre < hi:
+                        for dk in PREMARKET_HEDEF_DAKIKALAR:
+                            bar_sayisi = dk // 5
+                            if bar_sayisi >= len(ana_seans_grup):
+                                continue
+                            hedef_fiyat = ana_seans_grup["Close"].iloc[bar_sayisi]
+                            if pd.isna(hedef_fiyat):
+                                continue
+                            sonraki_hareket = (hedef_fiyat - ana_acilis) / ana_acilis * 100
+                            ters_mi = (premarket_hareket > 0 and sonraki_hareket < 0) or \
+                                      (premarket_hareket < 0 and sonraki_hareket > 0)
+                            yonlu = sonraki_hareket if premarket_hareket >= 0 else -sonraki_hareket
+                            b = sonuc[(lo, hi)][dk]
+                            b["n"] += 1
+                            if ters_mi:
+                                b["ters_yon"] += 1
+                            b["hareket_toplam"] += yonlu
+                        break
+
+            if i % 20 == 0:
+                print(f"[Backtest] Pre-market testi {i}/{len(tickers)}", flush=True)
+
+        # --- Rapor ---
+        satirlar = [f"📊 PRE-MARKET vs ANA SEANS TEST SONUCU ({PREMARKET_PERIYOD})"]
+        if veri_alinamayan:
+            satirlar.append(f"({veri_alinamayan} hissede veri alınamadı, atlandı)\n")
+        for (lo, hi) in PREMARKET_BUCKETLARI:
+            aralik = f"%{lo:.1f}-{hi:.1f}" if hi < 999 else f"%{lo:.1f}+"
+            satirlar.append(f"Pre-market hareketi {aralik}:")
+            for dk in PREMARKET_HEDEF_DAKIKALAR:
+                veri_b = sonuc[(lo, hi)][dk]
+                n = veri_b["n"]
+                if n < PREMARKET_MIN_ORNEK:
+                    satirlar.append(f"  ana seans +{dk}dk: örnek yetersiz (n={n})")
+                    continue
+                ters_oran = veri_b["ters_yon"] / n * 100
+                ort_yonlu = veri_b["hareket_toplam"] / n
+                satirlar.append(
+                    f"  ana seans +{dk}dk: n={n}, TERSİNE DÖNME oranı %{ters_oran:.0f}, "
+                    f"ort. hareket (pre-market yönüne göre) %{ort_yonlu:+.2f}")
+            satirlar.append("")
+
+        satirlar.append(
+            "ℹ️ 'Tersine dönme' = pre-market'teki yönün tam tersi yönde ana "
+            "seansta hareket etmesi. %50 = yazı-tura. Negatif 'ort. hareket' "
+            "= pre-market hareketi ana seansta SİLİNİYOR/tersine dönüyor "
+            "demek; pozitif = gerçek hacimle DEVAM ediyor demek.")
+        send_telegram_message("\n".join(satirlar))
+
+    except Exception as e:
+        send_telegram_message(f"❌ Pre-market backtest hatası: {e}")
+    finally:
+        with _kilit:
+            _calisiyor["premarket"] = False
+
+
+# =============================================================================
 # KOMUT DİNLEME — bu token'ı başka HİÇBİR modül dinlemiyor, kendi
 # getUpdates döngüsünü açması güvenli (409 Conflict riski yok).
 # =============================================================================
@@ -627,6 +754,8 @@ def backtest_komut_dongusu():
                         threading.Thread(target=acilis_ilk15dk_backtest_calistir, daemon=True).start()
                     elif text.startswith("/korelasyon_backtest"):
                         threading.Thread(target=korelasyon_backtest_calistir, daemon=True).start()
+                    elif text.startswith("/premarket_backtest"):
+                        threading.Thread(target=premarket_backtest_calistir, daemon=True).start()
                 _offset_kaydet(offset)
         except Exception as e:
             print(f"[Backtest] Komut döngüsü hatası: {e}", flush=True)
@@ -644,5 +773,7 @@ def baslangic():
         "/acilis_backtest — piyasa açıldıktan sonraki ilk 15 dakikadaki hareket, "
         "sonraki 1-2 saatte tersine mi dönüyor, devam mı ediyor?\n"
         "/korelasyon_backtest — BIST, ABD piyasasından (genel + sektörel: "
-        "gıda/bankacılık/sanayi) ne kadar etkileniyor?\n\n"
+        "gıda/bankacılık/sanayi) ne kadar etkileniyor?\n"
+        "/premarket_backtest — pre-market'teki (düşük hacimli) hareket, "
+        "ana seans açıldığında (gerçek hacim) devam mı ediyor, siliniyor mu?\n\n"
         "Hepsi birkaç dakika sürebilir, sonuç hazır olunca ayrı mesaj gelecek.")
