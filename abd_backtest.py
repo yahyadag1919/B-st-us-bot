@@ -60,7 +60,8 @@ def _running_test_kilit():
 
 
 _kilit = _running_test_kilit()
-_calisiyor = {"haber": False, "gap": False, "acilis": False, "korelasyon": False, "premarket": False}
+_calisiyor = {"haber": False, "gap": False, "acilis": False, "korelasyon": False,
+              "premarket": False, "premarket_gap": False}
 
 
 # =============================================================================
@@ -706,6 +707,201 @@ def premarket_backtest_calistir():
 
 
 # =============================================================================
+# 6) PRE-MARKET'TE ≥%2 YÜKSELEN HİSSELER — ana seans açılınca ne oluyor?
+# + o gün endeks (SPY) pre-market'te yukarıda mı aşağıda mı bağlamı
+# =============================================================================
+PREMARKET_GAP_ESIK_PCT = 2.0
+PREMARKET_GAP_HEDEF_DAKIKALAR = [30, 60, 120]
+PREMARKET_GAP_MIN_ORNEK = 15
+PREMARKET_GAP_ENDEKS_YATAY_BANT = 0.2  # bu aralıktaki SPY hareketi "yatay" sayılır
+
+
+def _spy_premarket_haritasi():
+    """{tarih: spy_premarket_gap_%} sözlüğü döner - o gün genel piyasa
+    bağlamını (endeks yukarıda mıydı) her hisse-olayına eklemek için."""
+    harita = {}
+    try:
+        df = yf.Ticker("SPY").history(period=PREMARKET_PERIYOD, interval="5m", prepost=True)
+    except Exception:
+        return harita
+    if df is None or df.empty:
+        return harita
+    try:
+        if df.index.tz is not None:
+            df.index = df.index.tz_convert("America/New_York")
+    except Exception:
+        pass
+
+    onceki_kapanis = None
+    for gun, grup in df.groupby(df.index.date):
+        grup = grup.sort_index()
+        ana_seans_maske = (grup.index.hour > 9) | ((grup.index.hour == 9) & (grup.index.minute >= 30))
+        if not ana_seans_maske.any() or ana_seans_maske.all():
+            continue
+        ana_baslangic_konum = ana_seans_maske.argmax()
+        premarket_grup = grup.iloc[:ana_baslangic_konum]
+        ana_seans_grup = grup.iloc[ana_baslangic_konum:]
+
+        if onceki_kapanis is not None and not premarket_grup.empty:
+            pre_son = premarket_grup["Close"].iloc[-1]
+            if not pd.isna(pre_son) and onceki_kapanis != 0:
+                harita[gun] = (pre_son - onceki_kapanis) / onceki_kapanis * 100
+        if not ana_seans_grup.empty:
+            son_fiyat = ana_seans_grup["Close"].iloc[-1]
+            if not pd.isna(son_fiyat):
+                onceki_kapanis = son_fiyat
+    return harita
+
+
+def premarket_gap_backtest_calistir():
+    with _kilit:
+        if _calisiyor.get("premarket_gap"):
+            send_telegram_message("⏳ Pre-market gap testi zaten çalışıyor, bekle.")
+            return
+        _calisiyor["premarket_gap"] = True
+
+    try:
+        tickers = AK.AKILLI_PARA_TICKERS
+        send_telegram_message(
+            f"🔬 Pre-market ≥%{PREMARKET_GAP_ESIK_PCT:.0f} gap testi başladı ({BACKTEST_SURUM})\n"
+            f"Son {PREMARKET_PERIYOD}, {len(tickers)} hisse taranıyor - "
+            f"bu birkaç dakika sürebilir...")
+
+        spy_haritasi = _spy_premarket_haritasi()
+
+        sonuc_ufuk = {dk: [] for dk in PREMARKET_GAP_HEDEF_DAKIKALAR}
+        gun_sonu_getiriler = []
+        baglam_getiri = {"endeks_yukari": [], "endeks_asagi": [], "endeks_yatay": []}
+        toplam_olay = 0
+
+        for i, ticker in enumerate(tickers):
+            try:
+                df = yf.Ticker(ticker).history(period=PREMARKET_PERIYOD,
+                                                interval="5m", prepost=True)
+            except Exception:
+                continue
+            if df is None or df.empty:
+                continue
+            try:
+                if df.index.tz is not None:
+                    df.index = df.index.tz_convert("America/New_York")
+            except Exception:
+                pass
+
+            onceki_kapanis = None
+            for gun, grup in df.groupby(df.index.date):
+                grup = grup.sort_index()
+                ana_seans_maske = (grup.index.hour > 9) | \
+                                   ((grup.index.hour == 9) & (grup.index.minute >= 30))
+                if not ana_seans_maske.any() or ana_seans_maske.all():
+                    continue
+                ana_baslangic_konum = ana_seans_maske.argmax()
+                premarket_grup = grup.iloc[:ana_baslangic_konum]
+                ana_seans_grup = grup.iloc[ana_baslangic_konum:]
+
+                if onceki_kapanis is None or premarket_grup.empty:
+                    if not ana_seans_grup.empty:
+                        son_fiyat = ana_seans_grup["Close"].iloc[-1]
+                        if not pd.isna(son_fiyat):
+                            onceki_kapanis = son_fiyat
+                    continue
+
+                pre_son = premarket_grup["Close"].iloc[-1]
+                if pd.isna(pre_son) or onceki_kapanis == 0:
+                    if not ana_seans_grup.empty:
+                        son_fiyat = ana_seans_grup["Close"].iloc[-1]
+                        if not pd.isna(son_fiyat):
+                            onceki_kapanis = son_fiyat
+                    continue
+
+                premarket_gap = (pre_son - onceki_kapanis) / onceki_kapanis * 100
+
+                if premarket_gap >= PREMARKET_GAP_ESIK_PCT and not ana_seans_grup.empty:
+                    ana_acilis = ana_seans_grup["Open"].iloc[0]
+                    if not pd.isna(ana_acilis) and ana_acilis != 0:
+                        toplam_olay += 1
+                        for dk in PREMARKET_GAP_HEDEF_DAKIKALAR:
+                            bar_sayisi = dk // 5
+                            if bar_sayisi < len(ana_seans_grup):
+                                hedef_fiyat = ana_seans_grup["Close"].iloc[bar_sayisi]
+                                if not pd.isna(hedef_fiyat):
+                                    getiri = (hedef_fiyat - ana_acilis) / ana_acilis * 100
+                                    sonuc_ufuk[dk].append(getiri)
+
+                        gun_sonu_fiyat = ana_seans_grup["Close"].iloc[-1]
+                        gun_sonu_getiri = None
+                        if not pd.isna(gun_sonu_fiyat):
+                            gun_sonu_getiri = (gun_sonu_fiyat - ana_acilis) / ana_acilis * 100
+                            gun_sonu_getiriler.append(gun_sonu_getiri)
+
+                        spy_gap = spy_haritasi.get(gun)
+                        if spy_gap is not None and gun_sonu_getiri is not None:
+                            if spy_gap > PREMARKET_GAP_ENDEKS_YATAY_BANT:
+                                kategori = "endeks_yukari"
+                            elif spy_gap < -PREMARKET_GAP_ENDEKS_YATAY_BANT:
+                                kategori = "endeks_asagi"
+                            else:
+                                kategori = "endeks_yatay"
+                            baglam_getiri[kategori].append(gun_sonu_getiri)
+
+                if not ana_seans_grup.empty:
+                    son_fiyat = ana_seans_grup["Close"].iloc[-1]
+                    if not pd.isna(son_fiyat):
+                        onceki_kapanis = son_fiyat
+
+            if i % 20 == 0:
+                print(f"[Backtest] Pre-market gap testi {i}/{len(tickers)}", flush=True)
+
+        # --- Rapor ---
+        satirlar = [
+            f"📊 PRE-MARKET ≥%{PREMARKET_GAP_ESIK_PCT:.0f} GAP TEST SONUCU ({PREMARKET_PERIYOD})",
+            f"Toplam bulunan olay (hisse-gün): {toplam_olay}\n",
+            "Ana seans açılışından sonra (açılış fiyatına göre):"]
+
+        for dk in PREMARKET_GAP_HEDEF_DAKIKALAR:
+            degerler = sonuc_ufuk[dk]
+            if len(degerler) < PREMARKET_GAP_MIN_ORNEK:
+                satirlar.append(f"  +{dk}dk: örnek yetersiz (n={len(degerler)})")
+                continue
+            ort = sum(degerler) / len(degerler)
+            yukselme_orani = sum(1 for d in degerler if d > 0) / len(degerler) * 100
+            satirlar.append(
+                f"  +{dk}dk: n={len(degerler)}, ort %{ort:+.2f}, "
+                f"yükselişte kalma oranı %{yukselme_orani:.0f}")
+
+        if len(gun_sonu_getiriler) >= PREMARKET_GAP_MIN_ORNEK:
+            ort_gun = sum(gun_sonu_getiriler) / len(gun_sonu_getiriler)
+            yukselme_gun = sum(1 for d in gun_sonu_getiriler if d > 0) / len(gun_sonu_getiriler) * 100
+            satirlar.append(
+                f"  Gün sonu (kapanış): n={len(gun_sonu_getiriler)}, ort %{ort_gun:+.2f}, "
+                f"yükselişte kalma oranı %{yukselme_gun:.0f}")
+
+        satirlar.append("\nO gün S&P 500 (SPY) pre-market'te ne durumdaydı (gün sonu sonucuna göre):")
+        for kategori, etiket in [("endeks_yukari", f"Endeks de YUKARIDA (>%{PREMARKET_GAP_ENDEKS_YATAY_BANT})"),
+                                   ("endeks_asagi", f"Endeks AŞAĞIDA (<-%{PREMARKET_GAP_ENDEKS_YATAY_BANT})"),
+                                   ("endeks_yatay", "Endeks YATAY")]:
+            degerler = baglam_getiri[kategori]
+            if len(degerler) < 5:
+                satirlar.append(f"  {etiket}: örnek yetersiz (n={len(degerler)})")
+                continue
+            ort = sum(degerler) / len(degerler)
+            satirlar.append(f"  {etiket}: n={len(degerler)}, gün sonu ort %{ort:+.2f}")
+
+        satirlar.append(
+            "\nℹ️ Tüm getiriler ANA SEANS AÇILIŞ fiyatına göre (pre-market "
+            "seviyesine göre değil) - yani '+30dk ort %+0.5' demek, açılıştan "
+            "sonra fiyat ortalama daha da yükseldi demek. Negatifse, pre-market "
+            "yükselişi ana seansta erimeye başlıyor demek.")
+        send_telegram_message("\n".join(satirlar))
+
+    except Exception as e:
+        send_telegram_message(f"❌ Pre-market gap backtest hatası: {e}")
+    finally:
+        with _kilit:
+            _calisiyor["premarket_gap"] = False
+
+
+# =============================================================================
 # KOMUT DİNLEME — bu token'ı başka HİÇBİR modül dinlemiyor, kendi
 # getUpdates döngüsünü açması güvenli (409 Conflict riski yok).
 # =============================================================================
@@ -756,6 +952,8 @@ def backtest_komut_dongusu():
                         threading.Thread(target=korelasyon_backtest_calistir, daemon=True).start()
                     elif text.startswith("/premarket_backtest"):
                         threading.Thread(target=premarket_backtest_calistir, daemon=True).start()
+                    elif text.startswith("/premarket_gap_backtest"):
+                        threading.Thread(target=premarket_gap_backtest_calistir, daemon=True).start()
                 _offset_kaydet(offset)
         except Exception as e:
             print(f"[Backtest] Komut döngüsü hatası: {e}", flush=True)
@@ -775,5 +973,7 @@ def baslangic():
         "/korelasyon_backtest — BIST, ABD piyasasından (genel + sektörel: "
         "gıda/bankacılık/sanayi) ne kadar etkileniyor?\n"
         "/premarket_backtest — pre-market'teki (düşük hacimli) hareket, "
-        "ana seans açıldığında (gerçek hacim) devam mı ediyor, siliniyor mu?\n\n"
+        "ana seans açıldığında (gerçek hacim) devam mı ediyor, siliniyor mu?\n"
+        "/premarket_gap_backtest — pre-market'te ≥%2 yükselen hisseler ana "
+        "seans açılınca ne oluyor, o gün endeks de yukarıda mıydı?\n\n"
         "Hepsi birkaç dakika sürebilir, sonuç hazır olunca ayrı mesaj gelecek.")
