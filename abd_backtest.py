@@ -28,6 +28,7 @@ kilitlemiyor.
 import os
 import time
 import threading
+from collections import defaultdict
 from datetime import datetime, timedelta, timezone
 
 import requests
@@ -61,7 +62,8 @@ def _running_test_kilit():
 
 _kilit = _running_test_kilit()
 _calisiyor = {"haber": False, "gap": False, "acilis": False, "korelasyon": False,
-              "premarket": False, "premarket_gap": False, "patlama": False}
+              "premarket": False, "premarket_gap": False, "patlama": False,
+              "sektor": False}
 
 
 # =============================================================================
@@ -1177,6 +1179,239 @@ def premarket_patlama_arastirmasi_calistir():
             _calisiyor["patlama"] = False
 
 
+# =============================================================================
+# 8) SEKTÖR İÇİ BİRLİKTE HAREKET + SEKTÖREL HABER TEPKİ GECİKMESİ
+# =============================================================================
+# AKILLI_PARA_TICKERS'ın (abd_akilli_para.py) kendi içindeki gruplaşmasına
+# göre - ayrı bir "gerçek" sektör listesi teyit edilmedi, bu GICS'e yakın
+# genel bilgiye dayalı bir sınıflandırma. COIN/MSTR/SOFI gibi net bir
+# geleneksel sektöre oturmayan hisseler bu analize dahil edilmedi.
+SEKTOR_ESLESTIRME_ABD = {
+    "Teknoloji": ["AAPL","MSFT","GOOGL","GOOG","AMZN","NVDA","META","TSLA","AVGO","ORCL",
+                  "CRM","ADBE","AMD","CSCO","INTC","QCOM","TXN","IBM","NOW","INTU",
+                  "AMAT","MU","ADI","LRCX","KLAC","SNPS","CDNS","PANW","FTNT","CRWD",
+                  "PLTR","SNOW","NET","DDOG","ZS","MDB","TEAM","WDAY","ANSS","ROP",
+                  "APH","GLW","HPQ","DELL","NXPI","MCHP","ON","SWKS","TER","KEYS",
+                  "UBER","LYFT","ABNB","BKNG","EBAY","ETSY","SHOP","SPOT","PYPL","SQ",
+                  "NFLX","DIS","CMCSA","CHTR","TMUS","VZ","T"],
+    "Finans": ["JPM","BAC","WFC","C","GS","MS","SCHW","BLK","AXP","USB",
+               "PNC","TFC","COF","BK","STT","SPGI","MCO","ICE","CME","CB",
+               "MMC","AON","AJG","PGR","TRV","ALL","MET","PRU","AIG","V",
+               "MA","FIS","FISV","PAYX","ADP"],
+    "Sağlık": ["UNH","JNJ","LLY","PFE","MRK","ABBV","TMO","ABT","DHR","BMY",
+               "AMGN","GILD","CVS","CI","ELV","HUM","MDT","ISRG","SYK","BSX",
+               "REGN","VRTX","ZTS","BDX","EW","IDXX","MRNA","BIIB"],
+    "Tüketici": ["WMT","PG","KO","PEP","COST","MCD","NKE","SBUX","TGT","LOW",
+                 "HD","TJX","BKNG","MAR","CMG","YUM","DG","DLTR","ROST","ULTA",
+                 "EL","CL","KMB","GIS","KHC","MDLZ","MNST","STZ","HSY","KR"],
+    "Sanayi": ["BA","CAT","GE","HON","UPS","UNP","LMT","RTX","DE","MMM",
+               "NOC","GD","EMR","ETN","ITW","PH","CSX","NSC","FDX","WM",
+               "PCAR","CMI","ROK","DOV","XYL","IR","JCI","CARR","OTIS"],
+    "Enerji": ["XOM","CVX","COP","SLB","EOG","PXD","OXY","WMB","KMI","PSX",
+               "VLO","MPC","HAL","BKR","DVN","FANG","HES"],
+    "Malzeme/Emlak/Kamu Hizmetleri": ["LIN","APD","SHW","ECL","FCX","NEM","DOW","DD","NUE","VMC",
+                                        "NEE","DUK","SO","D","AEP","EXC","SRE","XEL","ED","PEG",
+                                        "PLD","AMT","EQIX","PSA","O","SPG","WELL","DLR","AVB","EQR"],
+}
+
+TICKER_SEKTOR_HARITASI = {t: s for s, tl in SEKTOR_ESLESTIRME_ABD.items() for t in tl}
+
+SEKTOR_MIN_HISSE_ORNEK = 5      # sektör içi korelasyon için min hisse sayısı
+SEKTOR_HABER_GERI_TEST_GUN = 90
+SEKTOR_KUME_MIN_HISSE = 2        # "sektörel olay günü" için aynı gün en az kaç hissede haber olmalı
+SEKTOR_TEPKI_UFUKLARI = [0, 1, 2, 3, 5]
+SEKTOR_TEPKI_MIN_ORNEK = 3
+
+
+def _sektor_ic_korelasyon_testi(tickerlar: list, periyod: str = "2y"):
+    getiri_serileri = {}
+    for t in tickerlar:
+        s = _getiri_serisi(t, periyod)
+        if s is not None and len(s) > 100:
+            getiri_serileri[t] = s
+    if len(getiri_serileri) < SEKTOR_MIN_HISSE_ORNEK:
+        return None
+    ortak = pd.concat(getiri_serileri, axis=1).dropna()
+    if len(ortak) < 50:
+        return None
+    sektor_ortalamasi = ortak.mean(axis=1)  # eşit ağırlıklı, basit bir sektör "endeksi"
+    sonuclar = []
+    for t in getiri_serileri:
+        # bir hissenin kendi sektör ortalamasına karşı korelasyonu doğal
+        # olarak şişer (kendisi de ortalamaya dahil) - bunu önlemek için
+        # hissenin kendisini ÇIKARARAK hesaplanan ortalamayla karşılaştır.
+        digerleri_ortalamasi = (ortak.drop(columns=[t]).mean(axis=1))
+        kor = ortak[t].corr(digerleri_ortalamasi)
+        sonuclar.append((t, kor))
+    sonuclar.sort(key=lambda x: x[1])
+    ort_kor = sum(k for _, k in sonuclar) / len(sonuclar)
+    return {"ortalama_korelasyon": ort_kor, "hisseler": sonuclar, "n_gun": len(ortak)}
+
+
+def _sektor_tepki_olcumu(sektor_gunleri: dict, tickerlar: list):
+    """sektor_gunleri: {tarih: [haberli_tickerlar]} - ama tepkiyi TÜM
+    sektör için ölçüyoruz (sadece haberi çıkanlar değil), çünkü sektörel
+    yayılma etkisini görmek istiyoruz."""
+    fiyat_serileri = {}
+    for t in tickerlar:
+        try:
+            df = yf.Ticker(t).history(period="1y")
+        except Exception:
+            continue
+        if df.empty:
+            continue
+        s = df["Close"]
+        if s.index.tz is not None:
+            s.index = s.index.tz_localize(None)
+        fiyat_serileri[t] = s
+
+    ufuk_getirileri = {u: [] for u in SEKTOR_TEPKI_UFUKLARI}
+    for tarih in sektor_gunleri:
+        tarih_ts = pd.Timestamp(tarih)
+        gunluk = {u: [] for u in SEKTOR_TEPKI_UFUKLARI}
+        for t in tickerlar:
+            s = fiyat_serileri.get(t)
+            if s is None:
+                continue
+            sonraki = s[s.index >= tarih_ts]
+            if sonraki.empty:
+                continue
+            baz_konum = s.index.get_loc(sonraki.index[0])
+            if isinstance(baz_konum, slice):
+                baz_konum = baz_konum.start
+            if baz_konum == 0:
+                continue
+            baz_fiyat = s.iloc[baz_konum - 1]
+            if baz_fiyat == 0:
+                continue
+            for u in SEKTOR_TEPKI_UFUKLARI:
+                hedef_konum = baz_konum + u
+                if hedef_konum < len(s):
+                    hedef_fiyat = s.iloc[hedef_konum]
+                    if not pd.isna(hedef_fiyat):
+                        gunluk[u].append((hedef_fiyat - baz_fiyat) / baz_fiyat * 100)
+        for u in SEKTOR_TEPKI_UFUKLARI:
+            if gunluk[u]:
+                ufuk_getirileri[u].append(sum(gunluk[u]) / len(gunluk[u]))  # o günün sektör ortalaması
+    return ufuk_getirileri
+
+
+def sektor_analiz_calistir():
+    with _kilit:
+        if _calisiyor.get("sektor"):
+            send_telegram_message("⏳ Sektör analizi zaten çalışıyor, bekle.")
+            return
+        _calisiyor["sektor"] = True
+
+    try:
+        send_telegram_message(
+            f"🔬 Sektör analizi başladı ({BACKTEST_SURUM})\n"
+            f"Önce sektör içi birlikte hareket, sonra sektörel haber tepki "
+            f"gecikmesi test edilecek - bu 10-20 dakika sürebilir...")
+
+        # --- BÖLÜM A: Sektör içi birlikte hareket ---
+        satirlar = ["# Sektör Analizi Raporu",
+                    f"Oluşturulma: {datetime.now(timezone.utc).strftime('%Y-%m-%d %H:%M UTC')}\n",
+                    "## Bölüm A: Sektör İçi Birlikte Hareket Etme (son 2 yıl)\n",
+                    "Korelasyon, her hissenin KENDİSİ HARİÇ sektör ortalamasına göre "
+                    "hesaplandı (kendisiyle karşılaştırma şişirmesin diye).\n"]
+
+        for sektor_adi, tickerlar in SEKTOR_ESLESTIRME_ABD.items():
+            sonuc = _sektor_ic_korelasyon_testi(tickerlar)
+            if sonuc is None:
+                satirlar.append(f"### {sektor_adi}\nVeri yetersiz.\n")
+                continue
+            satirlar.append(
+                f"### {sektor_adi} (sektör içi ort. korelasyon: "
+                f"{sonuc['ortalama_korelasyon']:+.2f}, n_gün={sonuc['n_gun']})")
+            en_bagimsiz = sonuc["hisseler"][:3]
+            en_uyumlu = sonuc["hisseler"][-3:][::-1]
+            satirlar.append("En BAĞIMSIZ hareket edenler (sektörden kopuk):")
+            for t, k in en_bagimsiz:
+                satirlar.append(f"  {t}: {k:+.2f}")
+            satirlar.append("En UYUMLU hareket edenler (sektörle aynı):")
+            for t, k in en_uyumlu:
+                satirlar.append(f"  {t}: {k:+.2f}")
+            satirlar.append("")
+
+        # --- BÖLÜM B: Sektörel haber kümelenmesi + tepki gecikmesi ---
+        send_telegram_message(
+            "🔎 Bölüm A tamamlandı. Şimdi son 90 günün haberleri taranıp "
+            "sektörel kümelenme aranıyor (bu kısım daha uzun sürer)...")
+
+        bitis_dt = datetime.now(timezone.utc)
+        baslangic_dt = bitis_dt - timedelta(days=SEKTOR_HABER_GERI_TEST_GUN)
+        baslangic_str = baslangic_dt.strftime("%Y-%m-%d")
+        bitis_str = bitis_dt.strftime("%Y-%m-%d")
+
+        # {(sektor, tarih): set(ticker)}
+        sektor_gun_haritasi = defaultdict(set)
+        for sektor_adi, tickerlar in SEKTOR_ESLESTIRME_ABD.items():
+            for ticker in tickerlar:
+                haberler = _gecmis_haberleri_cek(ticker, baslangic_str, bitis_str)
+                for h in haberler:
+                    baslik = h.get("headline", "")
+                    if not AK._kaynak_guvenilir_mi(h.get("source", "")):
+                        continue
+                    if not AK._onemli_haber_mi(baslik):
+                        continue
+                    if not AK._haber_konusu_dogru_mu(ticker, baslik):
+                        continue
+                    ts = h.get("datetime")
+                    if not ts:
+                        continue
+                    tarih = datetime.fromtimestamp(ts, tz=timezone.utc).date()
+                    sektor_gun_haritasi[(sektor_adi, tarih)].add(ticker)
+                time.sleep(1.1)  # Finnhub 60/dk limiti
+
+        satirlar.append("\n---\n## Bölüm B: Sektörel Haber Tepki Hızı ve Büyüklüğü\n")
+        satirlar.append(
+            f"'Sektörel olay günü' = aynı sektörde aynı gün en az "
+            f"{SEKTOR_KUME_MIN_HISSE} farklı hissede önemli haber çıkması. "
+            f"T+0 = olay günü, T+1..T+5 = sonraki günler (sektör ortalaması).\n")
+
+        for sektor_adi, tickerlar in SEKTOR_ESLESTIRME_ABD.items():
+            ilgili_gunler = {tarih: hisseler for (s, tarih), hisseler in sektor_gun_haritasi.items()
+                              if s == sektor_adi and len(hisseler) >= SEKTOR_KUME_MIN_HISSE}
+            if len(ilgili_gunler) < SEKTOR_TEPKI_MIN_ORNEK:
+                satirlar.append(f"### {sektor_adi}\nYeterli kümelenmiş olay bulunamadı (n={len(ilgili_gunler)}).\n")
+                continue
+
+            tepki = _sektor_tepki_olcumu(ilgili_gunler, tickerlar)
+            satirlar.append(f"### {sektor_adi} (n={len(ilgili_gunler)} kümelenmiş olay günü)")
+            for u in SEKTOR_TEPKI_UFUKLARI:
+                degerler = tepki[u]
+                if len(degerler) < SEKTOR_TEPKI_MIN_ORNEK:
+                    satirlar.append(f"  T+{u}: örnek yetersiz")
+                    continue
+                ort = sum(degerler) / len(degerler)
+                satirlar.append(f"  T+{u} gün: sektör ort. tepkisi %{ort:+.2f} (n={len(degerler)})")
+            satirlar.append("")
+
+        satirlar.append(
+            "\n## Nasıl Yorumlanır\n"
+            "Bölüm A: 0'a yakın/negatif korelasyon = o hisse sektöründen "
+            "bağımsız hareket ediyor demek; +0.5 üzeri = sektörle güçlü "
+            "birlikte hareket.\n"
+            "Bölüm B: T+0 değeri T+3/T+5'ten büyükse tepki ANINDA oluyor "
+            "demek; T+1-T+3 T+0'dan büyükse tepki GECİKMELİ/YAYILARAK "
+            "oluyor demek (haberi geç fark edenler birkaç gün sonra alıyor). "
+            "Küçük örnek sayıları (n) sonuçların güvenilirliğini sınırlıyor.")
+
+        rapor = "\n".join(satirlar)
+        dosya_yolu = os.path.join(os.environ.get("DATA_DIR", "."), "sektor_analiz_raporu.md")
+        with open(dosya_yolu, "w", encoding="utf-8") as f:
+            f.write(rapor)
+
+        send_telegram_document(dosya_yolu, caption="📄 Sektör Analizi Raporu")
+
+    except Exception as e:
+        send_telegram_message(f"❌ Sektör analizi hatası: {e}")
+    finally:
+        with _kilit:
+            _calisiyor["sektor"] = False
+
+
 def _offset_dosyasi():
     return os.path.join(os.environ.get("DATA_DIR", "."), "abd_backtest_offset.txt")
 
@@ -1228,6 +1463,8 @@ def backtest_komut_dongusu():
                         threading.Thread(target=premarket_gap_backtest_calistir, daemon=True).start()
                     elif text.startswith("/patlama_arastirmasi"):
                         threading.Thread(target=premarket_patlama_arastirmasi_calistir, daemon=True).start()
+                    elif text.startswith("/sektor_analizi"):
+                        threading.Thread(target=sektor_analiz_calistir, daemon=True).start()
                 _offset_kaydet(offset)
         except Exception as e:
             print(f"[Backtest] Komut döngüsü hatası: {e}", flush=True)
@@ -1252,5 +1489,8 @@ def baslangic():
         "seans açılınca ne oluyor, o gün endeks de yukarıda mıydı?\n"
         "/patlama_arastirmasi — sadece GERÇEKTEN patlayan (pre-market+açılış "
         "sonrası ek büyük yükseliş) vakaları bulup hacim/haber/teknik "
-        "gösterge açısından tek tek inceler (dosya olarak gelir).\n\n"
+        "gösterge açısından tek tek inceler (dosya olarak gelir).\n"
+        "/sektor_analizi — sektörler kendi içinde ne kadar birlikte "
+        "hareket ediyor (bağımsız hareket edenler kim), ve sektörel "
+        "haberlere tepki hemen mi geliyor yoksa gecikmeli mi (dosya olarak gelir).\n\n"
         "Hepsi birkaç dakika sürebilir, sonuç hazır olunca ayrı mesaj gelecek.")
