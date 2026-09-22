@@ -61,7 +61,7 @@ def _running_test_kilit():
 
 _kilit = _running_test_kilit()
 _calisiyor = {"haber": False, "gap": False, "acilis": False, "korelasyon": False,
-              "premarket": False, "premarket_gap": False}
+              "premarket": False, "premarket_gap": False, "patlama": False}
 
 
 # =============================================================================
@@ -905,6 +905,278 @@ def premarket_gap_backtest_calistir():
 # KOMUT DİNLEME — bu token'ı başka HİÇBİR modül dinlemiyor, kendi
 # getUpdates döngüsünü açması güvenli (409 Conflict riski yok).
 # =============================================================================
+def send_telegram_document(dosya_yolu: str, caption: str = ""):
+    if not TELEGRAM_TOKEN or not TELEGRAM_CHAT_ID:
+        print(f"[Backtest devre dışı] dosya: {dosya_yolu}", flush=True)
+        return
+    try:
+        with open(dosya_yolu, "rb") as f:
+            requests.post(
+                f"https://api.telegram.org/bot{TELEGRAM_TOKEN}/sendDocument",
+                data={"chat_id": TELEGRAM_CHAT_ID, "caption": caption[:1024]},
+                files={"document": f}, timeout=60)
+    except Exception as e:
+        print(f"[Backtest] Dosya gönderilemedi: {e}", flush=True)
+
+
+# =============================================================================
+# 7) PRE-MARKET "PATLAMA" ARAŞTIRMASI — sadece ≥%2 pre-market VE açılıştan
+# kapanışa EK olarak ≥%5 yükselen olayları bulup, HER BİRİNİ tek tek
+# inceliyor (hacim, haber, teknik gösterge, o günkü endeks durumu).
+# Amaç: önceki testte ortalamaya gömülen "gerçek patlayanları" ayıklamak.
+# =============================================================================
+PATLAMA_ESIK_PCT = 5.0  # açılıştan kapanışa EK yükseliş eşiği
+
+
+def _hacim_orani_gunluk(ticker: str, tarih):
+    """O günün hacminin, önceki 20 günün ortalamasına oranı."""
+    try:
+        df = yf.Ticker(ticker).history(period="4mo")
+        if df.empty:
+            return None
+        if df.index.tz is not None:
+            df.index = df.index.tz_localize(None)
+        tarih_ts = pd.Timestamp(tarih)
+        if tarih_ts not in df.index:
+            sonrakiler = df[df.index >= tarih_ts]
+            if sonrakiler.empty:
+                return None
+            tarih_ts = sonrakiler.index[0]
+        konum = df.index.get_loc(tarih_ts)
+        if isinstance(konum, slice):
+            konum = konum.start
+        if konum < 20:
+            return None
+        o_gun_hacim = df["Volume"].iloc[konum]
+        ort_hacim = df["Volume"].iloc[konum - 20:konum].mean()
+        if ort_hacim == 0 or pd.isna(ort_hacim):
+            return None
+        return o_gun_hacim / ort_hacim
+    except Exception:
+        return None
+
+
+def _rsi_hesapla(seri, periyot: int = 14):
+    fark = seri.diff()
+    kazanc = fark.clip(lower=0)
+    kayip = -fark.clip(upper=0)
+    ort_kazanc = kazanc.rolling(periyot).mean()
+    ort_kayip = kayip.rolling(periyot).mean()
+    rs = ort_kazanc / ort_kayip.replace(0, float("nan"))
+    rsi = 100 - (100 / (1 + rs))
+    # Kenar durumlar: hiç düşüş yoksa (ort_kayip==0) RSI=100 olmalı, normal
+    # bölme bunu NaN yapıyor - düzeltiyoruz. İkisi de sıfırsa (hiç hareket
+    # yok) RSI=50 (nötr) sayıyoruz.
+    rsi = rsi.where(ort_kayip != 0, 100.0)
+    ikisi_de_sifir = (ort_kayip == 0) & (ort_kazanc == 0)
+    rsi = rsi.where(~ikisi_de_sifir, 50.0)
+    return rsi
+
+
+def _teknik_gostergeler(ticker: str, tarih):
+    """Olay gününden ÖNCEKİ verilerle hesaplanan RSI ve SMA konumu -
+    "olaydan önce hisse zaten güçlü müydü" sorusuna cevap."""
+    try:
+        df = yf.Ticker(ticker).history(period="6mo")
+        if df.empty:
+            return None
+        if df.index.tz is not None:
+            df.index = df.index.tz_localize(None)
+        tarih_ts = pd.Timestamp(tarih)
+        oncekiler = df[df.index < tarih_ts]
+        if len(oncekiler) < 50:
+            return None
+        kapanislar = oncekiler["Close"]
+        son_rsi = _rsi_hesapla(kapanislar).iloc[-1]
+        sma20 = kapanislar.rolling(20).mean().iloc[-1]
+        sma50 = kapanislar.rolling(50).mean().iloc[-1]
+        son_fiyat = kapanislar.iloc[-1]
+        if pd.isna(son_rsi) or pd.isna(sma20) or pd.isna(sma50):
+            return None
+        return {"rsi": son_rsi, "sma20_uzerinde": son_fiyat > sma20,
+                "sma50_uzerinde": son_fiyat > sma50}
+    except Exception:
+        return None
+
+
+def _o_gun_haber_var_mi(ticker: str, tarih):
+    if not AK.FINNHUB_API_KEY:
+        return None
+    try:
+        tarih_str = tarih.strftime("%Y-%m-%d") if hasattr(tarih, "strftime") else str(tarih)
+        r = requests.get(
+            "https://finnhub.io/api/v1/company-news",
+            params={"symbol": ticker, "from": tarih_str, "to": tarih_str,
+                    "token": AK.FINNHUB_API_KEY},
+            timeout=15)
+        if r.status_code != 200:
+            return None
+        veri = r.json()
+        if not isinstance(veri, list):
+            return None
+        onemli = [h for h in veri if AK._kaynak_guvenilir_mi(h.get("source", ""))
+                  and AK._onemli_haber_mi(h.get("headline", ""))]
+        if onemli:
+            return onemli[0].get("headline", "")
+        elif veri:
+            return f"(filtre dışı {len(veri)} haber var, önemli/güvenilir değil)"
+        return None
+    except Exception:
+        return None
+
+
+def premarket_patlama_arastirmasi_calistir():
+    with _kilit:
+        if _calisiyor.get("patlama"):
+            send_telegram_message("⏳ Patlama araştırması zaten çalışıyor, bekle.")
+            return
+        _calisiyor["patlama"] = True
+
+    try:
+        tickers = AK.AKILLI_PARA_TICKERS
+        send_telegram_message(
+            f"🔬 Pre-market patlama araştırması başladı ({BACKTEST_SURUM})\n"
+            f"Önce ≥%{PREMARKET_GAP_ESIK_PCT:.0f} pre-market gap + açılıştan "
+            f"kapanışa ≥%{PATLAMA_ESIK_PCT:.0f} ek yükseliş yapan hisse-günler "
+            f"bulunacak, sonra her biri hacim/haber/teknik gösterge açısından "
+            f"incelenecek. Bu 10-20 dakika sürebilir...")
+
+        spy_haritasi = _spy_premarket_haritasi()
+        patlamalar = []
+
+        for i, ticker in enumerate(tickers):
+            try:
+                df = yf.Ticker(ticker).history(period=PREMARKET_PERIYOD,
+                                                interval="5m", prepost=True)
+            except Exception:
+                continue
+            if df is None or df.empty:
+                continue
+            try:
+                if df.index.tz is not None:
+                    df.index = df.index.tz_convert("America/New_York")
+            except Exception:
+                pass
+
+            onceki_kapanis = None
+            for gun, grup in df.groupby(df.index.date):
+                grup = grup.sort_index()
+                ana_seans_maske = (grup.index.hour > 9) | \
+                                   ((grup.index.hour == 9) & (grup.index.minute >= 30))
+                if not ana_seans_maske.any() or ana_seans_maske.all():
+                    continue
+                ana_baslangic_konum = ana_seans_maske.argmax()
+                premarket_grup = grup.iloc[:ana_baslangic_konum]
+                ana_seans_grup = grup.iloc[ana_baslangic_konum:]
+
+                if onceki_kapanis is None or premarket_grup.empty:
+                    if not ana_seans_grup.empty:
+                        sf = ana_seans_grup["Close"].iloc[-1]
+                        if not pd.isna(sf):
+                            onceki_kapanis = sf
+                    continue
+
+                pre_son = premarket_grup["Close"].iloc[-1]
+                if pd.isna(pre_son) or onceki_kapanis == 0:
+                    if not ana_seans_grup.empty:
+                        sf = ana_seans_grup["Close"].iloc[-1]
+                        if not pd.isna(sf):
+                            onceki_kapanis = sf
+                    continue
+
+                premarket_gap = (pre_son - onceki_kapanis) / onceki_kapanis * 100
+
+                if premarket_gap >= PREMARKET_GAP_ESIK_PCT and not ana_seans_grup.empty:
+                    ana_acilis = ana_seans_grup["Open"].iloc[0]
+                    gun_sonu_fiyat = ana_seans_grup["Close"].iloc[-1]
+                    if not pd.isna(ana_acilis) and ana_acilis != 0 and not pd.isna(gun_sonu_fiyat):
+                        acilis_kapanis = (gun_sonu_fiyat - ana_acilis) / ana_acilis * 100
+                        if acilis_kapanis >= PATLAMA_ESIK_PCT:
+                            toplam_gun = (gun_sonu_fiyat - onceki_kapanis) / onceki_kapanis * 100
+                            patlamalar.append({
+                                "ticker": ticker, "tarih": gun,
+                                "premarket_gap": premarket_gap,
+                                "acilis_kapanis": acilis_kapanis,
+                                "toplam_gun": toplam_gun,
+                                "spy_gap": spy_haritasi.get(gun),
+                            })
+
+                if not ana_seans_grup.empty:
+                    sf = ana_seans_grup["Close"].iloc[-1]
+                    if not pd.isna(sf):
+                        onceki_kapanis = sf
+
+            if i % 20 == 0:
+                print(f"[Backtest] Patlama taraması {i}/{len(tickers)}, "
+                      f"şimdiye kadar {len(patlamalar)} olay", flush=True)
+
+        send_telegram_message(
+            f"🔎 {len(patlamalar)} 'patlayan' hisse-gün bulundu, şimdi her biri "
+            f"detaylı inceleniyor (hacim/haber/teknik)...")
+
+        detaylar = []
+        for p in patlamalar:
+            hacim_orani = _hacim_orani_gunluk(p["ticker"], p["tarih"])
+            teknik = _teknik_gostergeler(p["ticker"], p["tarih"])
+            haber = _o_gun_haber_var_mi(p["ticker"], p["tarih"])
+            detaylar.append({**p, "hacim_orani": hacim_orani, "teknik": teknik, "haber": haber})
+            time.sleep(1.1)  # Finnhub 60/dk limiti
+
+        # --- Rapor ---
+        haberli = sum(1 for d in detaylar if d["haber"] and "filtre dışı" not in (d["haber"] or ""))
+        yuksek_hacimli = sum(1 for d in detaylar if d["hacim_orani"] and d["hacim_orani"] >= 2)
+        trend_ustunde = sum(1 for d in detaylar if d["teknik"] and d["teknik"]["sma20_uzerinde"])
+
+        satirlar = [
+            "# Pre-market Patlama Araştırması",
+            f"Oluşturulma: {datetime.now(timezone.utc).strftime('%Y-%m-%d %H:%M UTC')}",
+            f"Kriter: pre-market ≥%{PREMARKET_GAP_ESIK_PCT:.0f} VE açılıştan "
+            f"kapanışa ≥%{PATLAMA_ESIK_PCT:.0f} ek yükseliş",
+            f"Bulunan olay sayısı: {len(detaylar)}\n",
+            "## Genel Örüntü",
+            f"- Gerçek/önemli haber katalizörü olan: {haberli}/{len(detaylar)}",
+            f"- Hacmi ortalamanın 2x+ üzerinde olan: {yuksek_hacimli}/{len(detaylar)}",
+            f"- Olay öncesi 20 günlük ortalamanın ÜZERİNDE olan (zaten trend "
+            f"yükselişteydi): {trend_ustunde}/{len(detaylar)}\n",
+            "## Tüm Vakalar (en büyük toplam güne göre sıralı)\n",
+            "| Hisse | Tarih | Pre-market | Açılış→Kapanış | Toplam Gün | "
+            "SPY (pre-market) | Hacim (20g ort.) | RSI | SMA20 Üstü | Haber |",
+            "|---|---|---|---|---|---|---|---|---|",
+        ]
+        for d in sorted(detaylar, key=lambda x: x["toplam_gun"], reverse=True):
+            hacim_str = f"{d['hacim_orani']:.1f}x" if d["hacim_orani"] else "?"
+            rsi_str = f"{d['teknik']['rsi']:.0f}" if d["teknik"] else "?"
+            sma_str = ("Evet" if (d["teknik"] and d["teknik"]["sma20_uzerinde"])
+                       else ("Hayır" if d["teknik"] else "?"))
+            spy_str = f"%{d['spy_gap']:+.1f}" if d["spy_gap"] is not None else "?"
+            haber_ham = d["haber"] or "-"
+            haber_str = haber_ham[:60] + ("..." if len(haber_ham) > 60 else "")
+            satirlar.append(
+                f"| {d['ticker']} | {d['tarih']} | %{d['premarket_gap']:+.1f} | "
+                f"%{d['acilis_kapanis']:+.1f} | %{d['toplam_gun']:+.1f} | {spy_str} | "
+                f"{hacim_str} | {rsi_str} | {sma_str} | {haber_str} |")
+
+        satirlar.append(
+            "\n## Not\nBu liste otomatik bir 'kural' çıkarmıyor, senin tek "
+            "tek inceleyip ortak noktaları gözünle değerlendirmen için "
+            "hazırlandı. SEC Form 4 (içeriden alım) kontrolü bu araştırmaya "
+            "dahil edilmedi - istersen ekleyip tekrar çalıştırabiliriz.")
+
+        rapor = "\n".join(satirlar)
+        dosya_yolu = os.path.join(os.environ.get("DATA_DIR", "."),
+                                   "premarket_patlama_arastirmasi.md")
+        with open(dosya_yolu, "w", encoding="utf-8") as f:
+            f.write(rapor)
+
+        send_telegram_document(dosya_yolu, caption="📄 Pre-market Patlama Araştırması")
+
+    except Exception as e:
+        send_telegram_message(f"❌ Patlama araştırması hatası: {e}")
+    finally:
+        with _kilit:
+            _calisiyor["patlama"] = False
+
+
 def _offset_dosyasi():
     return os.path.join(os.environ.get("DATA_DIR", "."), "abd_backtest_offset.txt")
 
@@ -954,6 +1226,8 @@ def backtest_komut_dongusu():
                         threading.Thread(target=premarket_backtest_calistir, daemon=True).start()
                     elif text.startswith("/premarket_gap_backtest"):
                         threading.Thread(target=premarket_gap_backtest_calistir, daemon=True).start()
+                    elif text.startswith("/patlama_arastirmasi"):
+                        threading.Thread(target=premarket_patlama_arastirmasi_calistir, daemon=True).start()
                 _offset_kaydet(offset)
         except Exception as e:
             print(f"[Backtest] Komut döngüsü hatası: {e}", flush=True)
@@ -975,5 +1249,8 @@ def baslangic():
         "/premarket_backtest — pre-market'teki (düşük hacimli) hareket, "
         "ana seans açıldığında (gerçek hacim) devam mı ediyor, siliniyor mu?\n"
         "/premarket_gap_backtest — pre-market'te ≥%2 yükselen hisseler ana "
-        "seans açılınca ne oluyor, o gün endeks de yukarıda mıydı?\n\n"
+        "seans açılınca ne oluyor, o gün endeks de yukarıda mıydı?\n"
+        "/patlama_arastirmasi — sadece GERÇEKTEN patlayan (pre-market+açılış "
+        "sonrası ek büyük yükseliş) vakaları bulup hacim/haber/teknik "
+        "gösterge açısından tek tek inceler (dosya olarak gelir).\n\n"
         "Hepsi birkaç dakika sürebilir, sonuç hazır olunca ayrı mesaj gelecek.")
