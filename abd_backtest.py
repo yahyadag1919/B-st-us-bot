@@ -1226,7 +1226,7 @@ SEKTOR_TEPKI_MIN_ORNEK = 3
 def _sektor_ic_korelasyon_testi(tickerlar: list, periyod: str = "2y"):
     getiri_serileri = {}
     for t in tickerlar:
-        s = _getiri_serisi(t, periyod)
+        s = _endeks_getirisi(t, periyod)
         if s is not None and len(s) > 100:
             getiri_serileri[t] = s
     if len(getiri_serileri) < SEKTOR_MIN_HISSE_ORNEK:
