@@ -1186,37 +1186,64 @@ def premarket_patlama_arastirmasi_calistir():
 # göre - ayrı bir "gerçek" sektör listesi teyit edilmedi, bu GICS'e yakın
 # genel bilgiye dayalı bir sınıflandırma. COIN/MSTR/SOFI gibi net bir
 # geleneksel sektöre oturmayan hisseler bu analize dahil edilmedi.
+# 2026-09-22: Kullanıcı isteğiyle 7 geniş sektör yerine 37 alt kategoriye
+# (çip, yazılım, e-ticaret, siber güvenlik vb. ayrı ayrı) bölündü - geniş
+# "Teknoloji" gibi kategoriler çok heterojen olduğu için tek başına
+# anlamlı sonuç vermiyordu. Bazı alt kategoriler kasıtlı olarak küçük
+# (1-3 hisse) - bunlar Bölüm A/B'de "veri yetersiz" çıkacak, bu normal.
 SEKTOR_ESLESTIRME_ABD = {
-    "Teknoloji": ["AAPL","MSFT","GOOGL","GOOG","AMZN","NVDA","META","TSLA","AVGO","ORCL",
-                  "CRM","ADBE","AMD","CSCO","INTC","QCOM","TXN","IBM","NOW","INTU",
-                  "AMAT","MU","ADI","LRCX","KLAC","SNPS","CDNS","PANW","FTNT","CRWD",
-                  "PLTR","SNOW","NET","DDOG","ZS","MDB","TEAM","WDAY","ANSS","ROP",
-                  "APH","GLW","HPQ","DELL","NXPI","MCHP","ON","SWKS","TER","KEYS",
-                  "UBER","LYFT","ABNB","BKNG","EBAY","ETSY","SHOP","SPOT","PYPL","SQ",
-                  "NFLX","DIS","CMCSA","CHTR","TMUS","VZ","T"],
-    "Finans": ["JPM","BAC","WFC","C","GS","MS","SCHW","BLK","AXP","USB",
-               "PNC","TFC","COF","BK","STT","SPGI","MCO","ICE","CME","CB",
-               "MMC","AON","AJG","PGR","TRV","ALL","MET","PRU","AIG","V",
-               "MA","FIS","FISV","PAYX","ADP"],
-    "Sağlık": ["UNH","JNJ","LLY","PFE","MRK","ABBV","TMO","ABT","DHR","BMY",
-               "AMGN","GILD","CVS","CI","ELV","HUM","MDT","ISRG","SYK","BSX",
-               "REGN","VRTX","ZTS","BDX","EW","IDXX","MRNA","BIIB"],
-    "Tüketici": ["WMT","PG","KO","PEP","COST","MCD","NKE","SBUX","TGT","LOW",
-                 "HD","TJX","BKNG","MAR","CMG","YUM","DG","DLTR","ROST","ULTA",
-                 "EL","CL","KMB","GIS","KHC","MDLZ","MNST","STZ","HSY","KR"],
-    "Sanayi": ["BA","CAT","GE","HON","UPS","UNP","LMT","RTX","DE","MMM",
-               "NOC","GD","EMR","ETN","ITW","PH","CSX","NSC","FDX","WM",
-               "PCAR","CMI","ROK","DOV","XYL","IR","JCI","CARR","OTIS"],
-    "Enerji": ["XOM","CVX","COP","SLB","EOG","PXD","OXY","WMB","KMI","PSX",
-               "VLO","MPC","HAL","BKR","DVN","FANG","HES"],
-    "Malzeme/Emlak/Kamu Hizmetleri": ["LIN","APD","SHW","ECL","FCX","NEM","DOW","DD","NUE","VMC",
-                                        "NEE","DUK","SO","D","AEP","EXC","SRE","XEL","ED","PEG",
-                                        "PLD","AMT","EQIX","PSA","O","SPG","WELL","DLR","AVB","EQR"],
+    # --- Teknoloji alt kategorileri ---
+    "Yarı İletken/Çip": ["NVDA","AVGO","AMD","INTC","QCOM","TXN","AMAT","MU","ADI",
+                          "LRCX","KLAC","NXPI","MCHP","ON","SWKS","TER","KEYS"],
+    "Kurumsal Yazılım": ["MSFT","ORCL","CRM","ADBE","NOW","INTU","SNPS","CDNS",
+                          "WDAY","ANSS","TEAM","PLTR"],
+    "Siber Güvenlik": ["PANW","FTNT","CRWD","ZS","NET"],
+    "Bulut/Veri Altyapısı": ["SNOW","DDOG","MDB"],
+    "İnternet/Pazaryeri/Seyahat": ["GOOGL","GOOG","AMZN","META","EBAY","ETSY","SHOP",
+                                     "SPOT","PYPL","SQ","BKNG","ABNB","MAR"],
+    "Ulaşım Uygulamaları": ["UBER","LYFT"],
+    "Donanım/Bilgisayar": ["AAPL","CSCO","IBM","HPQ","DELL","APH","GLW","ROP"],
+    "Telekom": ["TMUS","VZ","T"],
+    "Medya/Eğlence": ["NFLX","DIS","CMCSA","CHTR"],
+    "Elektrikli Araç": ["TSLA"],
+    # --- Finans alt kategorileri ---
+    "Büyük Bankalar": ["JPM","BAC","WFC","C","USB","PNC","TFC","COF"],
+    "Yatırım Bankacılığı/Broker": ["GS","MS","SCHW","BK","STT"],
+    "Sigorta": ["CB","MMC","AON","AJG","PGR","TRV","ALL","MET","PRU","AIG"],
+    "Ödeme Sistemleri": ["AXP","V","MA","FIS","FISV","PAYX","ADP"],
+    "Varlık Yönetimi/Borsa": ["BLK","SPGI","MCO","ICE","CME"],
+    # --- Sağlık alt kategorileri ---
+    "Büyük İlaç": ["JNJ","LLY","PFE","MRK","ABBV","BMY"],
+    "Biyoteknoloji": ["AMGN","GILD","REGN","VRTX","MRNA","BIIB"],
+    "Sağlık Sigortası": ["UNH","CVS","CI","ELV","HUM"],
+    "Tıbbi Cihaz": ["TMO","ABT","DHR","MDT","ISRG","SYK","BSX","ZTS","BDX","EW","IDXX"],
+    # --- Tüketici alt kategorileri ---
+    "Perakende": ["WMT","COST","TGT","LOW","HD","TJX","DG","DLTR","ROST","ULTA","KR"],
+    "Restoran/Fast-food": ["MCD","SBUX","CMG","YUM"],
+    "Gıda/İçecek": ["KO","PEP","GIS","KHC","MDLZ","MNST","STZ","HSY"],
+    "Kişisel/Ev Bakım": ["PG","CL","KMB","EL"],
+    "Giyim/Spor": ["NKE"],
+    # --- Sanayi alt kategorileri ---
+    "Havacılık/Savunma": ["BA","LMT","RTX","NOC","GD"],
+    "Makine/Ekipman": ["CAT","DE","EMR","ETN","ITW","PH","DOV","XYL","IR","ROK","CMI","PCAR"],
+    "Ulaştırma/Lojistik": ["UPS","UNP","CSX","NSC","FDX","WM"],
+    "Genel Sanayi/Konglomera": ["GE","HON","MMM","JCI","CARR","OTIS"],
+    # --- Enerji alt kategorileri ---
+    "Büyük Entegre Enerji": ["XOM","CVX"],
+    "Bağımsız Üretim (E&P)": ["COP","EOG","PXD","OXY","DVN","FANG","HES"],
+    "Petrol Servis/Ekipman": ["SLB","HAL","BKR"],
+    "Boru Hattı/Midstream": ["WMB","KMI"],
+    "Rafineri": ["PSX","VLO","MPC"],
+    # --- Malzeme/Emlak/Kamu alt kategorileri ---
+    "Kimya": ["LIN","APD","SHW","ECL","DOW","DD"],
+    "Madencilik/Metal": ["FCX","NEM","NUE","VMC"],
+    "Elektrik/Kamu Hizmetleri": ["NEE","DUK","SO","D","AEP","EXC","SRE","XEL","ED","PEG"],
+    "Gayrimenkul (REIT)": ["PLD","AMT","EQIX","PSA","O","SPG","WELL","DLR","AVB","EQR"],
 }
 
 TICKER_SEKTOR_HARITASI = {t: s for s, tl in SEKTOR_ESLESTIRME_ABD.items() for t in tl}
 
-SEKTOR_MIN_HISSE_ORNEK = 5      # sektör içi korelasyon için min hisse sayısı
+SEKTOR_MIN_HISSE_ORNEK = 3      # sektör içi korelasyon için min hisse sayısı (alt kategoriler küçük olduğu için düşürüldü)
 SEKTOR_HABER_GERI_TEST_GUN = 90
 SEKTOR_KUME_MIN_HISSE = 2        # "sektörel olay günü" için aynı gün en az kaç hissede haber olmalı
 SEKTOR_TEPKI_UFUKLARI = [0, 1, 2, 3, 5]
