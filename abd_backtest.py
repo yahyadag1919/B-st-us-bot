@@ -63,7 +63,7 @@ def _running_test_kilit():
 _kilit = _running_test_kilit()
 _calisiyor = {"haber": False, "gap": False, "acilis": False, "korelasyon": False,
               "premarket": False, "premarket_gap": False, "patlama": False,
-              "sektor": False}
+              "sektor": False, "sektor_patlama": False}
 
 
 # =============================================================================
@@ -1439,6 +1439,159 @@ def sektor_analiz_calistir():
             _calisiyor["sektor"] = False
 
 
+# =============================================================================
+# 9) SEKTÖREL PATLAMA NEDENİ ARAŞTIRMASI — bütünleşik sektörlerde büyük
+# hareket olduğunda: genel piyasa mı, hisse haberi mi, başka bir şey mi?
+# Ve hangi hisseler en çok öne çıkıyor?
+# =============================================================================
+SEKTOR_PATLAMA_KORELASYON_ESIGI = 0.6   # sadece bütünleşik sektörlere bakılır
+SEKTOR_PATLAMA_Z_ESIGI = 2.0             # istatistiksel olarak "uç" gün sayılması için
+SEKTOR_PATLAMA_LIDER_SAYISI = 3          # her patlama gününde incelenecek en çok hareket eden hisse sayısı
+SEKTOR_PATLAMA_SPY_ESIK_PCT = 1.0        # SPY bu kadar hareket ettiyse "genel piyasa da hareketliydi" say
+
+
+def _sektor_getiri_matrisi(tickerlar: list, periyod: str = "2y"):
+    """Sektördeki her hissenin GÜNLÜK getiri serisini tek bir tabloda
+    döner - hem sektör ortalamasını hem o günün 'en çok hareket eden'
+    hisselerini bulmak için kullanılıyor."""
+    getiri_serileri = {}
+    for t in tickerlar:
+        s = _endeks_getirisi(t, periyod)
+        if s is not None and len(s) > 100:
+            getiri_serileri[t] = s
+    if len(getiri_serileri) < SEKTOR_MIN_HISSE_ORNEK:
+        return None
+    return pd.concat(getiri_serileri, axis=1).dropna()
+
+
+def sektor_patlama_nedeni_arastirmasi_calistir():
+    with _kilit:
+        if _calisiyor.get("sektor_patlama"):
+            send_telegram_message("⏳ Sektörel patlama araştırması zaten çalışıyor, bekle.")
+            return
+        _calisiyor["sektor_patlama"] = True
+
+    try:
+        send_telegram_message(
+            f"🔬 Sektörel patlama nedeni araştırması başladı ({BACKTEST_SURUM})\n"
+            f"Önce korelasyonu ≥{SEKTOR_PATLAMA_KORELASYON_ESIGI:.1f} olan bütünleşik "
+            f"sektörler seçilecek, sonra her birinin patlama günleri bulunup "
+            f"neden/lider hisse araştırılacak. Bu 20-30 dakika sürebilir...")
+
+        spy_getiri = _endeks_getirisi("SPY", "2y")
+        if spy_getiri is None:
+            send_telegram_message("❌ SPY verisi alınamadı, araştırma durduruldu.")
+            return
+
+        satirlar = ["# Sektörel Patlama Nedeni Araştırması",
+                    f"Oluşturulma: {datetime.now(timezone.utc).strftime('%Y-%m-%d %H:%M UTC')}",
+                    f"Sadece korelasyonu ≥{SEKTOR_PATLAMA_KORELASYON_ESIGI:.1f} olan "
+                    f"bütünleşik sektörler incelendi.\n"]
+
+        for sektor_adi, tickerlar in SEKTOR_ESLESTIRME_ABD.items():
+            matris = _sektor_getiri_matrisi(tickerlar)
+            if matris is None:
+                continue
+
+            # sektörün ortalama iç korelasyonunu (Bölüm A'daki yöntemle) hesapla
+            kor_sonuc = _sektor_ic_korelasyon_testi(tickerlar)
+            if kor_sonuc is None or kor_sonuc["ortalama_korelasyon"] < SEKTOR_PATLAMA_KORELASYON_ESIGI:
+                continue
+
+            sektor_ortalamasi = matris.mean(axis=1)
+            ort, std = sektor_ortalamasi.mean(), sektor_ortalamasi.std()
+            if std == 0 or pd.isna(std):
+                continue
+            z_skor = (sektor_ortalamasi - ort) / std
+            patlama_gunleri = sektor_ortalamasi[z_skor.abs() >= SEKTOR_PATLAMA_Z_ESIGI]
+            if len(patlama_gunleri) < 3:
+                satirlar.append(f"### {sektor_adi}\nYeterli patlama günü bulunamadı (n={len(patlama_gunleri)}).\n")
+                continue
+
+            print(f"[Backtest] {sektor_adi}: {len(patlama_gunleri)} patlama günü inceleniyor", flush=True)
+
+            genel_piyasa_sayisi = 0
+            haberli_sayisi = 0
+            belirsiz_sayisi = 0
+            lider_sayaci = defaultdict(int)
+            ornek_gunler = []
+
+            for tarih, sektor_getiri in patlama_gunleri.items():
+                spy_o_gun = spy_getiri.get(tarih)
+                spy_hareketli = spy_o_gun is not None and abs(spy_o_gun) >= SEKTOR_PATLAMA_SPY_ESIK_PCT
+
+                o_gun_getirileri = matris.loc[tarih].sort_values(
+                    key=lambda x: x.abs(), ascending=False)
+                liderler = o_gun_getirileri.head(SEKTOR_PATLAMA_LIDER_SAYISI)
+                for t in liderler.index:
+                    lider_sayaci[t] += 1
+
+                haber_bulundu = None
+                for t in liderler.index:
+                    h = _o_gun_haber_var_mi(t, tarih)
+                    time.sleep(1.1)
+                    if h and "filtre dışı" not in h:
+                        haber_bulundu = (t, h)
+                        break
+
+                if haber_bulundu:
+                    haberli_sayisi += 1
+                elif spy_hareketli:
+                    genel_piyasa_sayisi += 1
+                else:
+                    belirsiz_sayisi += 1
+
+                if len(ornek_gunler) < 5:
+                    lider_str = ", ".join(f"{t}(%{v:+.1f})" for t, v in liderler.items())
+                    haber_str = f"{haber_bulundu[0]}: {haber_bulundu[1][:70]}" if haber_bulundu else "yok"
+                    spy_str = f"%{spy_o_gun:+.1f}" if spy_o_gun is not None else "?"
+                    ornek_gunler.append(
+                        f"  {tarih}: sektör %{sektor_getiri:+.1f}, SPY {spy_str}, "
+                        f"en hareketli: {lider_str}, haber: {haber_str}")
+
+            n = len(patlama_gunleri)
+            satirlar.append(
+                f"### {sektor_adi} (korelasyon {kor_sonuc['ortalama_korelasyon']:+.2f}, "
+                f"n={n} patlama günü)")
+            satirlar.append(
+                f"- Hisse haberi bulundu (muhtemelen sektöre yayılan tetikleyici): "
+                f"{haberli_sayisi}/{n}")
+            satirlar.append(
+                f"- Genel piyasa da hareketliydi, haber yok (muhtemelen makro kaynaklı): "
+                f"{genel_piyasa_sayisi}/{n}")
+            satirlar.append(f"- Ne haber ne genel piyasa hareketi (belirsiz/başka sebep): {belirsiz_sayisi}/{n}")
+
+            en_sik_liderler = sorted(lider_sayaci.items(), key=lambda x: x[1], reverse=True)[:5]
+            satirlar.append("En sık öne çıkan hisseler (patlama günlerinde ilk 3'e girme sayısı):")
+            for t, sayi in en_sik_liderler:
+                satirlar.append(f"  {t}: {sayi}/{n} günde")
+
+            satirlar.append("Örnek günler:")
+            satirlar.extend(ornek_gunler)
+            satirlar.append("")
+
+        satirlar.append(
+            "\n## Not\nHer patlama gününde sadece en çok hareket eden "
+            f"{SEKTOR_PATLAMA_LIDER_SAYISI} hissede haber arandı (tüm sektörde "
+            "değil) - API çağrısını sınırlamak için. Bu yüzden 'belirsiz' "
+            "sayılanların bir kısmında aslında daha az öne çıkan bir hissede "
+            "gerçek bir haber olabilir, kaçırılmış olabilir.")
+
+        rapor = "\n".join(satirlar)
+        dosya_yolu = os.path.join(os.environ.get("DATA_DIR", "."),
+                                   "sektor_patlama_nedeni_arastirmasi.md")
+        with open(dosya_yolu, "w", encoding="utf-8") as f:
+            f.write(rapor)
+
+        send_telegram_document(dosya_yolu, caption="📄 Sektörel Patlama Nedeni Araştırması")
+
+    except Exception as e:
+        send_telegram_message(f"❌ Sektörel patlama araştırması hatası: {e}")
+    finally:
+        with _kilit:
+            _calisiyor["sektor_patlama"] = False
+
+
 def _offset_dosyasi():
     return os.path.join(os.environ.get("DATA_DIR", "."), "abd_backtest_offset.txt")
 
@@ -1492,6 +1645,8 @@ def backtest_komut_dongusu():
                         threading.Thread(target=premarket_patlama_arastirmasi_calistir, daemon=True).start()
                     elif text.startswith("/sektor_analizi"):
                         threading.Thread(target=sektor_analiz_calistir, daemon=True).start()
+                    elif text.startswith("/sektor_patlama_arastirmasi"):
+                        threading.Thread(target=sektor_patlama_nedeni_arastirmasi_calistir, daemon=True).start()
                 _offset_kaydet(offset)
         except Exception as e:
             print(f"[Backtest] Komut döngüsü hatası: {e}", flush=True)
@@ -1519,5 +1674,8 @@ def baslangic():
         "gösterge açısından tek tek inceler (dosya olarak gelir).\n"
         "/sektor_analizi — sektörler kendi içinde ne kadar birlikte "
         "hareket ediyor (bağımsız hareket edenler kim), ve sektörel "
-        "haberlere tepki hemen mi geliyor yoksa gecikmeli mi (dosya olarak gelir).\n\n"
+        "haberlere tepki hemen mi geliyor yoksa gecikmeli mi (dosya olarak gelir).\n"
+        "/sektor_patlama_arastirmasi — bütünleşik sektörlerde büyük hareket "
+        "olduğunda neden oluyor (hisse haberi mi, genel piyasa mı, başka "
+        "bir şey mi) ve hangi hisseler en çok öne çıkıyor (dosya olarak gelir).\n\n"
         "Hepsi birkaç dakika sürebilir, sonuç hazır olunca ayrı mesaj gelecek.")
