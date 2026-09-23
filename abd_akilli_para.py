@@ -29,6 +29,7 @@ NE YAPMAZ:
   "akıllı para" sinyali sayılan türler bunlar
 """
 import os
+import re
 import ast
 import time
 import threading
@@ -448,7 +449,34 @@ ONEMLI_HABER_ANAHTAR_KELIMELERI = (
 
 def _onemli_haber_mi(baslik: str) -> bool:
     b = baslik.lower()
-    return any(kelime in b for kelime in ONEMLI_HABER_ANAHTAR_KELIMELERI)
+    if any(kelime in b for kelime in ONEMLI_HABER_ANAHTAR_KELIMELERI):
+        return True
+    return _kazanc_gunu_baslik_mi(baslik)
+
+
+# (2026-09-23 eklendi) Kazanç açıklaması başlıkları genelde NÖTR/resmi bir
+# dille geliyor ("Reports Fourth Quarter Results" gibi) - hiçbir pozitif/
+# negatif kelime içermeseler bile ÖNEMLİ sayılmalı, çünkü kazanç günü
+# doğası gereği piyasayı hareket ettirebilir. Bu, geriye dönük testte
+# MRNA (%162) ve SNOW (%32.7) gibi devasa hareketlerin "önemli haber yok"
+# diye kaçırılmasının sebebiydi - başlık beat/miss kelimesi içermiyordu
+# ama yine de bir kazanç açıklamasıydı. Yönü başlıktan çıkaramıyorsak
+# _haber_yonu zaten doğru şekilde "belirsiz" dönüyor - bu doğru, çünkü
+# nötr bir başlıktan yön iddia etmek yanlış olur.
+_KAZANC_BASLIK_KALIPLARI = [
+    r"reports?\s+(its\s+)?(fourth|third|second|first)\s+quarter",
+    r"reports?\s+q[1-4]\b",
+    r"reports?\s+fiscal\s+(fourth|third|second|first|year|\d{4})",
+    r"announces?\s+(fourth|third|second|first)\s+quarter",
+    r"quarterly\s+(financial\s+)?results",
+    r"full[\s-]year\s+results",
+    r"reports?\s+.*\s+financial\s+results",
+]
+
+
+def _kazanc_gunu_baslik_mi(baslik: str) -> bool:
+    b = baslik.lower()
+    return any(re.search(p, b) for p in _KAZANC_BASLIK_KALIPLARI)
 
 
 def _haber_yonu(baslik: str) -> str:

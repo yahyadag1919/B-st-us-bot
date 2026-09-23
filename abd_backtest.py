@@ -63,7 +63,7 @@ def _running_test_kilit():
 _kilit = _running_test_kilit()
 _calisiyor = {"haber": False, "gap": False, "acilis": False, "korelasyon": False,
               "premarket": False, "premarket_gap": False, "patlama": False,
-              "sektor": False, "sektor_patlama": False}
+              "sektor": False, "sektor_patlama": False, "form4": False}
 
 
 # =============================================================================
@@ -1498,6 +1498,38 @@ def _sektor_getiri_matrisi(tickerlar: list, periyod: str = "2y"):
     return pd.concat(getiri_serileri, axis=1).dropna()
 
 
+# (2026-09-23 eklendi) Enerji ve Kamu Hizmetleri gibi sektörlerin "belirsiz"
+# çıkan günlerinin çoğu, tek bir şirket haberinden veya Fed/seçim gibi
+# genel bir olaydan DEĞİL, kendi özel sürücülerinden (petrol fiyatı, tahvil
+# faizi) kaynaklanıyor olabilir. Tarih tahmin etmek yerine (belirsiz OPEC
+# toplantı tarihleri gibi), o günün GERÇEK petrol/faiz hareketine bakmak
+# çok daha güvenilir - tahmine dayalı bir takvim yerine ölçülebilir veri.
+SEKTOR_SURUCU_TICKER = {
+    "Büyük Entegre Enerji": ("CL=F", "petrol fiyatı"),
+    "Bağımsız Üretim (E&P)": ("CL=F", "petrol fiyatı"),
+    "Petrol Servis/Ekipman": ("CL=F", "petrol fiyatı"),
+    "Boru Hattı/Midstream": ("CL=F", "petrol fiyatı"),
+    "Rafineri": ("CL=F", "petrol fiyatı"),
+    "Elektrik/Kamu Hizmetleri": ("^TNX", "ABD 10Y tahvil faizi"),
+    "Gayrimenkul (REIT)": ("^TNX", "ABD 10Y tahvil faizi"),
+}
+SEKTOR_SURUCU_ESIK_PCT = 2.5  # sürücünün bu kadar hareket etmesi "kaynak bu" saymak için yeterli
+
+
+def _surucu_gun_esles(sektor_adi: str, tarih, surucu_serileri: dict):
+    bilgi = SEKTOR_SURUCU_TICKER.get(sektor_adi)
+    if not bilgi:
+        return None
+    ticker, isim = bilgi
+    seri = surucu_serileri.get(ticker)
+    if seri is None:
+        return None
+    deger = seri.get(tarih)
+    if deger is None or abs(deger) < SEKTOR_SURUCU_ESIK_PCT:
+        return None
+    return f"{isim} o gün %{deger:+.1f} hareket etti"
+
+
 def sektor_patlama_nedeni_arastirmasi_calistir():
     with _kilit:
         if _calisiyor.get("sektor_patlama"):
@@ -1517,6 +1549,13 @@ def sektor_patlama_nedeni_arastirmasi_calistir():
             send_telegram_message("❌ SPY verisi alınamadı, araştırma durduruldu.")
             return
 
+        # Enerji/Kamu Hizmetleri gibi sektörler için petrol/tahvil faizi
+        # serilerini önceden çekiyoruz (tekrar tekrar indirmemek için).
+        surucu_serileri = {}
+        for ticker, _ in SEKTOR_SURUCU_TICKER.values():
+            if ticker not in surucu_serileri:
+                surucu_serileri[ticker] = _endeks_getirisi(ticker, "2y")
+
         satirlar = ["# Sektörel Patlama Nedeni Araştırması",
                     f"Oluşturulma: {datetime.now(timezone.utc).strftime('%Y-%m-%d %H:%M UTC')}",
                     f"Sadece korelasyonu ≥{SEKTOR_PATLAMA_KORELASYON_ESIGI:.1f} olan "
@@ -1524,7 +1563,9 @@ def sektor_patlama_nedeni_arastirmasi_calistir():
                     "⚠️ 'Bilinen makro olay' eşleştirmesi Claude'un eğitim verisinden "
                     "hatırlanan bir takvime dayanıyor (Fed toplantıları, seçim, tarife "
                     "olayları vb.) - resmi kaynaktan teyit edilmedi, özellikle 2025 "
-                    "sonrası tarihler için kesinlik garanti edilmez.\n"]
+                    "sonrası tarihler için kesinlik garanti edilmez. 'Sektör sürücüsü "
+                    "hareketli' (Enerji/Kamu Hizmetleri) ise GERÇEK petrol/tahvil "
+                    "faizi verisine dayanıyor, tahmin değil.\n"]
 
         for sektor_adi, tickerlar in SEKTOR_ESLESTIRME_ABD.items():
             matris = _sektor_getiri_matrisi(tickerlar)
@@ -1551,6 +1592,7 @@ def sektor_patlama_nedeni_arastirmasi_calistir():
             genel_piyasa_sayisi = 0
             haberli_sayisi = 0
             makro_sayisi = 0
+            surucu_sayisi = 0
             belirsiz_sayisi = 0
             lider_sayaci = defaultdict(int)
             ornek_gunler = []
@@ -1574,11 +1616,15 @@ def sektor_patlama_nedeni_arastirmasi_calistir():
                         break
 
                 makro_aciklama = None if haber_bulundu else _makro_gun_esles(tarih)
+                surucu_aciklama = (None if (haber_bulundu or makro_aciklama)
+                                    else _surucu_gun_esles(sektor_adi, tarih, surucu_serileri))
 
                 if haber_bulundu:
                     haberli_sayisi += 1
                 elif makro_aciklama:
                     makro_sayisi += 1
+                elif surucu_aciklama:
+                    surucu_sayisi += 1
                 elif spy_hareketli:
                     genel_piyasa_sayisi += 1
                 else:
@@ -1590,6 +1636,8 @@ def sektor_patlama_nedeni_arastirmasi_calistir():
                         aciklama_str = f"{haber_bulundu[0]}: {haber_bulundu[1][:70]}"
                     elif makro_aciklama:
                         aciklama_str = f"[BİLİNEN MAKRO OLAY] {makro_aciklama}"
+                    elif surucu_aciklama:
+                        aciklama_str = f"[SEKTÖR SÜRÜCÜSÜ] {surucu_aciklama}"
                     else:
                         aciklama_str = "yok"
                     spy_str = f"%{spy_o_gun:+.1f}" if spy_o_gun is not None else "?"
@@ -1607,6 +1655,10 @@ def sektor_patlama_nedeni_arastirmasi_calistir():
             satirlar.append(
                 f"- Bilinen makro/politik olayla eşleşti (Fed, seçim, tarife vb.): "
                 f"{makro_sayisi}/{n}")
+            if sektor_adi in SEKTOR_SURUCU_TICKER:
+                surucu_isim = SEKTOR_SURUCU_TICKER[sektor_adi][1]
+                satirlar.append(
+                    f"- Sektör sürücüsü ({surucu_isim}) o gün hareketliydi: {surucu_sayisi}/{n}")
             satirlar.append(
                 f"- Genel piyasa hareketliydi ama tanımlı bir olayla eşleşmedi: "
                 f"{genel_piyasa_sayisi}/{n}")
@@ -1641,6 +1693,158 @@ def sektor_patlama_nedeni_arastirmasi_calistir():
     finally:
         with _kilit:
             _calisiyor["sektor_patlama"] = False
+
+
+# =============================================================================
+# 10) SEC FORM 4 (İÇERİDEN İŞLEM) GERİYE DÖNÜK TESTİ
+# Canlı sistemde (abd_akilli_para.py) zaten sinyal olarak kullanılan bu
+# veri kaynağı HİÇ geriye dönük test edilmemişti - bu, ilk doğrulaması.
+# =============================================================================
+FORM4_BACKTEST_GUN_SAYISI = 180  # filing tarihine göre ne kadar geriye gidilecek
+FORM4_BACKTEST_MIN_ORNEK = 8
+
+
+def _fiyat_serisi_al_uzun(ticker: str):
+    """_fiyat_serisi_al'ın 6 aylık versiyonu bu test için yetersiz kalabilir
+    (180 gün öncesine kadar giden bir filing + 10 gün sonrası gerekebilir) -
+    bu yüzden ayrı, 1 yıllık bir versiyon."""
+    try:
+        df = yf.Ticker(ticker).history(period="1y")
+        return df if not df.empty else None
+    except Exception:
+        return None
+
+
+def sec_form4_backtest_calistir():
+    with _kilit:
+        if _calisiyor.get("form4"):
+            send_telegram_message("⏳ SEC Form4 geriye dönük testi zaten çalışıyor, bekle.")
+            return
+        _calisiyor["form4"] = True
+
+    try:
+        tickers = AK.AKILLI_PARA_TICKERS
+        send_telegram_message(
+            f"🔬 SEC Form4 (içeriden işlem) geriye dönük testi başladı ({BACKTEST_SURUM})\n"
+            f"Son {FORM4_BACKTEST_GUN_SAYISI} gün, {len(tickers)} hisse taranıyor - "
+            f"bu 15-25 dakika sürebilir...")
+
+        cik_map = AK._cik_map_yukle()
+        if not cik_map:
+            send_telegram_message("❌ CIK haritası alınamadı, test durduruldu.")
+            return
+
+        cutoff_str = (datetime.now(timezone.utc) -
+                      timedelta(days=FORM4_BACKTEST_GUN_SAYISI)).strftime("%Y-%m-%d")
+
+        getiriler = {"ALIM": {g: [] for g in UFUK_GUNLERI},
+                     "SATIM": {g: [] for g in UFUK_GUNLERI}}
+        toplam_islem = 0
+
+        for i, ticker in enumerate(tickers):
+            cik = cik_map.get(ticker.replace("-", ".")) or cik_map.get(ticker)
+            if not cik:
+                continue
+            try:
+                r = requests.get(f"https://data.sec.gov/submissions/CIK{cik}.json",
+                                  headers=AK._SEC_HEADERS, timeout=15)
+            except Exception:
+                time.sleep(0.3)
+                continue
+            if r.status_code != 200:
+                time.sleep(0.3)
+                continue
+
+            veri = r.json()
+            son = veri.get("filings", {}).get("recent", {})
+            formlar = son.get("form", [])
+            accessionlar = son.get("accessionNumber", [])
+            tarihler_str = son.get("filingDate", [])
+
+            dortler = [(a, t) for f, a, t in zip(formlar, accessionlar, tarihler_str)
+                       if f == "4" and t >= cutoff_str]
+            if not dortler:
+                time.sleep(0.3)
+                continue
+
+            fiyat_df = _fiyat_serisi_al_uzun(ticker)
+            if fiyat_df is None:
+                time.sleep(0.3)
+                continue
+
+            cik_no_lead = str(int(cik))
+            for accession, tarih_str in dortler:
+                try:
+                    xml_url = AK._form4_xml_url_bul(cik_no_lead, accession)
+                    if not xml_url:
+                        continue
+                    xr = requests.get(xml_url, headers=AK._SEC_HEADERS, timeout=15)
+                    if xr.status_code != 200:
+                        continue
+                    detay = AK._form4_xml_ayristir(xr.content)
+                except Exception:
+                    continue
+
+                try:
+                    olay_tarihi = datetime.strptime(tarih_str, "%Y-%m-%d").replace(tzinfo=timezone.utc)
+                except ValueError:
+                    continue
+                getiri_sozlugu = _getirileri_hesapla(fiyat_df, olay_tarihi)
+                if not getiri_sozlugu:
+                    continue
+
+                for tx in detay["islemler"]:
+                    if tx["lot"] is None:
+                        continue
+                    tutar = tx["lot"] * tx["fiyat"] if tx["fiyat"] else None
+                    if tutar is not None and tutar < AK.FORM4_MIN_TUTAR_USD:
+                        continue
+                    yon = "ALIM" if tx["kod"] == "P" else "SATIM"
+                    toplam_islem += 1
+                    for g, deger in getiri_sozlugu.items():
+                        getiriler[yon][g].append(deger)
+
+            if i % 20 == 0:
+                print(f"[Backtest] Form4 testi {i}/{len(tickers)}, "
+                      f"şimdiye kadar {toplam_islem} işlem", flush=True)
+            time.sleep(0.3)  # SEC EDGAR'a nazik davranmak için
+
+        # --- Rapor ---
+        satirlar = [
+            f"📊 SEC FORM4 (İÇERİDEN İŞLEM) GERİYE DÖNÜK TEST SONUCU "
+            f"(son {FORM4_BACKTEST_GUN_SAYISI} gün)",
+            f"Toplam bulunan işlem (≥${AK.FORM4_MIN_TUTAR_USD:,.0f}): {toplam_islem}\n".replace(",", ".")]
+
+        for yon, baslik_tr in [("ALIM", "🟢 İçeriden ALIM işlemleri"),
+                                 ("SATIM", "🔴 İçeriden SATIM işlemleri")]:
+            satirlar.append(baslik_tr + ":")
+            for g in UFUK_GUNLERI:
+                degerler = getiriler[yon][g]
+                if len(degerler) < FORM4_BACKTEST_MIN_ORNEK:
+                    satirlar.append(f"  {g}. gün: örnek yetersiz (n={len(degerler)})")
+                    continue
+                ort = sum(degerler) / len(degerler)
+                beklenen_dogru = (sum(1 for d in degerler if (d > 0) == (yon == "ALIM"))
+                                   / len(degerler) * 100)
+                isaret = "✅" if (ort > 0) == (yon == "ALIM") else "❌"
+                satirlar.append(
+                    f"  {g}. gün: ort %{ort:+.2f}, beklenen yönde %{beklenen_dogru:.0f} "
+                    f"(n={len(degerler)}) {isaret}")
+            satirlar.append("")
+
+        satirlar.append(
+            "ℹ️ 1. gün = SEC'e bildirim tarihi, referans = bir önceki kapanış. "
+            "✅ ortalama getiri beklenen yönde (alımdan sonra yükseliş, satımdan "
+            "sonra düşüş), ❌ ters yönde. Bu, canlı sistemde zaten sinyal olarak "
+            "kullanılan bu veri kaynağının GEÇMİŞE dönük ilk doğrulaması.")
+
+        send_telegram_message("\n".join(satirlar))
+
+    except Exception as e:
+        send_telegram_message(f"❌ SEC Form4 backtest hatası: {e}")
+    finally:
+        with _kilit:
+            _calisiyor["form4"] = False
 
 
 def _offset_dosyasi():
@@ -1698,6 +1902,8 @@ def backtest_komut_dongusu():
                         threading.Thread(target=sektor_analiz_calistir, daemon=True).start()
                     elif text.startswith("/sektor_patlama_arastirmasi"):
                         threading.Thread(target=sektor_patlama_nedeni_arastirmasi_calistir, daemon=True).start()
+                    elif text.startswith("/form4_backtest"):
+                        threading.Thread(target=sec_form4_backtest_calistir, daemon=True).start()
                 _offset_kaydet(offset)
         except Exception as e:
             print(f"[Backtest] Komut döngüsü hatası: {e}", flush=True)
@@ -1728,5 +1934,7 @@ def baslangic():
         "haberlere tepki hemen mi geliyor yoksa gecikmeli mi (dosya olarak gelir).\n"
         "/sektor_patlama_arastirmasi — bütünleşik sektörlerde büyük hareket "
         "olduğunda neden oluyor (hisse haberi mi, genel piyasa mı, başka "
-        "bir şey mi) ve hangi hisseler en çok öne çıkıyor (dosya olarak gelir).\n\n"
+        "bir şey mi) ve hangi hisseler en çok öne çıkıyor (dosya olarak gelir).\n"
+        "/form4_backtest — canlı sistemde kullanılan SEC Form4 (içeriden "
+        "alım-satım) sinyalinin geçmişe dönük ilk doğrulaması.\n\n"
         "Hepsi birkaç dakika sürebilir, sonuç hazır olunca ayrı mesaj gelecek.")
