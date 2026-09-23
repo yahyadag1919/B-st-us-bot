@@ -1449,6 +1449,40 @@ SEKTOR_PATLAMA_Z_ESIGI = 2.0             # istatistiksel olarak "uç" gün sayı
 SEKTOR_PATLAMA_LIDER_SAYISI = 3          # her patlama gününde incelenecek en çok hareket eden hisse sayısı
 SEKTOR_PATLAMA_SPY_ESIK_PCT = 1.0        # SPY bu kadar hareket ettiyse "genel piyasa da hareketliydi" say
 
+# ⚠️ Bu tarihler/açıklamalar Claude'un EĞİTİM VERİSİNDEN HATIRLANMIŞTIR,
+# resmi bir kaynaktan teyit edilmemiştir - özellikle 2025 sonrası için
+# kesinlik garanti edilmez. Bir önceki /sektor_patlama_arastirmasi
+# sonucunda "belirsiz" çıkan günlerin çoğunun aynı birkaç tarihte
+# kümelendiği fark edildi (6 Kasım 2024, 18 Aralık 2024, 27 Ocak 2025,
+# 3-4-9-10 Nisan 2025) - bunlar tek tek şirket haberi değil, GENEL
+# MAKRO/POLİTİK olaylar. Finnhub'ın genel haber ucu geçmişe dönük tarih
+# aralığı sorgulamayı desteklemediği için (sadece güncel haberler),
+# bunun yerine bilinen büyük olayları elle bir takvime koyup eşleştiriyoruz.
+BILINEN_MAKRO_OLAYLAR = [
+    ("2024-09-18", "Fed faiz indirimi (0.50 baz puan)"),
+    ("2024-11-06", "ABD başkanlık seçimi sonucu"),
+    ("2024-11-07", "Fed faiz kararı"),
+    ("2024-12-18", "Fed faiz kararı (2025 için daha az indirim sinyali)"),
+    ("2025-01-27", "DeepSeek şoku - Çin yapay zeka modeli, ABD teknoloji/çip hisselerinde sert satış"),
+    ("2025-01-29", "Fed faiz kararı (sabit)"),
+    ("2025-03-19", "Fed faiz kararı"),
+    ("2025-04-02", "Trump 'Liberation Day' gümrük tarifesi ilanı"),
+    ("2025-04-03", "Tarife sonrası küresel satış dalgası"),
+    ("2025-04-04", "Tarife sonrası satış dalgası devam"),
+    ("2025-04-09", "Trump bazı tarifeleri 90 gün erteledi - büyük ralli"),
+    ("2025-04-10", "Tarife belirsizliği sonrası dalgalanma"),
+]
+MAKRO_TARIH_TOLERANSI_GUN = 1  # olay tarihinden ±1 gün sapma da eşleşme sayılır
+
+
+def _makro_gun_esles(tarih):
+    tarih_ts = pd.Timestamp(tarih)
+    for olay_str, aciklama in BILINEN_MAKRO_OLAYLAR:
+        olay_ts = pd.Timestamp(olay_str)
+        if abs((tarih_ts - olay_ts).days) <= MAKRO_TARIH_TOLERANSI_GUN:
+            return aciklama
+    return None
+
 
 def _sektor_getiri_matrisi(tickerlar: list, periyod: str = "2y"):
     """Sektördeki her hissenin GÜNLÜK getiri serisini tek bir tabloda
@@ -1486,7 +1520,11 @@ def sektor_patlama_nedeni_arastirmasi_calistir():
         satirlar = ["# Sektörel Patlama Nedeni Araştırması",
                     f"Oluşturulma: {datetime.now(timezone.utc).strftime('%Y-%m-%d %H:%M UTC')}",
                     f"Sadece korelasyonu ≥{SEKTOR_PATLAMA_KORELASYON_ESIGI:.1f} olan "
-                    f"bütünleşik sektörler incelendi.\n"]
+                    f"bütünleşik sektörler incelendi.\n",
+                    "⚠️ 'Bilinen makro olay' eşleştirmesi Claude'un eğitim verisinden "
+                    "hatırlanan bir takvime dayanıyor (Fed toplantıları, seçim, tarife "
+                    "olayları vb.) - resmi kaynaktan teyit edilmedi, özellikle 2025 "
+                    "sonrası tarihler için kesinlik garanti edilmez.\n"]
 
         for sektor_adi, tickerlar in SEKTOR_ESLESTIRME_ABD.items():
             matris = _sektor_getiri_matrisi(tickerlar)
@@ -1512,6 +1550,7 @@ def sektor_patlama_nedeni_arastirmasi_calistir():
 
             genel_piyasa_sayisi = 0
             haberli_sayisi = 0
+            makro_sayisi = 0
             belirsiz_sayisi = 0
             lider_sayaci = defaultdict(int)
             ornek_gunler = []
@@ -1534,8 +1573,12 @@ def sektor_patlama_nedeni_arastirmasi_calistir():
                         haber_bulundu = (t, h)
                         break
 
+                makro_aciklama = None if haber_bulundu else _makro_gun_esles(tarih)
+
                 if haber_bulundu:
                     haberli_sayisi += 1
+                elif makro_aciklama:
+                    makro_sayisi += 1
                 elif spy_hareketli:
                     genel_piyasa_sayisi += 1
                 else:
@@ -1543,23 +1586,31 @@ def sektor_patlama_nedeni_arastirmasi_calistir():
 
                 if len(ornek_gunler) < 5:
                     lider_str = ", ".join(f"{t}(%{v:+.1f})" for t, v in liderler.items())
-                    haber_str = f"{haber_bulundu[0]}: {haber_bulundu[1][:70]}" if haber_bulundu else "yok"
+                    if haber_bulundu:
+                        aciklama_str = f"{haber_bulundu[0]}: {haber_bulundu[1][:70]}"
+                    elif makro_aciklama:
+                        aciklama_str = f"[BİLİNEN MAKRO OLAY] {makro_aciklama}"
+                    else:
+                        aciklama_str = "yok"
                     spy_str = f"%{spy_o_gun:+.1f}" if spy_o_gun is not None else "?"
                     ornek_gunler.append(
                         f"  {tarih}: sektör %{sektor_getiri:+.1f}, SPY {spy_str}, "
-                        f"en hareketli: {lider_str}, haber: {haber_str}")
+                        f"en hareketli: {lider_str}, sebep: {aciklama_str}")
 
             n = len(patlama_gunleri)
             satirlar.append(
                 f"### {sektor_adi} (korelasyon {kor_sonuc['ortalama_korelasyon']:+.2f}, "
                 f"n={n} patlama günü)")
             satirlar.append(
-                f"- Hisse haberi bulundu (muhtemelen sektöre yayılan tetikleyici): "
+                f"- Hisse haberi bulundu (sektöre yayılan şirket-özel tetikleyici): "
                 f"{haberli_sayisi}/{n}")
             satirlar.append(
-                f"- Genel piyasa da hareketliydi, haber yok (muhtemelen makro kaynaklı): "
+                f"- Bilinen makro/politik olayla eşleşti (Fed, seçim, tarife vb.): "
+                f"{makro_sayisi}/{n}")
+            satirlar.append(
+                f"- Genel piyasa hareketliydi ama tanımlı bir olayla eşleşmedi: "
                 f"{genel_piyasa_sayisi}/{n}")
-            satirlar.append(f"- Ne haber ne genel piyasa hareketi (belirsiz/başka sebep): {belirsiz_sayisi}/{n}")
+            satirlar.append(f"- Gerçekten belirsiz (hiçbiri): {belirsiz_sayisi}/{n}")
 
             en_sik_liderler = sorted(lider_sayaci.items(), key=lambda x: x[1], reverse=True)[:5]
             satirlar.append("En sık öne çıkan hisseler (patlama günlerinde ilk 3'e girme sayısı):")
