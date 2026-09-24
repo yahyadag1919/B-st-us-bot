@@ -1787,15 +1787,47 @@ def sec_form4_backtest_calistir():
 
             cik_no_lead = str(int(cik))
             for accession, tarih_str in dortler:
+                # --- 1) Index bul (filing içindeki dosyaları listeleyen JSON) ---
+                xml_url = None
                 try:
                     xml_url = AK._form4_xml_url_bul(cik_no_lead, accession)
-                    if not xml_url:
+                except Exception as e:
+                    hata_str = str(e)
+                    if "503" in hata_str:
+                        time.sleep(8)  # SEC'e geçici yoğunlukta nefes aldır
+                        try:
+                            xml_url = AK._form4_xml_url_bul(cik_no_lead, accession)
+                        except Exception:
+                            tanı["xml_index_hata"] += 1
+                            continue
+                    else:
                         tanı["xml_index_hata"] += 1
                         continue
+                if not xml_url:
+                    tanı["xml_index_hata"] += 1
+                    continue
+                time.sleep(0.2)  # filing'ler arası nefes - toplu 503 riskini azaltır
+
+                # --- 2) XML'i indir ---
+                try:
                     xr = requests.get(xml_url, headers=AK._SEC_HEADERS, timeout=15)
-                    if xr.status_code != 200:
+                except Exception:
+                    tanı["xml_indirme_hata"] += 1
+                    continue
+                if xr.status_code == 503:
+                    time.sleep(8)
+                    try:
+                        xr = requests.get(xml_url, headers=AK._SEC_HEADERS, timeout=15)
+                    except Exception:
                         tanı["xml_indirme_hata"] += 1
                         continue
+                if xr.status_code != 200:
+                    tanı["xml_indirme_hata"] += 1
+                    continue
+                time.sleep(0.2)
+
+                # --- 3) XML'i ayrıştır ---
+                try:
                     detay = AK._form4_xml_ayristir(xr.content)
                 except Exception:
                     tanı["xml_parse_hata"] += 1
