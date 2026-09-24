@@ -1741,17 +1741,27 @@ def sec_form4_backtest_calistir():
                      "SATIM": {g: [] for g in UFUK_GUNLERI}}
         toplam_islem = 0
 
+        # --- Teşhis sayaçları (0 sonuç çıkarsa NEREDE tıkandığını görmek için) ---
+        tanı = {"cik_bulunamayan": 0, "submissions_hata": 0, "form4_yok_pencerede": 0,
+                "fiyat_verisi_yok": 0, "xml_index_hata": 0, "xml_indirme_hata": 0,
+                "xml_parse_hata": 0, "getiri_hesaplanamayan": 0, "tutar_esigi_altinda": 0,
+                "cik_bulunan_ticker": 0, "form4_bulunan_ticker": 0}
+
         for i, ticker in enumerate(tickers):
             cik = cik_map.get(ticker.replace("-", ".")) or cik_map.get(ticker)
             if not cik:
+                tanı["cik_bulunamayan"] += 1
                 continue
+            tanı["cik_bulunan_ticker"] += 1
             try:
                 r = requests.get(f"https://data.sec.gov/submissions/CIK{cik}.json",
                                   headers=AK._SEC_HEADERS, timeout=15)
             except Exception:
+                tanı["submissions_hata"] += 1
                 time.sleep(0.3)
                 continue
             if r.status_code != 200:
+                tanı["submissions_hata"] += 1
                 time.sleep(0.3)
                 continue
 
@@ -1764,11 +1774,14 @@ def sec_form4_backtest_calistir():
             dortler = [(a, t) for f, a, t in zip(formlar, accessionlar, tarihler_str)
                        if f == "4" and t >= cutoff_str]
             if not dortler:
+                tanı["form4_yok_pencerede"] += 1
                 time.sleep(0.3)
                 continue
+            tanı["form4_bulunan_ticker"] += 1
 
             fiyat_df = _fiyat_serisi_al_uzun(ticker)
             if fiyat_df is None:
+                tanı["fiyat_verisi_yok"] += 1
                 time.sleep(0.3)
                 continue
 
@@ -1777,12 +1790,15 @@ def sec_form4_backtest_calistir():
                 try:
                     xml_url = AK._form4_xml_url_bul(cik_no_lead, accession)
                     if not xml_url:
+                        tanı["xml_index_hata"] += 1
                         continue
                     xr = requests.get(xml_url, headers=AK._SEC_HEADERS, timeout=15)
                     if xr.status_code != 200:
+                        tanı["xml_indirme_hata"] += 1
                         continue
                     detay = AK._form4_xml_ayristir(xr.content)
                 except Exception:
+                    tanı["xml_parse_hata"] += 1
                     continue
 
                 try:
@@ -1791,6 +1807,7 @@ def sec_form4_backtest_calistir():
                     continue
                 getiri_sozlugu = _getirileri_hesapla(fiyat_df, olay_tarihi)
                 if not getiri_sozlugu:
+                    tanı["getiri_hesaplanamayan"] += 1
                     continue
 
                 for tx in detay["islemler"]:
@@ -1798,6 +1815,7 @@ def sec_form4_backtest_calistir():
                         continue
                     tutar = tx["lot"] * tx["fiyat"] if tx["fiyat"] else None
                     if tutar is not None and tutar < AK.FORM4_MIN_TUTAR_USD:
+                        tanı["tutar_esigi_altinda"] += 1
                         continue
                     yon = "ALIM" if tx["kod"] == "P" else "SATIM"
                     toplam_islem += 1
@@ -1813,7 +1831,19 @@ def sec_form4_backtest_calistir():
         satirlar = [
             f"📊 SEC FORM4 (İÇERİDEN İŞLEM) GERİYE DÖNÜK TEST SONUCU "
             f"(son {FORM4_BACKTEST_GUN_SAYISI} gün)",
-            f"Toplam bulunan işlem (≥${AK.FORM4_MIN_TUTAR_USD:,.0f}): {toplam_islem}\n".replace(",", ".")]
+            f"Toplam bulunan işlem (≥${AK.FORM4_MIN_TUTAR_USD:,.0f}): {toplam_islem}\n".replace(",", "."),
+            "🔍 Teşhis (0 çıkarsa nerede tıkandığını gösterir):",
+            f"  CIK bulunamayan hisse: {tanı['cik_bulunamayan']}/{len(tickers)}",
+            f"  CIK bulunan hisse: {tanı['cik_bulunan_ticker']}/{len(tickers)}",
+            f"  submissions.json alınamayan: {tanı['submissions_hata']}",
+            f"  {FORM4_BACKTEST_GUN_SAYISI} gün penceresinde hiç Form4 olmayan: {tanı['form4_yok_pencerede']}",
+            f"  Penceresinde Form4 bulunan hisse: {tanı['form4_bulunan_ticker']}",
+            f"  Fiyat verisi alınamayan: {tanı['fiyat_verisi_yok']}",
+            f"  XML index bulunamayan filing: {tanı['xml_index_hata']}",
+            f"  XML indirilemeyen filing: {tanı['xml_indirme_hata']}",
+            f"  XML ayrıştırılamayan filing: {tanı['xml_parse_hata']}",
+            f"  Fiyat getirisi hesaplanamayan: {tanı['getiri_hesaplanamayan']}",
+            f"  ${AK.FORM4_MIN_TUTAR_USD:,.0f} eşiğinin altında kalan işlem: {tanı['tutar_esigi_altinda']}\n".replace(",", ".")]
 
         for yon, baslik_tr in [("ALIM", "🟢 İçeriden ALIM işlemleri"),
                                  ("SATIM", "🔴 İçeriden SATIM işlemleri")]:
