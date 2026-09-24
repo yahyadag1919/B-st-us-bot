@@ -1747,7 +1747,19 @@ def sec_form4_backtest_calistir():
                 "xml_parse_hata": 0, "getiri_hesaplanamayan": 0, "tutar_esigi_altinda": 0,
                 "cik_bulunan_ticker": 0, "form4_bulunan_ticker": 0}
 
+        # (2026-09-24 düzeltmesi) Önceki sürüm 503 hatasında 8 saniye bekleyip
+        # tekrar deniyordu - eğer SEC bizi UZUN SÜRELİ engellemişse (kısa
+        # süreli değil), bu binlerce filing için saatlerce sürebiliyordu
+        # (gerçekten oldu - 6 saat bitmedi). Şimdi "devre kesici" mantığı:
+        # art arda çok sayıda 503 gelirse, ısrar etmeden HEMEN durup net bir
+        # mesaj veriyoruz - saatlerce sessizce beklemek yerine.
+        ARDISIK_503_LIMITI = 8
+        ardisik_503 = 0
+        erken_durduruldu = False
+
         for i, ticker in enumerate(tickers):
+            if erken_durduruldu:
+                break
             cik = cik_map.get(ticker.replace("-", ".")) or cik_map.get(ticker)
             if not cik:
                 tanı["cik_bulunamayan"] += 1
@@ -1787,26 +1799,29 @@ def sec_form4_backtest_calistir():
 
             cik_no_lead = str(int(cik))
             for accession, tarih_str in dortler:
+                if erken_durduruldu:
+                    break
+
                 # --- 1) Index bul (filing içindeki dosyaları listeleyen JSON) ---
-                xml_url = None
+                # NOT (2026-09-24): Artık 503'te BEKLEYİP TEKRAR DENEMİYORUZ -
+                # eski sürüm bunu yapıyordu ve SEC uzun süreli engellediğinde
+                # binlerce filing için saatlerce sürdü (gerçekten 6+ saat
+                # bitmedi). Şimdi hızlı-başarısız + devre kesici: art arda
+                # çok sayıda 503 gelirse HEMEN durup net bir mesaj veriyoruz.
                 try:
                     xml_url = AK._form4_xml_url_bul(cik_no_lead, accession)
+                    ardisik_503 = 0
                 except Exception as e:
-                    hata_str = str(e)
-                    if "503" in hata_str:
-                        time.sleep(8)  # SEC'e geçici yoğunlukta nefes aldır
-                        try:
-                            xml_url = AK._form4_xml_url_bul(cik_no_lead, accession)
-                        except Exception:
-                            tanı["xml_index_hata"] += 1
-                            continue
-                    else:
-                        tanı["xml_index_hata"] += 1
-                        continue
+                    tanı["xml_index_hata"] += 1
+                    if "503" in str(e):
+                        ardisik_503 += 1
+                        if ardisik_503 >= ARDISIK_503_LIMITI:
+                            erken_durduruldu = True
+                    continue
                 if not xml_url:
                     tanı["xml_index_hata"] += 1
                     continue
-                time.sleep(0.2)  # filing'ler arası nefes - toplu 503 riskini azaltır
+                time.sleep(0.2)  # filing'ler arası nefes
 
                 # --- 2) XML'i indir ---
                 try:
@@ -1815,15 +1830,15 @@ def sec_form4_backtest_calistir():
                     tanı["xml_indirme_hata"] += 1
                     continue
                 if xr.status_code == 503:
-                    time.sleep(8)
-                    try:
-                        xr = requests.get(xml_url, headers=AK._SEC_HEADERS, timeout=15)
-                    except Exception:
-                        tanı["xml_indirme_hata"] += 1
-                        continue
+                    tanı["xml_indirme_hata"] += 1
+                    ardisik_503 += 1
+                    if ardisik_503 >= ARDISIK_503_LIMITI:
+                        erken_durduruldu = True
+                    continue
                 if xr.status_code != 200:
                     tanı["xml_indirme_hata"] += 1
                     continue
+                ardisik_503 = 0
                 time.sleep(0.2)
 
                 # --- 3) XML'i ayrıştır ---
@@ -1862,8 +1877,17 @@ def sec_form4_backtest_calistir():
         # --- Rapor ---
         satirlar = [
             f"📊 SEC FORM4 (İÇERİDEN İŞLEM) GERİYE DÖNÜK TEST SONUCU "
-            f"(son {FORM4_BACKTEST_GUN_SAYISI} gün)",
-            f"Toplam bulunan işlem (≥${AK.FORM4_MIN_TUTAR_USD:,.0f}): {toplam_islem}\n".replace(",", "."),
+            f"(son {FORM4_BACKTEST_GUN_SAYISI} gün)"]
+        if erken_durduruldu:
+            satirlar.append(
+                f"⚠️ SEC art arda {ARDISIK_503_LIMITI}+ kez '503 Service "
+                f"Unavailable' verdiği için test ERKEN DURDURULDU - muhtemelen "
+                f"bu IP (Render sunucusu) geçici olarak engellendi. Birkaç "
+                f"saat sonra (tercihen gece, canlı Form4 taraması da az "
+                f"yükken) tekrar dene.\n")
+        satirlar.append(
+            f"Toplam bulunan işlem (≥${AK.FORM4_MIN_TUTAR_USD:,.0f}): {toplam_islem}\n".replace(",", "."))
+        satirlar.extend([
             "🔍 Teşhis (0 çıkarsa nerede tıkandığını gösterir):",
             f"  CIK bulunamayan hisse: {tanı['cik_bulunamayan']}/{len(tickers)}",
             f"  CIK bulunan hisse: {tanı['cik_bulunan_ticker']}/{len(tickers)}",
@@ -1875,7 +1899,7 @@ def sec_form4_backtest_calistir():
             f"  XML indirilemeyen filing: {tanı['xml_indirme_hata']}",
             f"  XML ayrıştırılamayan filing: {tanı['xml_parse_hata']}",
             f"  Fiyat getirisi hesaplanamayan: {tanı['getiri_hesaplanamayan']}",
-            f"  ${AK.FORM4_MIN_TUTAR_USD:,.0f} eşiğinin altında kalan işlem: {tanı['tutar_esigi_altinda']}\n".replace(",", ".")]
+            f"  ${AK.FORM4_MIN_TUTAR_USD:,.0f} eşiğinin altında kalan işlem: {tanı['tutar_esigi_altinda']}\n".replace(",", ".")])
 
         for yon, baslik_tr in [("ALIM", "🟢 İçeriden ALIM işlemleri"),
                                  ("SATIM", "🔴 İçeriden SATIM işlemleri")]:
