@@ -316,7 +316,43 @@ def _form4_bildir(ticker: str, detay: dict):
         _durum["son_form4"] = datetime.now(timezone.utc).isoformat(timespec="seconds")
 
 
+FORM4_MAX_TEKRAR_DENEME = 3  # bir filing'i kaç kez daha deneyip sonra vazgeçeceğiz
+
+
+def _gorulen_normalize(gorulen: dict, ticker: str) -> dict:
+    """Eski format (düz accession string) ile yeni format (dict, bekleme
+    kuyruğu dahil) arasında geçiş - var olan kayıtlı veriyi bozmadan yeni
+    yapıya taşır."""
+    deger = gorulen.get(ticker)
+    if deger is None:
+        return {"son": None, "bekleyen": []}
+    if isinstance(deger, str):
+        return {"son": deger, "bekleyen": []}
+    return deger
+
+
+def _form4_islem_dene(cik_no_lead: str, accession: str):
+    """Bir filing'i indirip ayrıştırmayı dener. Başarılıysa (detay, None),
+    başarısızsa (None, hata_mesajı) döner."""
+    try:
+        xml_url = _form4_xml_url_bul(cik_no_lead, accession)
+        if not xml_url:
+            return None, "index bulunamadı (muhtemelen SEC henüz hazırlamadı)"
+        xr = requests.get(xml_url, headers=_SEC_HEADERS, timeout=15)
+        xr.raise_for_status()
+        return _form4_xml_ayristir(xr.content), None
+    except Exception as e:
+        return None, str(e)
+
+
 def _form4_ticker_tara(ticker: str, cik: str, gorulen: dict) -> bool:
+    """(2026-09-25 düzeltmesi) Eskiden bir filing indirilemese/ayrıştırılamasa
+    BİLE 'gördüm' işareti hemen konuyordu - SEC bazen bir filing'in
+    index.json'ını birkaç dakika geç hazırladığı için (404) ya da geçici
+    yoğunlukta (503) bu, o CEO/CFO işlemini SONSUZA KADAR kaçırmak
+    anlamına geliyordu. Artık başarısız olanlar ayrı bir 'bekleyen'
+    kuyruğuna düşüyor, her turda (en fazla FORM4_MAX_TEKRAR_DENEME kez)
+    tekrar deneniyor."""
     url = f"https://data.sec.gov/submissions/CIK{cik}.json"
     r = requests.get(url, headers=_SEC_HEADERS, timeout=15)
     if r.status_code != 200:
@@ -330,36 +366,57 @@ def _form4_ticker_tara(ticker: str, cik: str, gorulen: dict) -> bool:
     if not dortler:
         return False
 
-    onceki = gorulen.get(ticker)
+    kayit = _gorulen_normalize(gorulen, ticker)
+    onceki = kayit["son"]
+
     if onceki is None:
-        # İlk kez görülüyor - geçmişi alarma boğmamak için sadece temel al,
-        # bundan SONRAKİ değişiklikler bildirilecek.
-        gorulen[ticker] = dortler[0]
+        # İlk kez görülüyor - geçmişi alarma boğmamak için sadece temel al.
+        gorulen[ticker] = {"son": dortler[0], "bekleyen": []}
         return True
 
+    cik_no_lead = str(int(cik))
+    degisti = False
+
+    # --- 1) Önce daha önce başarısız olup bekleyenleri tekrar dene ---
+    hala_bekleyen = []
+    for accession, deneme_sayisi in kayit["bekleyen"]:
+        detay, hata = _form4_islem_dene(cik_no_lead, accession)
+        if detay is not None:
+            if detay["islemler"]:
+                _form4_bildir(ticker, detay)
+            degisti = True
+        else:
+            print(f"[AkilliPara] {ticker} Form4 tekrar deneme başarısız "
+                  f"({accession}, {deneme_sayisi + 1}. deneme): {hata}", flush=True)
+            if deneme_sayisi + 1 < FORM4_MAX_TEKRAR_DENEME:
+                hala_bekleyen.append((accession, deneme_sayisi + 1))
+            else:
+                print(f"[AkilliPara] {ticker} Form4 {accession} - "
+                      f"{FORM4_MAX_TEKRAR_DENEME} denemeden sonra vazgeçildi.", flush=True)
+            degisti = True
+
+    # --- 2) Yeni filing'leri bul ve işle ---
     yeniler = []
     for accession in dortler:
         if accession == onceki:
             break
         yeniler.append(accession)
-    if not yeniler:
-        return False
 
-    gorulen[ticker] = dortler[0]
-    cik_no_lead = str(int(cik))  # Archives URL'i baştaki sıfırsız CIK ister
-    for accession in reversed(yeniler):  # eskiden yeniye doğru bildir
-        try:
-            xml_url = _form4_xml_url_bul(cik_no_lead, accession)
-            if not xml_url:
-                continue
-            xr = requests.get(xml_url, headers=_SEC_HEADERS, timeout=15)
-            xr.raise_for_status()
-            detay = _form4_xml_ayristir(xr.content)
-            if detay["islemler"]:
-                _form4_bildir(ticker, detay)
-        except Exception as e:
-            print(f"[AkilliPara] {ticker} Form4 detay hatası ({accession}): {e}", flush=True)
-    return True
+    if yeniler:
+        gorulen[ticker] = {"son": dortler[0], "bekleyen": hala_bekleyen}
+        degisti = True
+        for accession in reversed(yeniler):  # eskiden yeniye doğru bildir
+            detay, hata = _form4_islem_dene(cik_no_lead, accession)
+            if detay is not None:
+                if detay["islemler"]:
+                    _form4_bildir(ticker, detay)
+            else:
+                print(f"[AkilliPara] {ticker} Form4 detay hatası ({accession}): {hata}", flush=True)
+                gorulen[ticker]["bekleyen"].append((accession, 0))
+    else:
+        gorulen[ticker] = {"son": onceki, "bekleyen": hala_bekleyen}
+
+    return degisti
 
 
 def _form4_kontrol_dongusu():
