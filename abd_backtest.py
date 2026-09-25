@@ -63,7 +63,8 @@ def _running_test_kilit():
 _kilit = _running_test_kilit()
 _calisiyor = {"haber": False, "gap": False, "acilis": False, "korelasyon": False,
               "premarket": False, "premarket_gap": False, "patlama": False,
-              "sektor": False, "sektor_patlama": False, "form4": False}
+              "sektor": False, "sektor_patlama": False, "form4": False,
+              "gap_detay": False}
 
 
 # =============================================================================
@@ -337,6 +338,120 @@ def gap_backtest_calistir():
     finally:
         with _kilit:
             _calisiyor["gap"] = False
+
+
+# =============================================================================
+# 2b) GAP DETAY TESTİ — daha ince dilimler + TOPLAM gün getirisi
+# (2026-09-25 eklendi) Önceki gap testi 6 kaba dilim kullanıyordu ve
+# sadece "aynı yönde mi devam etti" diyordu. Kullanıcının sorusu daha
+# spesifik: "yüzde kaç açılınca yüzde kaça kadar gidiyor" - bu yüzden
+# hem dilimler inceltildi (12 dilim) hem de her dilim için TOPLAM gün
+# getirisi (önceki kapanıştan o günün kapanışına, gap yönüne göre
+# işaretli) eklendi - "X% açılırsa günü ortalama Y%'de kapatıyor"
+# sorusuna doğrudan cevap veriyor.
+# =============================================================================
+GAP_DETAY_BUCKETLARI = [(0, 0.5), (0.5, 1), (1, 1.5), (1.5, 2), (2, 2.5), (2.5, 3),
+                          (3, 3.5), (3.5, 4), (4, 5), (5, 6), (6, 8), (8, 999)]
+
+
+def gap_detay_backtest_calistir():
+    with _kilit:
+        if _calisiyor.get("gap_detay"):
+            send_telegram_message("⏳ Gap detay testi zaten çalışıyor, bekle.")
+            return
+        _calisiyor["gap_detay"] = True
+
+    try:
+        tickers = AK.AKILLI_PARA_TICKERS
+        send_telegram_message(
+            f"🔬 Gap DETAY testi başladı ({BACKTEST_SURUM})\n"
+            f"Son {GAP_PERIYOD}, {len(tickers)} hisse, hacmi ortalamanın "
+            f"{GAP_HACIM_ESIK_KATSAYI}x üzerinde olan günler, {len(GAP_DETAY_BUCKETLARI)} "
+            f"ince dilimde taranıyor...")
+
+        veri = yf.download(tickers=" ".join(tickers), period=GAP_PERIYOD,
+                            group_by="ticker", threads=True, progress=False,
+                            auto_adjust=True)
+
+        sonuc = {b: {"n": 0, "ayni_yon": 0, "intraday_toplam": 0.0,
+                     "toplam_gun_toplam": 0.0} for b in GAP_DETAY_BUCKETLARI}
+
+        for t in tickers:
+            try:
+                df = veri[t].dropna() if len(tickers) > 1 else veri.dropna()
+            except (KeyError, Exception):
+                continue
+            if df is None or len(df) < 30:
+                continue
+
+            df = df.copy()
+            df["onceki_kapanis"] = df["Close"].shift(1)
+            df["ort_hacim20"] = df["Volume"].shift(1).rolling(20).mean()
+
+            for idx in range(21, len(df)):
+                onceki_kapanis = df["onceki_kapanis"].iloc[idx]
+                ort_hacim = df["ort_hacim20"].iloc[idx]
+                if pd.isna(onceki_kapanis) or pd.isna(ort_hacim) or ort_hacim == 0 or onceki_kapanis == 0:
+                    continue
+                hacim = df["Volume"].iloc[idx]
+                if hacim / ort_hacim < GAP_HACIM_ESIK_KATSAYI:
+                    continue
+
+                acilis = df["Open"].iloc[idx]
+                kapanis = df["Close"].iloc[idx]
+                gap_pct = (acilis - onceki_kapanis) / onceki_kapanis * 100
+                intraday_pct = (kapanis - acilis) / acilis * 100
+                toplam_gun_pct = (kapanis - onceki_kapanis) / onceki_kapanis * 100
+                abs_gap = abs(gap_pct)
+
+                for (lo, hi) in GAP_DETAY_BUCKETLARI:
+                    if lo <= abs_gap < hi:
+                        ayni_yon = (gap_pct > 0 and intraday_pct > 0) or (gap_pct < 0 and intraday_pct < 0)
+                        # yönlü karşılaştırma: gap yukarıysa olduğu gibi, gap
+                        # aşağıysa işareti çeviriyoruz ki "pozitif = gap
+                        # yönünde ilerleme" tutarlı olsun
+                        yonlu_intraday = intraday_pct if gap_pct >= 0 else -intraday_pct
+                        yonlu_toplam_gun = toplam_gun_pct if gap_pct >= 0 else -toplam_gun_pct
+                        b = sonuc[(lo, hi)]
+                        b["n"] += 1
+                        if ayni_yon:
+                            b["ayni_yon"] += 1
+                        b["intraday_toplam"] += yonlu_intraday
+                        b["toplam_gun_toplam"] += yonlu_toplam_gun
+                        break
+
+        # --- Rapor ---
+        satirlar = [f"📊 GAP DETAY TEST SONUCU ({GAP_PERIYOD}, "
+                    f"hacim ≥ {GAP_HACIM_ESIK_KATSAYI}x ortalama)\n"]
+        for (lo, hi) in GAP_DETAY_BUCKETLARI:
+            veri_b = sonuc[(lo, hi)]
+            n = veri_b["n"]
+            aralik = f"%{lo:.1f}-{hi:.1f}" if hi < 999 else f"%{lo:.1f}+"
+            if n < GAP_MIN_ORNEK:
+                satirlar.append(f"Gap {aralik}: örnek yetersiz (n={n})")
+                continue
+            devam_orani = veri_b["ayni_yon"] / n * 100
+            ort_yonlu_intraday = veri_b["intraday_toplam"] / n
+            ort_toplam_gun = veri_b["toplam_gun_toplam"] / n
+            satirlar.append(
+                f"Gap {aralik}: n={n}\n"
+                f"  Devam etme oranı: %{devam_orani:.0f}\n"
+                f"  Ort. gün-içi ek hareket (gap yönünde): %{ort_yonlu_intraday:+.2f}\n"
+                f"  Ort. TOPLAM gün getirisi (önceki kapanıştan, gap yönünde): %{ort_toplam_gun:+.2f}")
+
+        satirlar.append(
+            "\nℹ️ 'Toplam gün getirisi' = gap + gün-içi hareket birleşik, gap "
+            "yönüne göre işaretli - yani '%X açılırsa gün ortalama %Y'de "
+            "kapanıyor' sorusunun cevabı. Pozitif = gap yönünde ilerlemiş, "
+            "negatif = gap kısmen/tamamen erimiş demek. Devam oranı %50 "
+            "civarı = yazı-tura.")
+        send_telegram_message("\n".join(satirlar))
+
+    except Exception as e:
+        send_telegram_message(f"❌ Gap detay backtest hatası: {e}")
+    finally:
+        with _kilit:
+            _calisiyor["gap_detay"] = False
 
 
 # =============================================================================
@@ -1974,6 +2089,8 @@ def backtest_komut_dongusu():
                         threading.Thread(target=haber_backtest_calistir, daemon=True).start()
                     elif text.startswith("/gap_backtest"):
                         threading.Thread(target=gap_backtest_calistir, daemon=True).start()
+                    elif text.startswith("/gap_detay_backtest"):
+                        threading.Thread(target=gap_detay_backtest_calistir, daemon=True).start()
                     elif text.startswith("/acilis_backtest"):
                         threading.Thread(target=acilis_ilk15dk_backtest_calistir, daemon=True).start()
                     elif text.startswith("/korelasyon_backtest"):
@@ -2004,6 +2121,8 @@ def baslangic():
         "fiyatla örtüşüyor mu, kaç gün sonra tutuyor?\n"
         "/gap_backtest — hacimli hisselerde küçük açılış boşluğu tersine mi "
         "dönüyor, büyük boşluk aynı yönde mi devam ediyor?\n"
+        "/gap_detay_backtest — aynı test, daha ince gap dilimleri + 'X% "
+        "açılırsa gün ortalama Y%'de kapanıyor' toplam gün getirisiyle.\n"
         "/acilis_backtest — piyasa açıldıktan sonraki ilk 15 dakikadaki hareket, "
         "sonraki 1-2 saatte tersine mi dönüyor, devam mı ediyor?\n"
         "/korelasyon_backtest — BIST, ABD piyasasından (genel + sektörel: "
