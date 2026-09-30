@@ -47,7 +47,7 @@ ANA_SURUM = "ana-v2-abd-sinyal-kapatildi-2026-09-04"
 app = Flask(__name__)
 _durum = {"us": "yüklenmedi", "sosyal": "yüklenmedi", "futbol": "yüklenmedi",
           "midas": "yüklenmedi", "akilli_para": "yüklenmedi", "katalizor": "yüklenmedi",
-          "backtest": "yüklenmedi", "kapsamli": "yüklenmedi"}
+          "backtest": "yüklenmedi", "kapsamli": "yüklenmedi", "opsiyon": "yüklenmedi"}
 
 
 # =====================================================================
@@ -145,6 +145,15 @@ except Exception as e:
     print(f"[ANA] abd_backtest yüklenemedi: {e}", flush=True)
     traceback.print_exc()
 
+try:
+    import abd_opsiyon_sinyal as OPSIYON
+    _durum["opsiyon"] = "✅ yüklendi"
+except Exception as e:
+    OPSIYON = None
+    _durum["opsiyon"] = f"❌ {e}"
+    print(f"[ANA] abd_opsiyon_sinyal yüklenemedi: {e}", flush=True)
+    traceback.print_exc()
+
 
 def _guvenli(ad, fonk):
     """Bir thread'i sonsuza kadar güvenle çalıştırır. Fonksiyon
@@ -219,6 +228,7 @@ def ana_sayfa():
          f"<li>BIST Katalizör: {_durum['katalizor']}</li>",
          f"<li>ABD Backtest: {_durum['backtest']}</li>",
          f"<li>BIST Kapsamlı Analiz: {_durum['kapsamli']}</li>",
+         f"<li>ABD Opsiyon Sinyal: {_durum['opsiyon']}</li>",
          "</ul>"]
     if SOSYAL is not None:
         try:
@@ -331,6 +341,14 @@ if __name__ == "__main__":
         threading.Thread(target=_tek_seferlik("Kapsamlı analiz başlangıç",
                                                KAPSAMLI.baslangic), daemon=True).start()
         print("[ANA] Kapsamlı analiz başlangıç mesajı thread'i başlatıldı.", flush=True)
+
+    # --- 9) ABD OPSİYON SİNYAL (canlı tarama - gap%2-4 + IV/HV + kazanç) ---
+    if OPSIYON is not None:
+        threading.Thread(target=_tek_seferlik("Opsiyon sinyal başlangıç",
+                                               OPSIYON.baslangic), daemon=True).start()
+        threading.Thread(target=_guvenli("Opsiyon sinyal",
+                                          OPSIYON.opsiyon_kontrol_dongusu), daemon=True).start()
+        print("[ANA] Opsiyon sinyal thread'leri başlatıldı.", flush=True)
 
     # --- TEK DIŞ PING (hepsi için) ---
     threading.Thread(target=dis_ping, daemon=True).start()
