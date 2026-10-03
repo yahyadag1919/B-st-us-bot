@@ -47,7 +47,8 @@ ANA_SURUM = "ana-v2-abd-sinyal-kapatildi-2026-09-04"
 app = Flask(__name__)
 _durum = {"us": "yüklenmedi", "sosyal": "yüklenmedi", "futbol": "yüklenmedi",
           "midas": "yüklenmedi", "akilli_para": "yüklenmedi", "katalizor": "yüklenmedi",
-          "backtest": "yüklenmedi", "kapsamli": "yüklenmedi", "opsiyon": "yüklenmedi"}
+          "backtest": "yüklenmedi", "kapsamli": "yüklenmedi", "opsiyon": "yüklenmedi",
+          "indirim": "yüklenmedi"}
 
 
 # =====================================================================
@@ -73,11 +74,20 @@ except Exception as e:
 
 try:
     import football_bot as FUTBOL
-    _durum["futbol"] = "✅ yüklendi"
+    _durum["futbol"] = "⏸️ yüklendi ama DURDURULDU (indirim takibi yerini aldı)"
 except Exception as e:
     FUTBOL = None
     _durum["futbol"] = f"❌ {e}"
     print(f"[ANA] football_bot yüklenemedi: {e}", flush=True)
+    traceback.print_exc()
+
+try:
+    import indirim_takip as INDIRIM
+    _durum["indirim"] = "✅ yüklendi (keşif aşaması)"
+except Exception as e:
+    INDIRIM = None
+    _durum["indirim"] = f"❌ {e}"
+    print(f"[ANA] indirim_takip yüklenemedi: {e}", flush=True)
     traceback.print_exc()
 
 try:
@@ -223,6 +233,7 @@ def ana_sayfa():
          f"<li>BIST Tavan Tarayıcı: {_durum['us']}</li>",
          f"<li>ABD Sosyal Duygu: {_durum['sosyal']}</li>",
          f"<li>Futbol Botu: {_durum['futbol']}</li>",
+         f"<li>İndirim Takip: {_durum['indirim']}</li>",
          f"<li>Midas Takip: {_durum['midas']}</li>",
          f"<li>ABD Akıllı Para: {_durum['akilli_para']}</li>",
          f"<li>BIST Katalizör: {_durum['katalizor']}</li>",
@@ -286,20 +297,18 @@ if __name__ == "__main__":
                                           SOSYAL._rapor_dongusu), daemon=True).start()
         print("[ANA] Sosyal duygu thread'leri başlatıldı.", flush=True)
 
-    # --- 3) FUTBOL BOTU ---
-    if FUTBOL is not None:
-        threading.Thread(target=_guvenli("Futbol ana", FUTBOL._fb_ana_dongu), daemon=True).start()
-        threading.Thread(target=_guvenli("Futbol komut",
-                                          FUTBOL._fb_komut_dongusu), daemon=True).start()
-        try:
-            FUTBOL.send_football_message(
-                f"⚽ Futbol botu AKTİF — {FUTBOL.FB_SURUM}\n"
-                f"Ana başlatıcı üzerinden çalışıyor (ABD sistemleriyle birlikte).\n"
-                f"Ligler: {', '.join(FUTBOL.TRACKED_COMPETITIONS)} + Süper Lig\n"
-                f"Komutlar: /stats /rapor /status")
-        except Exception as e:
-            print(f"[ANA] Futbol başlangıç mesajı gönderilemedi: {e}", flush=True)
-        print("[ANA] Futbol botu thread'leri başlatıldı.", flush=True)
+    # --- 3) FUTBOL BOTU — DURDURULDU (2026-10-03, indirim takibi yerini aldı) ---
+    # football_bot.py bilerek ÇALIŞTIRILMIYOR (import edilip hiç thread
+    # başlatılmıyor) - dosya repoda duruyor, istenirse kolayca geri
+    # açılabilir, ama şu an hem ana döngüsü hem komut dinleyicisi kapalı.
+
+    # --- 3b) İNDİRİM TAKİP — KEŞİF AŞAMASI (aynı Telegram bot/sohbet) ---
+    if INDIRIM is not None:
+        threading.Thread(target=_tek_seferlik("İndirim keşif başlangıç",
+                                               INDIRIM.baslangic), daemon=True).start()
+        threading.Thread(target=_tek_seferlik("İndirim keşif taraması",
+                                               INDIRIM.kesif_calistir), daemon=True).start()
+        print("[ANA] İndirim keşif thread'leri başlatıldı.", flush=True)
 
     # --- 4) MIDAS PRO MANUEL TAKİP ---
     # Ayrı bir komut/fotoğraf döngüsü YOK - update'ler arge_botu'nun
