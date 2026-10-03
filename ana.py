@@ -306,8 +306,8 @@ if __name__ == "__main__":
     if INDIRIM is not None:
         threading.Thread(target=_tek_seferlik("İndirim keşif başlangıç",
                                                INDIRIM.baslangic), daemon=True).start()
-        threading.Thread(target=_tek_seferlik("İndirim keşif taraması",
-                                               INDIRIM.kesif_calistir), daemon=True).start()
+        threading.Thread(target=_tek_seferlik("Amazon deals ham HTML",
+                                               INDIRIM.amazon_deals_ham_kaydet), daemon=True).start()
         print("[ANA] İndirim keşif thread'leri başlatıldı.", flush=True)
 
     # --- 4) MIDAS PRO MANUEL TAKİP ---

@@ -240,6 +240,32 @@ def kesif_calistir():
         send_football_message(f"❌ Keşif raporu oluşturulamadı: {e}")
 
 
+def amazon_deals_ham_kaydet():
+    """(2026-10-03) Amazon.com.tr tek açık site çıktı, /deals sayfası da
+    muhtemelen Amazon'un KENDİ resmi 'Günün Fırsatları' sayfası. Gerçek
+    ayrıştırıcıyı doğru yazabilmek için sayfanın TAM HTML'ini (sadece ilk
+    600 karakter değil) indirip dosya olarak gönderiyoruz - ürün/fiyat/
+    indirim etiketlerinin gerçek HTML yapısını görmemiz lazım."""
+    url = "https://www.amazon.com.tr/deals"
+    send_football_message(f"📥 Amazon.com.tr /deals sayfasının tam HTML'i indiriliyor...")
+    try:
+        yanit = requests.get(url, headers=_TARAYICI_BASLIKLARI, timeout=30)
+    except Exception as e:
+        send_football_message(f"❌ İndirilemedi: {e}")
+        return
+
+    dosya_yolu = os.path.join(DATA_DIR, "amazon_deals_ham.html")
+    try:
+        with open(dosya_yolu, "w", encoding="utf-8") as f:
+            f.write(yanit.text)
+        send_football_document(
+            dosya_yolu,
+            caption=f"📥 Amazon.com.tr /deals ham HTML (durum {yanit.status_code}, "
+                    f"{len(yanit.content):,} byte)".replace(",", "."))
+    except Exception as e:
+        send_football_message(f"❌ Dosya kaydedilemedi/gönderilemedi: {e}")
+
+
 def baslangic():
     send_football_message(
         f"🛒 İndirim Takip Sistemi — KEŞİF AŞAMASI ({INDIRIM_SURUM})\n\n"
