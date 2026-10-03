@@ -39,14 +39,36 @@ _TARAYICI_BASLIKLARI = {
     "Accept-Language": "tr-TR,tr;q=0.9,en-US;q=0.8,en;q=0.7",
 }
 
-# Trendyol için denenecek aday adresler - hangisinin gerçekten var olduğunu,
-# ne döndürdüğünü BİLMİYORUZ, bu yüzden hepsini deneyip sonucu raporluyoruz.
-TRENDYOL_ADAYLAR = [
-    "https://www.trendyol.com/",
-    "https://www.trendyol.com/kampanyalar",
-    "https://www.trendyol.com/outlet",
-    "https://www.trendyol.com/robots.txt",
-]
+# (2026-10-03) Trendyol Cloudflare arkasında çıktı (403, "Attention
+# Required!") - basit bir istekle geçilemiyor. Diğer 3 siteyi de deneyip
+# hangisinin daha az korumalı olduğunu görmemiz lazım, pilot siteyi ona
+# göre seçeceğiz.
+SITE_ADAYLARI = {
+    "Trendyol": [
+        "https://www.trendyol.com/",
+        "https://www.trendyol.com/kampanyalar",
+        "https://www.trendyol.com/outlet",
+        "https://www.trendyol.com/robots.txt",
+    ],
+    "Hepsiburada": [
+        "https://www.hepsiburada.com/",
+        "https://www.hepsiburada.com/kampanyalar",
+        "https://www.hepsiburada.com/robots.txt",
+    ],
+    "Amazon.com.tr": [
+        "https://www.amazon.com.tr/",
+        "https://www.amazon.com.tr/deals",
+        "https://www.amazon.com.tr/robots.txt",
+    ],
+    "N11": [
+        "https://www.n11.com/",
+        "https://www.n11.com/kampanyalar",
+        "https://www.n11.com/robots.txt",
+    ],
+}
+
+# Geriye dönük uyumluluk - eski kod bu adı kullanıyordu
+TRENDYOL_ADAYLAR = SITE_ADAYLARI["Trendyol"]
 
 
 def send_football_message(text: str):
@@ -145,59 +167,75 @@ def _adresi_incele(url: str) -> dict:
 
 
 def kesif_calistir():
+    toplam_adres = sum(len(v) for v in SITE_ADAYLARI.values())
     send_football_message(
-        f"🔎 Trendyol keşif taraması başladı ({INDIRIM_SURUM})\n"
-        f"{len(TRENDYOL_ADAYLAR)} aday adres deneniyor, sonuç birkaç "
-        f"dakika içinde dosya olarak gelecek...")
+        f"🔎 4 site için keşif taraması başladı ({INDIRIM_SURUM})\n"
+        f"{len(SITE_ADAYLARI)} site, toplam {toplam_adres} aday adres deneniyor, "
+        f"sonuç birkaç dakika içinde dosya olarak gelecek...")
 
     satirlar = [
-        "# Trendyol Keşif Raporu",
+        "# E-Ticaret Siteleri Keşif Raporu",
         f"Oluşturulma: {datetime.now(timezone.utc).strftime('%Y-%m-%d %H:%M UTC')}\n",
-        "Bu rapor, gerçek takip sistemini doğru yazabilmek için Trendyol'un "
-        "sayfa yapısını inceliyor - henüz canlı bir indirim bildirimi DEĞİL.\n",
+        "Trendyol Cloudflare arkasında çıktı (403) - diğer 3 site de burada "
+        "test ediliyor, hangisinin pilot site olacağına bu sonuca göre "
+        "karar vereceğiz. Henüz canlı bir indirim bildirimi DEĞİL.\n",
     ]
 
-    for url in TRENDYOL_ADAYLAR:
-        print(f"[İndirim] İnceleniyor: {url}", flush=True)
-        r = _adresi_incele(url)
-        satirlar.append(f"\n## {url}\n")
-        if r.get("hata"):
-            satirlar.append(f"❌ Hata: {r['hata']}\n")
-            continue
+    site_ozet = {}
 
-        satirlar.append(f"- Durum kodu: {r['durum_kodu']}")
-        if r["son_url"] != url:
-            satirlar.append(f"- Yönlendirildi: {r['son_url']}")
-        satirlar.append(f"- Content-Type: {r['content_type']}")
-        satirlar.append(f"- Boyut: {r['boyut']:,} byte".replace(",", "."))
-        satirlar.append(f"- Tahmini içerik tipi: {r['icerik_tipi_tahmini']}")
+    for site_adi, adresler in SITE_ADAYLARI.items():
+        satirlar.append(f"\n---\n# {site_adi}\n")
+        basarili_sayisi = 0
+        for url in adresler:
+            print(f"[İndirim] İnceleniyor: {url}", flush=True)
+            r = _adresi_incele(url)
+            satirlar.append(f"\n## {url}\n")
+            if r.get("hata"):
+                satirlar.append(f"❌ Hata: {r['hata']}\n")
+                continue
 
-        if r["gommeli_veri"]:
-            satirlar.append("- Gömülü veri bloğu:")
-            for g in r["gommeli_veri"]:
-                satirlar.append(f"    {g}")
-        if r["api_ipuclari"]:
-            satirlar.append(f"- Bulunan API ipuçları ({len(r['api_ipuclari'])} adet):")
-            for a in r["api_ipuclari"]:
-                satirlar.append(f"    {a}")
+            satirlar.append(f"- Durum kodu: {r['durum_kodu']}")
+            if r["durum_kodu"] == 200:
+                basarili_sayisi += 1
+            if r["son_url"] != url:
+                satirlar.append(f"- Yönlendirildi: {r['son_url']}")
+            satirlar.append(f"- Content-Type: {r['content_type']}")
+            satirlar.append(f"- Boyut: {r['boyut']:,} byte".replace(",", "."))
+            satirlar.append(f"- Tahmini içerik tipi: {r['icerik_tipi_tahmini']}")
 
-        satirlar.append("- İlk 600 karakter:")
-        satirlar.append("```")
-        satirlar.append(r["ilk_600_karakter"])
-        satirlar.append("```")
+            if r["gommeli_veri"]:
+                satirlar.append("- Gömülü veri bloğu:")
+                for g in r["gommeli_veri"]:
+                    satirlar.append(f"    {g}")
+            if r["api_ipuclari"]:
+                satirlar.append(f"- Bulunan API ipuçları ({len(r['api_ipuclari'])} adet):")
+                for a in r["api_ipuclari"]:
+                    satirlar.append(f"    {a}")
+
+            satirlar.append("- İlk 600 karakter:")
+            satirlar.append("```")
+            satirlar.append(r["ilk_600_karakter"])
+            satirlar.append("```")
+
+        site_ozet[site_adi] = f"{basarili_sayisi}/{len(adresler)} adres 200 döndü"
+
+    satirlar_baslik = ["\n---\n## Özet (ilk bakış)\n"]
+    for site_adi, ozet in site_ozet.items():
+        satirlar_baslik.append(f"- {site_adi}: {ozet}")
+    satirlar = satirlar[:2] + satirlar_baslik + satirlar[2:]
 
     satirlar.append(
-        "\n---\n## Sırada ne var\nBu raporu inceleyip gerçek verinin nereden "
-        "(hangi URL/API'den, hangi formatta) geldiğini netleştireceğiz, "
-        "sonra kategori filtresi (erkek/kadın/çocuk hariç tutma) ve gerçek "
-        "indirim tespiti mantığını buna göre yazacağız.")
+        "\n---\n## Sırada ne var\nBu raporu inceleyip hangi sitenin en az "
+        "korumalı olduğunu (en çok 200 dönen) bulup pilot siteyi ona göre "
+        "seçeceğiz, sonra kategori filtresi ve gerçek indirim tespiti "
+        "mantığını yazacağız.")
 
     rapor = "\n".join(satirlar)
-    dosya_yolu = os.path.join(DATA_DIR, "trendyol_kesif_raporu.md")
+    dosya_yolu = os.path.join(DATA_DIR, "eticaret_kesif_raporu.md")
     try:
         with open(dosya_yolu, "w", encoding="utf-8") as f:
             f.write(rapor)
-        send_football_document(dosya_yolu, caption="🔎 Trendyol Keşif Raporu")
+        send_football_document(dosya_yolu, caption="🔎 E-Ticaret Siteleri Keşif Raporu")
     except Exception as e:
         send_football_message(f"❌ Keşif raporu oluşturulamadı: {e}")
 
