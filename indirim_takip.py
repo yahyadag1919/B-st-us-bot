@@ -240,6 +240,213 @@ def kesif_calistir():
         send_football_message(f"❌ Keşif raporu oluşturulamadı: {e}")
 
 
+# =============================================================================
+# (2026-10-03) YÖN DEĞİŞİKLİĞİ — yemek siparişi indirim/kupon takibi
+# Kullanıcı sabit bir adrese (İstanbul Tuzla) her gün yemek siparişi
+# veriyor - o adrese hizmet veren restoranlarda büyük indirim/kupon
+# çıkınca haber vermesi isteniyor. Bu 4 platformun web sitesi yapısını
+# (varsa) ve adrese göre arama şeklini BİLMİYORUZ - yine keşifle
+# başlıyoruz. Bazıları sadece mobil uygulamada çalışıyor olabilir, web
+# sitesi hiç bulunmayabilir - bu da bu keşfin bulgularından biri olacak.
+# =============================================================================
+YEMEK_ADRES = "İstanbul, Tuzla, Deri OSB, Tanem Sokak No:6"
+
+YEMEK_SITE_ADAYLARI = {
+    "Yemeksepeti": [
+        "https://www.yemeksepeti.com/",
+        "https://www.yemeksepeti.com/robots.txt",
+    ],
+    "Trendyol Yemek (tgoyemek.com)": [
+        "https://www.tgoyemek.com/",
+        "https://www.tgoyemek.com/robots.txt",
+    ],
+    "Getir Yemek": [
+        "https://getir.com/",
+        "https://getir.com/robots.txt",
+    ],
+    "Migros Yemek": [
+        "https://www.migros.com.tr/",
+        "https://www.migros.com.tr/robots.txt",
+    ],
+}
+
+
+def yemek_kesif_calistir():
+    toplam_adres = sum(len(v) for v in YEMEK_SITE_ADAYLARI.values())
+    send_football_message(
+        f"🔎 Yemek platformları keşif taraması başladı ({INDIRIM_SURUM})\n"
+        f"Hedef adres: {YEMEK_ADRES}\n"
+        f"{len(YEMEK_SITE_ADAYLARI)} platform, {toplam_adres} aday adres "
+        f"deneniyor...")
+
+    satirlar = [
+        "# Yemek Platformları Keşif Raporu",
+        f"Oluşturulma: {datetime.now(timezone.utc).strftime('%Y-%m-%d %H:%M UTC')}",
+        f"Hedef adres: {YEMEK_ADRES}\n",
+        "⚠️ Bu 4 platformun 'adrese göre restoran listesi' gösteren gerçek "
+        "URL yapısı bilinmiyor - burada sadece ana sayfa/robots.txt "
+        "deneniyor. Eğer bunlar web'de çalışmıyorsa (sadece mobil "
+        "uygulama), bunu da burada göreceğiz.\n",
+    ]
+
+    site_ozet = {}
+    for site_adi, adresler in YEMEK_SITE_ADAYLARI.items():
+        satirlar.append(f"\n---\n# {site_adi}\n")
+        basarili = 0
+        for url in adresler:
+            print(f"[İndirim] İnceleniyor: {url}", flush=True)
+            r = _adresi_incele(url)
+            satirlar.append(f"\n## {url}\n")
+            if r.get("hata"):
+                satirlar.append(f"❌ Hata: {r['hata']}\n")
+                continue
+            satirlar.append(f"- Durum kodu: {r['durum_kodu']}")
+            if r["durum_kodu"] == 200:
+                basarili += 1
+            if r["son_url"] != url:
+                satirlar.append(f"- Yönlendirildi: {r['son_url']}")
+            satirlar.append(f"- Content-Type: {r['content_type']}")
+            satirlar.append(f"- Boyut: {r['boyut']:,} byte".replace(",", "."))
+            satirlar.append(f"- Tahmini içerik tipi: {r['icerik_tipi_tahmini']}")
+            if r["gommeli_veri"]:
+                satirlar.append("- Gömülü veri bloğu:")
+                for g in r["gommeli_veri"]:
+                    satirlar.append(f"    {g}")
+            if r["api_ipuclari"]:
+                satirlar.append(f"- Bulunan API ipuçları ({len(r['api_ipuclari'])} adet):")
+                for a in r["api_ipuclari"]:
+                    satirlar.append(f"    {a}")
+            satirlar.append("- İlk 600 karakter:")
+            satirlar.append("```")
+            satirlar.append(r["ilk_600_karakter"])
+            satirlar.append("```")
+        site_ozet[site_adi] = f"{basarili}/{len(adresler)} adres 200 döndü"
+
+    ozet_blogu = ["\n---\n## Özet\n"]
+    for site_adi, ozet in site_ozet.items():
+        ozet_blogu.append(f"- {site_adi}: {ozet}")
+    satirlar = satirlar[:3] + ozet_blogu + satirlar[3:]
+
+    satirlar.append(
+        "\n---\n## Not\nBu sadece ana sayfaların erişilebilirliğini test "
+        "etti - adrese göre restoran/kampanya listesini görmek için muhtemelen "
+        "gerçek bir tarayıcıdan (bilgisayar/telefon) bu adreslerden birine "
+        "gidip adresini girip URL'in nasıl değiştiğine bakman gerekebilir.")
+
+    rapor = "\n".join(satirlar)
+    dosya_yolu = os.path.join(DATA_DIR, "yemek_kesif_raporu.md")
+    try:
+        with open(dosya_yolu, "w", encoding="utf-8") as f:
+            f.write(rapor)
+        send_football_document(dosya_yolu, caption="🔎 Yemek Platformları Keşif Raporu")
+    except Exception as e:
+        send_football_message(f"❌ Keşif raporu oluşturulamadı: {e}")
+
+
+# =============================================================================
+# (2026-10-03) YÖN DEĞİŞİKLİĞİ: Kullanıcı e-ticaret yerine YEMEK siparişi
+# indirim/kupon takibine karar verdi - her gün aynı saatte, aynı adrese
+# (İstanbul Tuzla Deri OSB) sipariş verdiği için buradaki restoranların
+# anlık indirim/kupon durumunu izlemek istiyor. 4 platform: Yemeksepeti,
+# Trendyol Yemek, Getir Yemek, Migros Yemek.
+#
+# ⚠️ Aşağıdaki adresler TAHMİN - hiçbirinin gerçek yapısını doğrulamadık.
+# Adrese özel restoran listesi genelde bir "önce adresi seç/çözümle"
+# adımı gerektiriyor (çoğu yemek uygulaması konum bazlı oturum açıyor),
+# bu yüzden bu ilk tur sadece "siteye genel olarak erişebiliyor muyuz,
+# nasıl bir yapı var" sorusuna cevap arıyor - adrese özel filtreleme
+# BİR SONRAKİ adımda, bu sonuca göre kurulacak.
+# =============================================================================
+YEMEK_SITE_ADAYLARI = {
+    "Yemeksepeti": [
+        "https://www.yemeksepeti.com/",
+        "https://www.yemeksepeti.com/tuzla-istanbul",
+        "https://www.yemeksepeti.com/robots.txt",
+    ],
+    "Trendyol Yemek": [
+        "https://tgoyemek.com/",
+        "https://www.trendyol.com/yemek",
+        "https://tgoyemek.com/robots.txt",
+    ],
+    "Getir Yemek": [
+        "https://getir.com/yemek/",
+        "https://getir.com/robots.txt",
+    ],
+    "Migros Yemek": [
+        "https://www.migros.com.tr/yemek",
+        "https://www.migros.com.tr/robots.txt",
+    ],
+}
+
+
+def kesif_calistir_yemek():
+    toplam = sum(len(v) for v in YEMEK_SITE_ADAYLARI.values())
+    send_football_message(
+        f"🔎 Yemek platformları keşif taraması başladı ({INDIRIM_SURUM})\n"
+        f"{len(YEMEK_SITE_ADAYLARI)} platform, toplam {toplam} aday adres "
+        f"deneniyor (adresler TAHMİN, gerçek yapıyı öğrenmeye çalışıyoruz)...")
+
+    satirlar = [
+        "# Yemek Platformları Keşif Raporu",
+        f"Oluşturulma: {datetime.now(timezone.utc).strftime('%Y-%m-%d %H:%M UTC')}\n",
+        "Hedef adres: İstanbul Tuzla Deri OSB (bu turda adrese özel değil, "
+        "sadece genel erişim/yapı test ediliyor).\n",
+    ]
+    site_ozet = {}
+
+    for site_adi, adresler in YEMEK_SITE_ADAYLARI.items():
+        satirlar.append(f"\n---\n# {site_adi}\n")
+        basarili = 0
+        for url in adresler:
+            print(f"[İndirim-Yemek] İnceleniyor: {url}", flush=True)
+            r = _adresi_incele(url)
+            satirlar.append(f"\n## {url}\n")
+            if r.get("hata"):
+                satirlar.append(f"❌ Hata: {r['hata']}\n")
+                continue
+            satirlar.append(f"- Durum kodu: {r['durum_kodu']}")
+            if r["durum_kodu"] == 200:
+                basarili += 1
+            if r["son_url"] != url:
+                satirlar.append(f"- Yönlendirildi: {r['son_url']}")
+            satirlar.append(f"- Content-Type: {r['content_type']}")
+            satirlar.append(f"- Boyut: {r['boyut']:,} byte".replace(",", "."))
+            satirlar.append(f"- Tahmini içerik tipi: {r['icerik_tipi_tahmini']}")
+            if r["gommeli_veri"]:
+                satirlar.append("- Gömülü veri bloğu:")
+                for g in r["gommeli_veri"]:
+                    satirlar.append(f"    {g}")
+            if r["api_ipuclari"]:
+                satirlar.append(f"- Bulunan API ipuçları ({len(r['api_ipuclari'])} adet):")
+                for a in r["api_ipuclari"]:
+                    satirlar.append(f"    {a}")
+            satirlar.append("- İlk 600 karakter:")
+            satirlar.append("```")
+            satirlar.append(r["ilk_600_karakter"])
+            satirlar.append("```")
+        site_ozet[site_adi] = f"{basarili}/{len(adresler)} adres 200 döndü"
+
+    ozet_blok = ["\n---\n## Özet (ilk bakış)\n"]
+    for site_adi, ozet in site_ozet.items():
+        ozet_blok.append(f"- {site_adi}: {ozet}")
+    satirlar = satirlar[:2] + ozet_blok + satirlar[2:]
+
+    satirlar.append(
+        "\n---\n## Sırada ne var\nEn açık/erişilebilir çıkan platformu pilot "
+        "seçip, adrese özel restoran listesinin gerçekte NASIL çekildiğini "
+        "(muhtemelen ayrı bir konum/adres API'si var) bir sonraki keşif "
+        "turunda inceleyeceğiz.")
+
+    rapor = "\n".join(satirlar)
+    dosya_yolu = os.path.join(DATA_DIR, "yemek_kesif_raporu.md")
+    try:
+        with open(dosya_yolu, "w", encoding="utf-8") as f:
+            f.write(rapor)
+        send_football_document(dosya_yolu, caption="🔎 Yemek Platformları Keşif Raporu")
+    except Exception as e:
+        send_football_message(f"❌ Keşif raporu oluşturulamadı: {e}")
+
+
 def amazon_deals_ham_kaydet():
     """(2026-10-03) Amazon.com.tr tek açık site çıktı, /deals sayfası da
     muhtemelen Amazon'un KENDİ resmi 'Günün Fırsatları' sayfası. Gerçek
@@ -268,7 +475,9 @@ def amazon_deals_ham_kaydet():
 
 def baslangic():
     send_football_message(
-        f"🛒 İndirim Takip Sistemi — KEŞİF AŞAMASI ({INDIRIM_SURUM})\n\n"
-        "Futbol botu durduruldu, yerine bu sistem geliyor. Şu an sadece "
-        "Trendyol'un sayfa yapısını inceliyor (henüz canlı bildirim yok) - "
-        "sonuç birkaç dakika içinde ayrı bir dosya olarak gelecek.")
+        f"🍔 Yemek İndirim Takip Sistemi — KEŞİF AŞAMASI ({INDIRIM_SURUM})\n\n"
+        "Futbol botu durduruldu, yerine bu sistem geliyor. Şu an 4 yemek "
+        "platformunun (Yemeksepeti, Trendyol Yemek, Getir Yemek, Migros "
+        "Yemek) genel sayfa yapısını inceliyor (henüz canlı bildirim yok, "
+        "adrese özel filtre de yok) - sonuç birkaç dakika içinde ayrı bir "
+        "dosya olarak gelecek.")
