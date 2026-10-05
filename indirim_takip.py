@@ -483,34 +483,34 @@ def tgoyemek_konum_denemesi():
     ("initialAddress") kullanıyor - bu, konumun çerez/parametre ile
     değiştirilebileceğinin kanıtı. Birkaç yaygın adayı deneyip
     HANGİSİNİN sunucunun döndürdüğü 'initialAddress' değerini
-    DEĞİŞTİRDİĞİNİ görüyoruz - değişen varsa, doğru mekanizmayı bulmuş oluruz."""
+    DEĞİŞTİRDİĞİNİ görüyoruz - değişen varsa, doğru mekanizmayı bulmuş oluruz.
+    (2026-10-06) 6 çerez denemesi başarısız çıktı - URL parametresi
+    olarak göndermeyi de deniyoruz, çerezden daha ucuz bir sonraki adım."""
     url = "https://tgoyemek.com/restoranlar"
     hedef_lat, hedef_lon = TUZLA_DERI_OSB_LAT, TUZLA_DERI_OSB_LON
 
     denemeler = [
-        ("çerezsiz (referans)", {}),
-        ("cookie: address=JSON",
-         {"address": json.dumps({"latitude": hedef_lat, "longitude": hedef_lon})}),
-        ("cookie: selectedAddress=JSON",
-         {"selectedAddress": json.dumps({"latitude": hedef_lat, "longitude": hedef_lon})}),
-        ("cookie: location=lat,lon",
-         {"location": f"{hedef_lat},{hedef_lon}"}),
-        ("cookie: lat + lon ayrı",
-         {"lat": hedef_lat, "lon": hedef_lon}),
-        ("cookie: latitude + longitude ayrı",
-         {"latitude": hedef_lat, "longitude": hedef_lon}),
+        ("çerezsiz (referans)", {}, {}),
+        ("cookie: address=JSON", {}, {"address": json.dumps({"latitude": hedef_lat, "longitude": hedef_lon})}),
+        ("cookie: selectedAddress=JSON", {}, {"selectedAddress": json.dumps({"latitude": hedef_lat, "longitude": hedef_lon})}),
+        ("cookie: location=lat,lon", {}, {"location": f"{hedef_lat},{hedef_lon}"}),
+        ("cookie: lat + lon ayrı", {}, {"lat": hedef_lat, "lon": hedef_lon}),
+        ("cookie: latitude + longitude ayrı", {}, {"latitude": hedef_lat, "longitude": hedef_lon}),
+        ("param: ?latitude=&longitude=", {"latitude": hedef_lat, "longitude": hedef_lon}, {}),
+        ("param: ?lat=&lng=", {"lat": hedef_lat, "lng": hedef_lon}, {}),
+        ("param: ?lat=&lon=", {"lat": hedef_lat, "lon": hedef_lon}, {}),
     ]
 
     satirlar = [
-        "# Trendyol Yemek — Konum Denemesi Raporu",
+        "# Trendyol Yemek — Konum Denemesi Raporu (v2 - URL parametreleri eklendi)",
         f"Oluşturulma: {datetime.now(timezone.utc).strftime('%Y-%m-%d %H:%M UTC')}",
         f"Hedef konum (Tuzla Deri OSB, TAHMİNİ): {hedef_lat}, {hedef_lon}\n",
     ]
 
-    for isim, cookieler in denemeler:
+    for isim, parametreler, cookieler in denemeler:
         try:
             yanit = requests.get(url, headers=_TARAYICI_BASLIKLARI,
-                                  cookies=cookieler, timeout=30)
+                                  params=parametreler, cookies=cookieler, timeout=30)
             bulunan_lat, bulunan_lon = _next_f_den_initial_address_bul(yanit.text)
         except Exception as e:
             satirlar.append(f"- {isim}: ❌ hata ({e})")
