@@ -455,12 +455,26 @@ TUZLA_DERI_OSB_LON = "29.333"
 
 def _next_f_den_initial_address_bul(html: str):
     """Yanıttaki 'initialAddress':{'latitude':...,'longitude':...}
-    değerini bulur - bizim gönderdiğimiz konumun GERÇEKTEN işe yarayıp
-    yaramadığını anlamanın tek yolu bu (sunucu bize ne döndürdü)."""
-    eslesme = re.search(
-        r'"initialAddress":\{"latitude":"([^"]+)","longitude":"([^"]+)"\}', html)
-    if eslesme:
-        return eslesme.group(1), eslesme.group(2)
+    değerini bulur. (2026-10-05 düzeltmesi) Veri, self.__next_f.push(...)
+    çağrıları içinde KAÇIŞ KARAKTERLİ bir JSON string olarak geliyor
+    (\\\"initialAddress\\\" şeklinde, düz \"initialAddress\" değil) - önce
+    her push çağrısını JSON olarak ÇÖZÜP, kaçış karakterlerini normal
+    tırnağa çevirdikten SONRA aramak lazım. İlk denemede bunu atlayıp
+    ham metinde düz arama yapmıştım, o yüzden hep 'bulunamadı' çıkıyordu -
+    siteyle değil, bu fonksiyonla ilgili bir hataydı."""
+    for parca in re.findall(r'self\.__next_f\.push\((\[.*?\])\)', html, re.S):
+        try:
+            dizi = json.loads(parca)
+        except Exception:
+            continue
+        if len(dizi) < 2 or not isinstance(dizi[1], str):
+            continue
+        cozulmus_metin = dizi[1]
+        eslesme = re.search(
+            r'"initialAddress":\{"latitude":"([^"]+)","longitude":"([^"]+)"\}',
+            cozulmus_metin)
+        if eslesme:
+            return eslesme.group(1), eslesme.group(2)
     return None, None
 
 
