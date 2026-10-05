@@ -447,6 +447,55 @@ def kesif_calistir_yemek():
         send_football_message(f"❌ Keşif raporu oluşturulamadı: {e}")
 
 
+def tgoyemek_derin_inceleme():
+    """(2026-10-03) tgoyemek.com (Trendyol Yemek) erişilebilir çıktı VE
+    robots.txt açıkça '/restoranlar' taranmasına izin veriyor - bu, veriyi
+    arama motorları için sayfa içine GÖMDÜKLERİNİN işareti (Amazon'daki
+    gibi gizli bir client-only widget olması ihtimali düşük). Next.js
+    sitelerde bu genelde __NEXT_DATA__ adlı bir <script> içinde JSON
+    olarak gelir - burada arayıp BULURSA ayrı bir dosyaya kaydediyoruz,
+    gerçek restoran/adres yapısını görüp doğru ayrıştırıcıyı yazabilelim."""
+    hedefler = ["https://tgoyemek.com/", "https://tgoyemek.com/restoranlar"]
+
+    for url in hedefler:
+        send_football_message(f"📥 İnceleniyor: {url}")
+        try:
+            yanit = requests.get(url, headers=_TARAYICI_BASLIKLARI, timeout=30)
+        except Exception as e:
+            send_football_message(f"❌ {url} alınamadı: {e}")
+            continue
+
+        yol_kismi = url.split("://", 1)[-1].split("/", 1)
+        dosya_adi_govde = yol_kismi[1].rstrip("/") if len(yol_kismi) > 1 and yol_kismi[1] else "anasayfa"
+
+        eslesme = re.search(
+            r'<script[^>]*id=["\']__NEXT_DATA__["\'][^>]*>(.*?)</script>',
+            yanit.text, re.S)
+        if eslesme:
+            json_metni = eslesme.group(1)
+            try:
+                ayristirilmis = json.loads(json_metni)
+                json_metni = json.dumps(ayristirilmis, ensure_ascii=False, indent=2)
+            except Exception:
+                pass  # ham hâliyle kaydet, en azından okunabilir olsun
+            dosya_yolu = os.path.join(DATA_DIR, f"tgoyemek_{dosya_adi_govde}_nextdata.json")
+            with open(dosya_yolu, "w", encoding="utf-8") as f:
+                f.write(json_metni)
+            send_football_document(
+                dosya_yolu,
+                caption=f"📥 {url} — __NEXT_DATA__ bulundu (~{len(json_metni):,} karakter)".replace(",", "."))
+        else:
+            # Gömülü veri yoksa en azından ham HTML'i gönderelim, en baştan
+            # bakalım gerçekte ne geliyor.
+            dosya_yolu = os.path.join(DATA_DIR, f"tgoyemek_{dosya_adi_govde}_ham.html")
+            with open(dosya_yolu, "w", encoding="utf-8") as f:
+                f.write(yanit.text)
+            send_football_document(
+                dosya_yolu,
+                caption=f"📥 {url} — __NEXT_DATA__ bulunamadı, ham HTML gönderildi "
+                        f"(durum {yanit.status_code}, {len(yanit.content):,} byte)".replace(",", "."))
+
+
 def amazon_deals_ham_kaydet():
     """(2026-10-03) Amazon.com.tr tek açık site çıktı, /deals sayfası da
     muhtemelen Amazon'un KENDİ resmi 'Günün Fırsatları' sayfası. Gerçek

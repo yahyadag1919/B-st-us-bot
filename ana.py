@@ -306,8 +306,8 @@ if __name__ == "__main__":
     if INDIRIM is not None:
         threading.Thread(target=_tek_seferlik("İndirim keşif başlangıç",
                                                INDIRIM.baslangic), daemon=True).start()
-        threading.Thread(target=_tek_seferlik("Yemek platformları keşif",
-                                               INDIRIM.kesif_calistir_yemek), daemon=True).start()
+        threading.Thread(target=_tek_seferlik("Trendyol Yemek derin inceleme",
+                                               INDIRIM.tgoyemek_derin_inceleme), daemon=True).start()
         print("[ANA] İndirim keşif thread'leri başlatıldı.", flush=True)
 
     # --- 4) MIDAS PRO MANUEL TAKİP ---
