@@ -447,6 +447,82 @@ def kesif_calistir_yemek():
         send_football_message(f"❌ Keşif raporu oluşturulamadı: {e}")
 
 
+# Tuzla Deri OSB için TAHMİNİ koordinat - kesin değilse kullanıcı
+# Google Maps'ten doğrusunu verip burayı güncelleyebilir.
+TUZLA_DERI_OSB_LAT = "40.822"
+TUZLA_DERI_OSB_LON = "29.333"
+
+
+def _next_f_den_initial_address_bul(html: str):
+    """Yanıttaki 'initialAddress':{'latitude':...,'longitude':...}
+    değerini bulur - bizim gönderdiğimiz konumun GERÇEKTEN işe yarayıp
+    yaramadığını anlamanın tek yolu bu (sunucu bize ne döndürdü)."""
+    eslesme = re.search(
+        r'"initialAddress":\{"latitude":"([^"]+)","longitude":"([^"]+)"\}', html)
+    if eslesme:
+        return eslesme.group(1), eslesme.group(2)
+    return None, None
+
+
+def tgoyemek_konum_denemesi():
+    """(2026-10-03) Anonim istekte sunucu varsayılan bir konum
+    ("initialAddress") kullanıyor - bu, konumun çerez/parametre ile
+    değiştirilebileceğinin kanıtı. Birkaç yaygın adayı deneyip
+    HANGİSİNİN sunucunun döndürdüğü 'initialAddress' değerini
+    DEĞİŞTİRDİĞİNİ görüyoruz - değişen varsa, doğru mekanizmayı bulmuş oluruz."""
+    url = "https://tgoyemek.com/restoranlar"
+    hedef_lat, hedef_lon = TUZLA_DERI_OSB_LAT, TUZLA_DERI_OSB_LON
+
+    denemeler = [
+        ("çerezsiz (referans)", {}),
+        ("cookie: address=JSON",
+         {"address": json.dumps({"latitude": hedef_lat, "longitude": hedef_lon})}),
+        ("cookie: selectedAddress=JSON",
+         {"selectedAddress": json.dumps({"latitude": hedef_lat, "longitude": hedef_lon})}),
+        ("cookie: location=lat,lon",
+         {"location": f"{hedef_lat},{hedef_lon}"}),
+        ("cookie: lat + lon ayrı",
+         {"lat": hedef_lat, "lon": hedef_lon}),
+        ("cookie: latitude + longitude ayrı",
+         {"latitude": hedef_lat, "longitude": hedef_lon}),
+    ]
+
+    satirlar = [
+        "# Trendyol Yemek — Konum Denemesi Raporu",
+        f"Oluşturulma: {datetime.now(timezone.utc).strftime('%Y-%m-%d %H:%M UTC')}",
+        f"Hedef konum (Tuzla Deri OSB, TAHMİNİ): {hedef_lat}, {hedef_lon}\n",
+    ]
+
+    for isim, cookieler in denemeler:
+        try:
+            yanit = requests.get(url, headers=_TARAYICI_BASLIKLARI,
+                                  cookies=cookieler, timeout=30)
+            bulunan_lat, bulunan_lon = _next_f_den_initial_address_bul(yanit.text)
+        except Exception as e:
+            satirlar.append(f"- {isim}: ❌ hata ({e})")
+            continue
+
+        if bulunan_lat is None:
+            satirlar.append(f"- {isim}: initialAddress hiç bulunamadı (durum {yanit.status_code})")
+        elif bulunan_lat == hedef_lat and bulunan_lon == hedef_lon:
+            satirlar.append(f"- {isim}: ✅ BAŞARILI - konum DEĞİŞTİ! ({bulunan_lat}, {bulunan_lon})")
+        else:
+            satirlar.append(f"- {isim}: değişmedi (hâlâ {bulunan_lat}, {bulunan_lon})")
+        send_football_message(f"[{isim}] -> {satirlar[-1]}")
+
+    satirlar.append(
+        "\nℹ️ '✅ BAŞARILI' satırı varsa, o yöntemle konumu kontrol "
+        "edebiliyoruz demektir - gerçek takip sistemi bunu kullanacak. "
+        "Hiçbiri başarılı değilse, konum muhtemelen bir API çağrısıyla "
+        "(basit çerezle değil) ayarlanıyor - bir sonraki adımda onu arayacağız.")
+
+    rapor = "\n".join(satirlar)
+    dosya_yolu = os.path.join(DATA_DIR, "tgoyemek_konum_denemesi.md")
+    with open(dosya_yolu, "w", encoding="utf-8") as f:
+        f.write(rapor)
+    send_football_document(dosya_yolu, caption="📍 Trendyol Yemek Konum Denemesi")
+
+
 def tgoyemek_derin_inceleme():
     """(2026-10-03) tgoyemek.com (Trendyol Yemek) erişilebilir çıktı VE
     robots.txt açıkça '/restoranlar' taranmasına izin veriyor - bu, veriyi
