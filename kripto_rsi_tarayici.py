@@ -1,0 +1,461 @@
+"""
+kripto_rsi_tarayici.py — KRİPTO 4 SAATLİK RSI AŞIRI SATIM TARAYICISI
+==============================================================================
+2026-10-23 — Kullanıcının isteğiyle kuruldu. BIST tavan tarayıcısı
+kapatıldı, bu modül AYNI Telegram bot/sohbetini (ARGE_TELEGRAM_TOKEN /
+ARGE_TELEGRAM_CHAT_ID) kullanıyor.
+
+NE YAPIYOR:
+  - İşlem hacmine göre en büyük ~150 USDT çiftini tarar
+  - Her birinin 4 saatlik grafiğinde RSI(14) hesaplar
+  - RSI 20 ve altına düşünce Telegram'a bildirim gönderir
+  - Kullanıcı bildirime bakıp KENDİSİ, MANUEL olarak (demo hesapta) işlem açar
+
+NE YAPMIYOR:
+  - Hiçbir borsaya emir GÖNDERMEZ, hesaba BAĞLANMAZ
+  - API anahtarı GEREKTİRMEZ - sadece herkese açık piyasa verisini okur
+
+VERİ KAYNAĞI: Render sunucusunun hangi ülkede olduğuna göre bazı borsalar
+erişimi engelleyebiliyor (Binance ABD IP'lerini engelliyor). Bu yüzden
+sırayla 3 kaynak deneniyor, ilk çalışan kullanılıyor:
+  1) Binance herkese açık veri adresi (data-api.binance.vision)
+  2) OKX
+  3) KuCoin
+Hangisinin çalıştığı başlangıç mesajında yazıyor.
+
+BİLDİRİM SELİ KORUMASI: Bir coin RSI ≤ 20 olup alarm verdikten sonra, RSI
+tekrar 25'in üzerine çıkana kadar o coin için YENİ alarm gönderilmez -
+aynı düşüş için her 5 dakikada bir mesaj gelmesin diye.
+
+GÜNLÜK ÖZET: Her akşam bir özet mesajı gelir (kaç coin tarandı, bugün kaç
+alarm çıktı, şu an RSI'ı en düşük coinler). Böylece sessiz bir gün
+"bot bozuldu" ile "hiçbir coin 20'ye düşmedi" ayırt edilebiliyor.
+"""
+import os
+import json
+import time
+from datetime import datetime, timezone, timedelta
+
+import requests
+
+TELEGRAM_TOKEN = os.environ.get("ARGE_TELEGRAM_TOKEN", "")
+TELEGRAM_CHAT_ID = os.environ.get("ARGE_TELEGRAM_CHAT_ID", "")
+DATA_DIR = os.environ.get("DATA_DIR", ".")
+
+KRIPTO_SURUM = "kripto-rsi-v1-2026-10-23"
+
+RSI_PERIYOT = 14
+RSI_ESIK = float(os.environ.get("KRIPTO_RSI_ESIK", "20"))
+RSI_YENIDEN_KURMA = float(os.environ.get("KRIPTO_RSI_YENIDEN_KURMA", "25"))
+COIN_SAYISI = int(os.environ.get("KRIPTO_COIN_SAYISI", "150"))
+TARAMA_ARALIGI_DK = int(os.environ.get("KRIPTO_TARAMA_DK", "5"))
+EVREN_YENILEME_SAAT = 6
+MUM_SAYISI = 120               # RSI'ın oturması için yeterli geçmiş
+ISTEK_ARASI_SN = 0.15
+OZET_SAATI_TR = 21              # Türkiye saatiyle akşam özeti
+TR_SAAT_FARKI = timedelta(hours=3)
+
+# Stabil coinler ve kaldıraçlı tokenler taranmaz (RSI'ları anlamsız)
+STABIL_COINLER = {"USDT", "USDC", "FDUSD", "TUSD", "DAI", "USDP", "BUSD", "USDE",
+                  "PYUSD", "USD1", "EUR", "EURI", "AEUR", "TRY", "BRL", "GBP",
+                  "USTC", "UST", "USDD", "XUSD", "RLUSD", "PAXG", "XAUT"}
+KALDIRACLI_EKLER = ("UP", "DOWN", "BULL", "BEAR", "3L", "3S", "5L", "5S")
+
+_OTURUM = requests.Session()
+_OTURUM.headers.update({"User-Agent": "Mozilla/5.0 (kripto-rsi-tarayici)"})
+
+
+# =============================================================================
+# TELEGRAM
+# =============================================================================
+def send_telegram_message(text: str):
+    if not TELEGRAM_TOKEN or not TELEGRAM_CHAT_ID:
+        print(f"[Kripto devre dışı] {text}", flush=True)
+        return
+    try:
+        _OTURUM.post(f"https://api.telegram.org/bot{TELEGRAM_TOKEN}/sendMessage",
+                     json={"chat_id": TELEGRAM_CHAT_ID, "text": text[:4000],
+                           "disable_web_page_preview": True},
+                     timeout=20)
+    except Exception as e:
+        print(f"[Kripto Telegram hata] {e}", flush=True)
+
+
+# =============================================================================
+# VERİ KAYNAKLARI — hepsi aynı biçimde veri döndürür:
+#   evren()  -> [{"sembol": "SOL", "kaynak_kodu": ..., "hacim": usdt,
+#                 "fiyat": float, "degisim": % (24s)}]
+#   kapanislar(kaynak_kodu) -> (kapanis_listesi_eskiden_yeniye, son_mum_acilis_ms)
+#                              listenin SON elemanı henüz kapanmamış (canlı) mum
+# =============================================================================
+def _get(url, params=None):
+    r = _OTURUM.get(url, params=params, timeout=20)
+    r.raise_for_status()
+    return r.json()
+
+
+def _uygun_sembol_mu(baz: str) -> bool:
+    if not baz or baz in STABIL_COINLER:
+        return False
+    if baz.endswith(KALDIRACLI_EKLER) and len(baz) > 4:
+        return False
+    return True
+
+
+class BinanceKaynak:
+    ad = "Binance"
+    taban = "https://data-api.binance.vision"
+
+    def evren(self):
+        veri = _get(f"{self.taban}/api/v3/ticker/24hr")
+        sonuc = []
+        for t in veri:
+            s = t.get("symbol", "")
+            if not s.endswith("USDT"):
+                continue
+            baz = s[:-4]
+            if not _uygun_sembol_mu(baz):
+                continue
+            try:
+                sonuc.append({"sembol": baz, "kaynak_kodu": s,
+                              "hacim": float(t["quoteVolume"]),
+                              "fiyat": float(t["lastPrice"]),
+                              "degisim": float(t["priceChangePercent"])})
+            except (KeyError, ValueError):
+                continue
+        return sonuc
+
+    def kapanislar(self, kod):
+        veri = _get(f"{self.taban}/api/v3/klines",
+                    {"symbol": kod, "interval": "4h", "limit": MUM_SAYISI})
+        return [float(m[4]) for m in veri], int(veri[-1][0])
+
+    def grafik_linki(self, sembol):
+        return f"https://www.tradingview.com/chart/?symbol=BINANCE:{sembol}USDT"
+
+
+class OkxKaynak:
+    ad = "OKX"
+    taban = "https://www.okx.com"
+
+    def evren(self):
+        veri = _get(f"{self.taban}/api/v5/market/tickers", {"instType": "SPOT"})
+        sonuc = []
+        for t in veri.get("data", []):
+            kod = t.get("instId", "")
+            if not kod.endswith("-USDT"):
+                continue
+            baz = kod[:-5]
+            if not _uygun_sembol_mu(baz):
+                continue
+            try:
+                fiyat = float(t["last"])
+                acilis = float(t["open24h"])
+                sonuc.append({"sembol": baz, "kaynak_kodu": kod,
+                              "hacim": float(t["volCcy24h"]),
+                              "fiyat": fiyat,
+                              "degisim": (fiyat - acilis) / acilis * 100 if acilis else 0.0})
+            except (KeyError, ValueError):
+                continue
+        return sonuc
+
+    def kapanislar(self, kod):
+        veri = _get(f"{self.taban}/api/v5/market/candles",
+                    {"instId": kod, "bar": "4H", "limit": min(MUM_SAYISI, 300)})
+        mumlar = list(reversed(veri.get("data", [])))  # OKX yeniden eskiye veriyor
+        return [float(m[4]) for m in mumlar], int(mumlar[-1][0])
+
+    def grafik_linki(self, sembol):
+        return f"https://www.tradingview.com/chart/?symbol=OKX:{sembol}USDT"
+
+
+class KucoinKaynak:
+    ad = "KuCoin"
+    taban = "https://api.kucoin.com"
+
+    def evren(self):
+        veri = _get(f"{self.taban}/api/v1/market/allTickers")
+        sonuc = []
+        for t in veri.get("data", {}).get("ticker", []):
+            kod = t.get("symbol", "")
+            if not kod.endswith("-USDT"):
+                continue
+            baz = kod[:-5]
+            if not _uygun_sembol_mu(baz):
+                continue
+            try:
+                sonuc.append({"sembol": baz, "kaynak_kodu": kod,
+                              "hacim": float(t["volValue"]),
+                              "fiyat": float(t["last"]),
+                              "degisim": float(t["changeRate"]) * 100})
+            except (KeyError, ValueError, TypeError):
+                continue
+        return sonuc
+
+    def kapanislar(self, kod):
+        simdi = int(time.time())
+        veri = _get(f"{self.taban}/api/v1/market/candles",
+                    {"symbol": kod, "type": "4hour",
+                     "startAt": simdi - MUM_SAYISI * 4 * 3600, "endAt": simdi})
+        mumlar = list(reversed(veri.get("data", [])))  # KuCoin yeniden eskiye veriyor
+        # KuCoin sırası: [zaman, açılış, KAPANIŞ, yüksek, düşük, ...]
+        return [float(m[2]) for m in mumlar], int(mumlar[-1][0]) * 1000
+
+    def grafik_linki(self, sembol):
+        return f"https://www.tradingview.com/chart/?symbol=KUCOIN:{sembol}USDT"
+
+
+KAYNAKLAR = [BinanceKaynak(), OkxKaynak(), KucoinKaynak()]
+
+
+def _calisan_kaynagi_bul():
+    """Kaynakları sırayla dener; hem coin listesi hem 4s mum verisi gelen
+    ilk kaynağı döndürür. Hangisinin neden başarısız olduğunu da raporlar."""
+    notlar = []
+    for k in KAYNAKLAR:
+        try:
+            evren = k.evren()
+            if len(evren) < 20:
+                notlar.append(f"{k.ad}: coin listesi çok kısa ({len(evren)})")
+                continue
+            btc = next((c for c in evren if c["sembol"] == "BTC"), evren[0])
+            kapanis, _ = k.kapanislar(btc["kaynak_kodu"])
+            if len(kapanis) < RSI_PERIYOT + 5:
+                notlar.append(f"{k.ad}: mum verisi yetersiz ({len(kapanis)})")
+                continue
+            return k, notlar
+        except Exception as e:
+            notlar.append(f"{k.ad}: {str(e)[:120]}")
+    return None, notlar
+
+
+# =============================================================================
+# RSI (Wilder) — TradingView'daki standart RSI ile aynı yöntem
+# =============================================================================
+def rsi_hesapla(kapanislar, periyot=RSI_PERIYOT):
+    if len(kapanislar) < periyot + 1:
+        return None
+    kazanc, kayip = 0.0, 0.0
+    for i in range(1, periyot + 1):
+        fark = kapanislar[i] - kapanislar[i - 1]
+        kazanc += max(fark, 0)
+        kayip += max(-fark, 0)
+    ort_kazanc, ort_kayip = kazanc / periyot, kayip / periyot
+    for i in range(periyot + 1, len(kapanislar)):
+        fark = kapanislar[i] - kapanislar[i - 1]
+        ort_kazanc = (ort_kazanc * (periyot - 1) + max(fark, 0)) / periyot
+        ort_kayip = (ort_kayip * (periyot - 1) + max(-fark, 0)) / periyot
+    if ort_kayip == 0:
+        return 100.0 if ort_kazanc > 0 else 50.0
+    rs = ort_kazanc / ort_kayip
+    return 100 - 100 / (1 + rs)
+
+
+# =============================================================================
+# DURUM — alarm verilen coinler + günlük sayaçlar (diske de yazılır,
+# ama Render yeniden başlayınca silinebilir; bu durumda en kötü ihtimalle
+# halen RSI ≤ 20 olan bir coin için bir kez daha alarm gelir)
+# =============================================================================
+_durum = {"alarmda": {}, "gunluk_alarm": 0, "gun": "", "son_ozet_gunu": "",
+          "tur": 0, "son_tur_coin": 0, "son_rsi": {}, "kaynak": "-"}
+
+
+def _durum_dosyasi():
+    return os.path.join(DATA_DIR, "kripto_rsi_durum.json")
+
+
+def _durum_yukle():
+    try:
+        with open(_durum_dosyasi(), encoding="utf-8") as f:
+            kayit = json.load(f)
+        for anahtar in ("alarmda", "gunluk_alarm", "gun", "son_ozet_gunu"):
+            if anahtar in kayit:
+                _durum[anahtar] = kayit[anahtar]
+    except Exception:
+        pass
+
+
+def _durum_kaydet():
+    try:
+        os.makedirs(DATA_DIR, exist_ok=True)
+        with open(_durum_dosyasi(), "w", encoding="utf-8") as f:
+            json.dump({k: _durum[k] for k in ("alarmda", "gunluk_alarm", "gun", "son_ozet_gunu")},
+                      f, ensure_ascii=False)
+    except Exception as e:
+        print(f"[Kripto] Durum kaydedilemedi: {e}", flush=True)
+
+
+def _tr_simdi():
+    return datetime.now(timezone.utc) + TR_SAAT_FARKI
+
+
+def _fiyat_bicimle(f):
+    if f >= 100:
+        return f"{f:,.2f}"
+    if f >= 1:
+        return f"{f:.4f}"
+    if f >= 0.01:
+        return f"{f:.5f}"
+    return f"{f:.8f}".rstrip("0")
+
+
+# =============================================================================
+# TARAMA
+# =============================================================================
+def _alarm_mesaji(kaynak, coin, rsi_canli, rsi_kapanmis):
+    kapanmis_str = f"{rsi_kapanmis:.1f}" if rsi_kapanmis is not None else "?"
+    return (
+        f"🔻 RSI ALARMI — {coin['sembol']}/USDT\n"
+        f"4 saatlik RSI: {rsi_canli:.1f} (canlı mum, henüz kapanmadı)\n"
+        f"Son kapanmış mumun RSI'ı: {kapanmis_str}\n"
+        f"Fiyat: ${_fiyat_bicimle(coin['fiyat'])}  |  24s: %{coin['degisim']:+.1f}\n"
+        f"Kaynak: {kaynak.ad}\n"
+        f"Grafik: {kaynak.grafik_linki(coin['sembol'])}\n\n"
+        f"ℹ️ RSI tekrar {RSI_YENIDEN_KURMA:.0f}'in üzerine çıkana kadar bu coin "
+        f"için yeni alarm gelmeyecek. Bu bir 'aşırı satım' uyarısı, al sinyali "
+        f"değil — düşüş devam edebilir.")
+
+
+def _gun_kontrol():
+    bugun = _tr_simdi().strftime("%Y-%m-%d")
+    if _durum["gun"] != bugun:
+        _durum["gun"] = bugun
+        _durum["gunluk_alarm"] = 0
+
+
+def tek_tur(kaynak, evren):
+    _gun_kontrol()
+    taranan = 0
+    yeni_rsi = {}
+    for coin in evren:
+        try:
+            kapanis, _ = kaynak.kapanislar(coin["kaynak_kodu"])
+        except Exception as e:
+            print(f"[Kripto] {coin['sembol']} veri hatası: {str(e)[:100]}", flush=True)
+            time.sleep(ISTEK_ARASI_SN)
+            continue
+        time.sleep(ISTEK_ARASI_SN)
+
+        rsi_canli = rsi_hesapla(kapanis)
+        if rsi_canli is None:
+            continue
+        rsi_kapanmis = rsi_hesapla(kapanis[:-1])
+        taranan += 1
+        yeni_rsi[coin["sembol"]] = rsi_canli
+
+        sembol = coin["sembol"]
+        if sembol in _durum["alarmda"]:
+            if rsi_canli > RSI_YENIDEN_KURMA:
+                del _durum["alarmda"][sembol]  # toparlandı, bir sonraki düşüşte tekrar alarm verebilir
+            continue
+
+        if rsi_canli <= RSI_ESIK:
+            send_telegram_message(_alarm_mesaji(kaynak, coin, rsi_canli, rsi_kapanmis))
+            _durum["alarmda"][sembol] = round(rsi_canli, 1)
+            _durum["gunluk_alarm"] += 1
+            _durum_kaydet()
+
+    _durum["son_rsi"] = yeni_rsi
+    _durum["son_tur_coin"] = taranan
+    _durum["tur"] += 1
+    return taranan
+
+
+def _gunluk_ozet_gerekiyorsa_gonder():
+    simdi = _tr_simdi()
+    bugun = simdi.strftime("%Y-%m-%d")
+    if simdi.hour < OZET_SAATI_TR or _durum["son_ozet_gunu"] == bugun:
+        return
+    en_dusukler = sorted(_durum["son_rsi"].items(), key=lambda x: x[1])[:5]
+    satirlar = [
+        f"📊 Kripto RSI günlük özet ({bugun})",
+        f"Taranan coin: {_durum['son_tur_coin']} (kaynak: {_durum['kaynak']})",
+        f"Bugünkü tarama turu: ~{_durum['tur']}",
+        f"Bugün çıkan alarm (RSI ≤ {RSI_ESIK:.0f}): {_durum['gunluk_alarm']}",
+        "",
+        "Şu an 4s RSI'ı en düşük 5 coin:",
+    ]
+    for s, r in en_dusukler:
+        satirlar.append(f"  {s}: {r:.1f}")
+    if _durum["alarmda"]:
+        satirlar.append("")
+        satirlar.append(f"Hâlâ alarm bölgesinde ({RSI_YENIDEN_KURMA:.0f} altında): "
+                        + ", ".join(sorted(_durum["alarmda"].keys())))
+    if _durum["gunluk_alarm"] == 0:
+        satirlar.append("")
+        satirlar.append("Bugün hiçbir coin 20'ye düşmedi — sistem çalışıyor, "
+                        "sadece piyasa o kadar sert satılmadı.")
+    send_telegram_message("\n".join(satirlar))
+    _durum["son_ozet_gunu"] = bugun
+    _durum["tur"] = 0
+    _durum_kaydet()
+
+
+def kripto_tarama_dongusu():
+    _durum_yukle()
+    kaynak, notlar = _calisan_kaynagi_bul()
+    if kaynak is None:
+        send_telegram_message(
+            "❌ Kripto RSI tarayıcı: hiçbir veri kaynağına erişilemedi.\n"
+            + "\n".join(notlar) + "\n\n10 dakika sonra tekrar denenecek.")
+        time.sleep(600)
+        return  # _guvenli sarmalayıcısı fonksiyonu yeniden başlatır
+
+    _durum["kaynak"] = kaynak.ad
+    evren, evren_zamani = [], 0
+    ardisik_hata = 0
+    while True:
+        try:
+            if not evren or time.time() - evren_zamani > EVREN_YENILEME_SAAT * 3600:
+                tum = kaynak.evren()
+                tum.sort(key=lambda c: c["hacim"], reverse=True)
+                evren = tum[:COIN_SAYISI]
+                evren_zamani = time.time()
+                print(f"[Kripto] Evren yenilendi: {len(evren)} coin ({kaynak.ad})", flush=True)
+            else:
+                # Fiyat/24s değişim bilgisini tazelemek için listeyi güncelle
+                guncel = {c["sembol"]: c for c in kaynak.evren()}
+                evren = [guncel.get(c["sembol"], c) for c in evren]
+
+            taranan = tek_tur(kaynak, evren)
+            print(f"[Kripto] Tur tamamlandı: {taranan}/{len(evren)} coin, "
+                  f"alarmda: {len(_durum['alarmda'])}", flush=True)
+            ardisik_hata = 0 if taranan > 0 else ardisik_hata + 1
+            _gunluk_ozet_gerekiyorsa_gonder()
+        except Exception as e:
+            ardisik_hata += 1
+            print(f"[Kripto] Tur hatası ({ardisik_hata}): {e}", flush=True)
+
+        if ardisik_hata >= 3:
+            # Kaynak çalışmaz hale geldiyse diğer kaynaklara geçmeyi dene
+            yeni, notlar = _calisan_kaynagi_bul()
+            if yeni is not None and yeni.ad != kaynak.ad:
+                send_telegram_message(f"⚠️ Kripto RSI: {kaynak.ad} yanıt vermiyor, "
+                                      f"{yeni.ad} kaynağına geçildi.")
+                kaynak, evren = yeni, []
+                _durum["kaynak"] = kaynak.ad
+            ardisik_hata = 0
+
+        time.sleep(TARAMA_ARALIGI_DK * 60)
+
+
+def baslangic():
+    kaynak, notlar = _calisan_kaynagi_bul()
+    kaynak_str = kaynak.ad if kaynak else "❌ HİÇBİRİ ÇALIŞMADI"
+    satirlar = [
+        f"🪙 Kripto RSI Tarayıcı AKTİF — {KRIPTO_SURUM}",
+        "",
+        "BIST tavan tarayıcısı kapatıldı, bu sohbet artık kripto için.",
+        f"• En yüksek hacimli {COIN_SAYISI} USDT çifti",
+        f"• 4 saatlik grafikte RSI({RSI_PERIYOT}) ≤ {RSI_ESIK:.0f} olunca bildirim",
+        f"• Her {TARAMA_ARALIGI_DK} dakikada bir tarama",
+        f"• Her akşam {OZET_SAATI_TR}:00'de günlük özet",
+        f"• Veri kaynağı: {kaynak_str}",
+        "",
+        "Borsaya bağlanmaz, emir göndermez — işlemleri sen manuel açarsın.",
+    ]
+    if notlar:
+        satirlar.append("")
+        satirlar.append("Denenip çalışmayan kaynaklar:")
+        satirlar.extend(f"  {n}" for n in notlar)
+    send_telegram_message("\n".join(satirlar))

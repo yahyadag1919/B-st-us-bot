@@ -42,13 +42,19 @@ import requests
 from flask import Flask
 
 PORT = int(os.environ.get("PORT", "10000"))
-ANA_SURUM = "ana-v2-abd-sinyal-kapatildi-2026-09-04"
+ANA_SURUM = "ana-v3-bist-kapatildi-kripto-rsi-2026-10-23"
+
+# 2026-10-23: Kullanıcının kararıyla BIST tarafı (tavan tarayıcı + Midas +
+# Katalizör + Kapsamlı Analiz) KAPATILDI. Aynı Telegram sohbetinde
+# (ARGE_TELEGRAM_TOKEN) artık kripto 4s RSI tarayıcısı çalışıyor.
+# Dosyalar silinmedi - geri açmak için bunu True yapmak yeterli.
+BIST_AKTIF = False
 
 app = Flask(__name__)
 _durum = {"us": "yüklenmedi", "sosyal": "yüklenmedi", "futbol": "yüklenmedi",
           "midas": "yüklenmedi", "akilli_para": "yüklenmedi", "katalizor": "yüklenmedi",
           "backtest": "yüklenmedi", "kapsamli": "yüklenmedi", "opsiyon": "yüklenmedi",
-          "indirim": "yüklenmedi"}
+          "indirim": "yüklenmedi", "kripto": "yüklenmedi"}
 
 
 # =====================================================================
@@ -164,6 +170,20 @@ except Exception as e:
     print(f"[ANA] abd_opsiyon_sinyal yüklenemedi: {e}", flush=True)
     traceback.print_exc()
 
+try:
+    import kripto_rsi_tarayici as KRIPTO
+    _durum["kripto"] = "✅ yüklendi"
+except Exception as e:
+    KRIPTO = None
+    _durum["kripto"] = f"❌ {e}"
+    print(f"[ANA] kripto_rsi_tarayici yüklenemedi: {e}", flush=True)
+    traceback.print_exc()
+
+if not BIST_AKTIF:
+    for _anahtar in ("us", "midas", "katalizor", "kapsamli"):
+        if _durum[_anahtar].startswith("✅"):
+            _durum[_anahtar] = "⏸️ KAPALI (2026-10-23, yerine kripto RSI tarayıcı)"
+
 
 def _guvenli(ad, fonk):
     """Bir thread'i sonsuza kadar güvenle çalıştırır. Fonksiyon
@@ -240,6 +260,7 @@ def ana_sayfa():
          f"<li>ABD Backtest: {_durum['backtest']}</li>",
          f"<li>BIST Kapsamlı Analiz: {_durum['kapsamli']}</li>",
          f"<li>ABD Opsiyon Sinyal: {_durum['opsiyon']}</li>",
+         f"<li>Kripto RSI Tarayıcı: {_durum['kripto']}</li>",
          "</ul>"]
     if SOSYAL is not None:
         try:
@@ -275,7 +296,7 @@ if __name__ == "__main__":
     # TARAYICISI onun içinden çağrılıyor ve ORADA GERÇEK BİR BULGU VAR
     # (tavan kapanışı → ertesi gün +%2.51 net, %90 isabet). Sadece ABD
     # tarama ve komut thread'leri başlatılmıyor.
-    if US is not None:
+    if BIST_AKTIF and US is not None:
         print("[ANA] ABD sinyal botu KAPALI (test: göstergeler kör çizgiyi "
               "geçemedi) - sadece BIST tavan tarayıcısı çalışacak.", flush=True)
         try:
@@ -314,7 +335,7 @@ if __name__ == "__main__":
     # Ayrı bir komut/fotoğraf döngüsü YOK - update'ler arge_botu'nun
     # Telegram döngüsünden geliyor (yukarıda kaydedildi). Burada sadece
     # tek seferlik başlangıç mesajı gönderiliyor.
-    if MIDAS is not None:
+    if BIST_AKTIF and MIDAS is not None:
         threading.Thread(target=_tek_seferlik("Midas başlangıç",
                                                MIDAS.midas_baslangic), daemon=True).start()
         print("[ANA] Midas başlangıç mesajı thread'i başlatıldı.", flush=True)
@@ -330,7 +351,7 @@ if __name__ == "__main__":
         print("[ANA] ABD Akıllı Para thread'leri başlatıldı.", flush=True)
 
     # --- 6) BIST KATALİZÖR (iyi haber, henüz fiyatlanmamış) ---
-    if KATALIZOR is not None:
+    if BIST_AKTIF and KATALIZOR is not None:
         threading.Thread(target=_tek_seferlik("Katalizör başlangıç",
                                                KATALIZOR.baslangic), daemon=True).start()
         threading.Thread(target=_guvenli("BIST Katalizör",
@@ -346,7 +367,7 @@ if __name__ == "__main__":
         print("[ANA] Backtest thread'leri başlatıldı.", flush=True)
 
     # --- 8) BIST KAPSAMLI ANALİZ (tek seferlik rapor, arge_botu'na kancalı) ---
-    if KAPSAMLI is not None:
+    if BIST_AKTIF and KAPSAMLI is not None:
         threading.Thread(target=_tek_seferlik("Kapsamlı analiz başlangıç",
                                                KAPSAMLI.baslangic), daemon=True).start()
         print("[ANA] Kapsamlı analiz başlangıç mesajı thread'i başlatıldı.", flush=True)
@@ -358,6 +379,17 @@ if __name__ == "__main__":
         threading.Thread(target=_guvenli("Opsiyon sinyal",
                                           OPSIYON.opsiyon_kontrol_dongusu), daemon=True).start()
         print("[ANA] Opsiyon sinyal thread'leri başlatıldı.", flush=True)
+
+    if not BIST_AKTIF:
+        print("[ANA] BIST tarafı KAPALI (tavan + Midas + Katalizör + Kapsamlı).", flush=True)
+
+    # --- 10) KRİPTO 4s RSI TARAYICI (BIST'in Telegram sohbetinde) ---
+    if KRIPTO is not None:
+        threading.Thread(target=_tek_seferlik("Kripto RSI başlangıç",
+                                               KRIPTO.baslangic), daemon=True).start()
+        threading.Thread(target=_guvenli("Kripto RSI tarama",
+                                          KRIPTO.kripto_tarama_dongusu), daemon=True).start()
+        print("[ANA] Kripto RSI tarayıcı thread'leri başlatıldı.", flush=True)
 
     # --- TEK DIŞ PING (hepsi için) ---
     threading.Thread(target=dis_ping, daemon=True).start()
