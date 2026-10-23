@@ -42,7 +42,7 @@ TELEGRAM_TOKEN = os.environ.get("ARGE_TELEGRAM_TOKEN", "")
 TELEGRAM_CHAT_ID = os.environ.get("ARGE_TELEGRAM_CHAT_ID", "")
 DATA_DIR = os.environ.get("DATA_DIR", ".")
 
-KRIPTO_SURUM = "kripto-rsi-v2-2026-10-23"
+KRIPTO_SURUM = "kripto-rsi-v3-vadeli-2026-10-23"
 
 RSI_PERIYOT = 14
 RSI_ESIK = float(os.environ.get("KRIPTO_RSI_ESIK", "20"))
@@ -108,16 +108,86 @@ def _uygun_sembol_mu(baz: str) -> bool:
     return True
 
 
-class BinanceKaynak:
-    ad = "Binance"
-    taban = "https://data-api.binance.vision"
+AKTIF_LISTE_YENILEME_SN = 6 * 3600
+
+
+class BinanceVadeliKaynak:
+    """(v3) Binance Futures USDT-M PERPETUAL - kullanıcı Binance vadelide
+    işlem yapıyor. Sadece status=TRADING sözleşmeler. Coin adları vadelideki
+    gibi gösterilir (ör. 1000PEPE), böylece Binance uygulamasında aynen aranabilir.
+    Not: fapi.binance.com ABD IP'lerinden erişimi engelleyebiliyor - erişilemezse
+    _calisan_kaynagi_bul() otomatik olarak spot kaynağa geçer."""
+    ad = "Binance Vadeli (USDT-M)"
+    taban = "https://fapi.binance.com"
+
+    def __init__(self):
+        self._aktif, self._aktif_zaman = set(), 0
+
+    def _aktif_ciftler(self):
+        if not self._aktif or time.time() - self._aktif_zaman > AKTIF_LISTE_YENILEME_SN:
+            veri = _get(f"{self.taban}/fapi/v1/exchangeInfo")
+            self._aktif = {x["symbol"] for x in veri.get("symbols", [])
+                           if x.get("status") == "TRADING"
+                           and x.get("contractType") == "PERPETUAL"
+                           and x.get("quoteAsset") == "USDT"}
+            self._aktif_zaman = time.time()
+        return self._aktif
 
     def evren(self):
+        aktif = self._aktif_ciftler()
+        veri = _get(f"{self.taban}/fapi/v1/ticker/24hr")
+        sonuc = []
+        for t in veri:
+            s = t.get("symbol", "")
+            if s not in aktif or not s.endswith("USDT"):
+                continue
+            baz = s[:-4]
+            if not _uygun_sembol_mu(baz):
+                continue
+            try:
+                sonuc.append({"sembol": baz, "kaynak_kodu": s,
+                              "hacim": float(t["quoteVolume"]),
+                              "fiyat": float(t["lastPrice"]),
+                              "degisim": float(t["priceChangePercent"])})
+            except (KeyError, ValueError):
+                continue
+        return sonuc
+
+    def kapanislar(self, kod, zd="4s"):
+        veri = _get(f"{self.taban}/fapi/v1/klines",
+                    {"symbol": kod, "interval": {"4s": "4h", "1g": "1d"}[zd], "limit": MUM_SAYISI})
+        return [float(m[4]) for m in veri], int(veri[-1][0])
+
+    def grafik_linki(self, sembol):
+        return f"https://www.tradingview.com/chart/?symbol=BINANCE:{sembol}USDT.P"
+
+
+class BinanceKaynak:
+    """Binance SPOT. (v3) Artık sadece status=TRADING olan çiftler - v2'de
+    24 saatlik fiyat listesi borsadan çıkarılmış (delist) eski çiftleri de
+    döndürüyordu, coin sayısı 400'e çıkınca bunlar listeye girdi ve
+    donmuş fiyatları yüzünden anlamsız RSI alarmları üretti."""
+    ad = "Binance Spot"
+    taban = "https://data-api.binance.vision"
+
+    def __init__(self):
+        self._aktif, self._aktif_zaman = set(), 0
+
+    def _aktif_ciftler(self):
+        if not self._aktif or time.time() - self._aktif_zaman > AKTIF_LISTE_YENILEME_SN:
+            veri = _get(f"{self.taban}/api/v3/exchangeInfo")
+            self._aktif = {x["symbol"] for x in veri.get("symbols", [])
+                           if x.get("status") == "TRADING" and x.get("quoteAsset") == "USDT"}
+            self._aktif_zaman = time.time()
+        return self._aktif
+
+    def evren(self):
+        aktif = self._aktif_ciftler()
         veri = _get(f"{self.taban}/api/v3/ticker/24hr")
         sonuc = []
         for t in veri:
             s = t.get("symbol", "")
-            if not s.endswith("USDT"):
+            if s not in aktif or not s.endswith("USDT"):
                 continue
             baz = s[:-4]
             if not _uygun_sembol_mu(baz):
@@ -212,7 +282,8 @@ class KucoinKaynak:
         return f"https://www.tradingview.com/chart/?symbol=KUCOIN:{sembol}USDT"
 
 
-KAYNAKLAR = [BinanceKaynak(), OkxKaynak(), KucoinKaynak()]
+# (v3) Önce Binance vadeli (kullanıcının piyasası), erişilemezse spot, sonra diğerleri
+KAYNAKLAR = [BinanceVadeliKaynak(), BinanceKaynak(), OkxKaynak(), KucoinKaynak()]
 
 
 def _calisan_kaynagi_bul():
@@ -492,10 +563,11 @@ def baslangic():
     kaynak, notlar = _calisan_kaynagi_bul()
     kaynak_str = kaynak.ad if kaynak else "❌ HİÇBİRİ ÇALIŞMADI"
     satirlar = [
-        f"🪙 Kripto RSI Tarayıcı AKTİF (v2) — {KRIPTO_SURUM}",
+        f"🪙 Kripto RSI Tarayıcı AKTİF (v3) — {KRIPTO_SURUM}",
         "",
-        "BIST tavan tarayıcısı kapatıldı, bu sohbet artık kripto için.",
-        f"• En yüksek hacimli {COIN_SAYISI} USDT çifti (Binance'te pratikte hepsi)",
+        "v3: artık Binance VADELİ (USDT-M perpetual) taranıyor, borsadan "
+        "çıkarılmış eski coinler elendi.",
+        f"• En yüksek hacimli {COIN_SAYISI} USDT çifti (sadece şu an işlem görenler)",
         f"• 4 saatlik VE günlük grafikte RSI({RSI_PERIYOT})",
         f"• 🔻 RSI ≤ {RSI_ESIK:.0f} → aşırı satım alarmı",
         f"• 🔺 RSI ≥ {RSI_UST_ESIK:.0f} → aşırı alım alarmı",
@@ -505,6 +577,10 @@ def baslangic():
         "",
         "Borsaya bağlanmaz, emir göndermez — işlemleri sen manuel açarsın.",
     ]
+    if kaynak is not None and kaynak.ad != BinanceVadeliKaynak.ad:
+        satirlar.append("")
+        satirlar.append("⚠️ Binance vadeli verisine bu sunucudan erişilemedi, "
+                        "spot/diğer kaynak kullanılıyor - bazı coinler vadelide olmayabilir.")
     if notlar:
         satirlar.append("")
         satirlar.append("Denenip çalışmayan kaynaklar:")
