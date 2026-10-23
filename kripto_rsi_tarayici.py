@@ -42,7 +42,7 @@ TELEGRAM_TOKEN = os.environ.get("ARGE_TELEGRAM_TOKEN", "")
 TELEGRAM_CHAT_ID = os.environ.get("ARGE_TELEGRAM_CHAT_ID", "")
 DATA_DIR = os.environ.get("DATA_DIR", ".")
 
-KRIPTO_SURUM = "kripto-rsi-v4-vadeli-filtre-2026-10-23"
+KRIPTO_SURUM = "kripto-rsi-v5-2026-10-23"
 
 RSI_PERIYOT = 14
 RSI_ESIK = float(os.environ.get("KRIPTO_RSI_ESIK", "20"))
@@ -120,7 +120,8 @@ AKTIF_LISTE_YENILEME_SN = 6 * 3600
 # pratikte aynı çıkıyor.
 # =============================================================================
 _VADELI_ON_EKLER = ("1000000", "1000", "1M")
-_vadeli_onbellek = {"harita": {}, "zaman": 0, "hata": None}
+_vadeli_onbellek = {"harita": {}, "zaman": 0, "hata": None, "kaynak": None, "son_deneme": 0}
+VADELI_HATA_TEKRAR_SN = 30 * 60  # (v5) başarısız olursa 6 saat değil 30 dk sonra tekrar dene
 
 
 def _vadeli_normallestir(baz: str) -> str:
@@ -131,30 +132,95 @@ def _vadeli_normallestir(baz: str) -> str:
     return baz
 
 
+def _vadeli_sembollerden_harita(semboller):
+    harita = {}
+    for sembol in semboller:
+        sembol = str(sembol).upper()
+        if not sembol.endswith("USDT") or "_" in sembol:
+            continue
+        vadeli_adi = sembol[:-4]
+        if vadeli_adi:
+            harita[_vadeli_normallestir(vadeli_adi)] = vadeli_adi
+    return harita
+
+
+def _vadeli_liste_binance_web():
+    """Binance'in web sitesi üzerinden aynı vadeli bilgisi - fapi.binance.com
+    ABD'yi engelliyor, web alan adı farklı davranabilir."""
+    veri = _get("https://www.binance.com/fapi/v1/exchangeInfo")
+    return [x["symbol"] for x in veri.get("symbols", [])
+            if x.get("status") == "TRADING" and x.get("contractType") == "PERPETUAL"
+            and x.get("quoteAsset") == "USDT"]
+
+
+def _vadeli_liste_coingecko():
+    son_hata = None
+    for deneme in range(3):
+        try:
+            veri = _get("https://api.coingecko.com/api/v3/derivatives/exchanges/binance_futures",
+                        {"include_tickers": "unexpired"})
+            return [t.get("symbol", "") for t in veri.get("tickers", [])
+                    if str(t.get("contract_type", "perpetual")).lower() == "perpetual"]
+        except Exception as e:
+            son_hata = e
+            time.sleep(20 * (deneme + 1))  # 429'da biraz bekleyip tekrar dene
+    raise son_hata
+
+
+def _vadeli_liste_binance_veri_arsivi():
+    """Binance'in kendi herkese açık veri arşivi (data.binance.vision, Amazon
+    S3 üzerinde - coğrafi engel yok). Vadeli (USDT-M) her sözleşmenin bir
+    klasörü var. Not: arşivde borsadan kaldırılmış eski sözleşmeler de
+    durabiliyor; ama zaten AKTİF spot coinlerle kesiştirdiğimiz için pratikte
+    sorun olmuyor."""
+    import re
+    semboller, isaret = [], ""
+    for _ in range(10):  # sayfalama (her sayfa en fazla 1000)
+        params = {"delimiter": "/", "prefix": "data/futures/um/daily/klines/"}
+        if isaret:
+            params["marker"] = isaret
+        r = _OTURUM.get("https://s3-ap-northeast-1.amazonaws.com/data.binance.vision",
+                        params=params, timeout=30)
+        r.raise_for_status()
+        bulunan = re.findall(r"<Prefix>data/futures/um/daily/klines/([^/<]+)/</Prefix>", r.text)
+        semboller.extend(bulunan)
+        if "<IsTruncated>true</IsTruncated>" not in r.text or not bulunan:
+            break
+        isaret = f"data/futures/um/daily/klines/{bulunan[-1]}/"
+    return semboller
+
+
+_VADELI_LISTE_KAYNAKLARI = [
+    ("Binance web", _vadeli_liste_binance_web),
+    ("CoinGecko", _vadeli_liste_coingecko),
+    ("Binance veri arşivi", _vadeli_liste_binance_veri_arsivi),
+]
+
+
 def binance_vadeli_haritasi():
     """{spot_adi: vadeli_adi} döner, ör. {"PEPE": "1000PEPE", "BTC": "BTC"}.
-    6 saatte bir yenilenir. Alınamazsa boş sözlük (filtre devre dışı kalır)."""
+    (v5) Üç kaynağı sırayla dener. Başarılıysa 6 saatte bir, başarısızsa
+    30 dakikada bir yeniler. Hiçbiri olmazsa boş sözlük (filtre devre dışı)."""
     o = _vadeli_onbellek
-    if o["harita"] and time.time() - o["zaman"] < AKTIF_LISTE_YENILEME_SN:
+    simdi = time.time()
+    if o["harita"] and simdi - o["zaman"] < AKTIF_LISTE_YENILEME_SN:
         return o["harita"]
-    try:
-        veri = _get("https://api.coingecko.com/api/v3/derivatives/exchanges/binance_futures",
-                    {"include_tickers": "unexpired"})
-        harita = {}
-        for t in veri.get("tickers", []):
-            sembol = str(t.get("symbol", "")).upper()
-            if not sembol.endswith("USDT") or "_" in sembol:
-                continue
-            if str(t.get("contract_type", "perpetual")).lower() != "perpetual":
-                continue
-            vadeli_adi = sembol[:-4]
-            harita[_vadeli_normallestir(vadeli_adi)] = vadeli_adi
-        if len(harita) < 50:
-            raise RuntimeError(f"liste çok kısa ({len(harita)})")
-        o.update(harita=harita, zaman=time.time(), hata=None)
-    except Exception as e:
-        o["hata"] = str(e)[:150]
-        print(f"[Kripto] Vadeli listesi alınamadı: {o['hata']}", flush=True)
+    if not o["harita"] and o["son_deneme"] and simdi - o["son_deneme"] < VADELI_HATA_TEKRAR_SN:
+        return o["harita"]
+    o["son_deneme"] = simdi
+    hatalar = []
+    for ad, fonk in _VADELI_LISTE_KAYNAKLARI:
+        try:
+            harita = _vadeli_sembollerden_harita(fonk())
+            if len(harita) < 50:
+                raise RuntimeError(f"liste çok kısa ({len(harita)})")
+            o.update(harita=harita, zaman=simdi, hata=None, kaynak=ad)
+            print(f"[Kripto] Vadeli listesi alındı: {len(harita)} coin ({ad})", flush=True)
+            return harita
+        except Exception as e:
+            hatalar.append(f"{ad}: {str(e)[:80]}")
+    o["hata"] = " | ".join(hatalar)
+    print(f"[Kripto] Vadeli listesi alınamadı: {o['hata']}", flush=True)
     return o["harita"]
 
 
@@ -629,10 +695,10 @@ def baslangic():
     kaynak, notlar = _calisan_kaynagi_bul()
     kaynak_str = kaynak.ad if kaynak else "❌ HİÇBİRİ ÇALIŞMADI"
     satirlar = [
-        f"🪙 Kripto RSI Tarayıcı AKTİF (v4) — {KRIPTO_SURUM}",
+        f"🪙 Kripto RSI Tarayıcı AKTİF (v5) — {KRIPTO_SURUM}",
         "",
-        "v3: artık Binance VADELİ (USDT-M perpetual) taranıyor, borsadan "
-        "çıkarılmış eski coinler elendi.",
+        "Sadece Binance VADELİDE işlem gören coinler taranır, borsadan "
+        "çıkarılmış eski coinler elenir.",
         f"• En yüksek hacimli {COIN_SAYISI} USDT çifti (sadece şu an işlem görenler)",
         f"• 4 saatlik VE günlük grafikte RSI({RSI_PERIYOT})",
         f"• 🔻 RSI ≤ {RSI_ESIK:.0f} → aşırı satım alarmı",
@@ -649,11 +715,12 @@ def baslangic():
         if vadeli:
             satirlar.append(f"✅ Sunucu ABD'de olduğu için fiyatlar Binance spottan alınıyor, "
                             f"ama sadece Binance VADELİDE de olan coinler taranıyor "
-                            f"({len(vadeli)} vadeli coin listesi). Spot ve vadeli fiyatları "
+                            f"({len(vadeli)} vadeli coin, liste kaynağı: {_vadeli_onbellek['kaynak']}). "
+                            f"Spot ve vadeli fiyatları "
                             f"neredeyse aynı olduğu için RSI da aynı çıkar.")
         else:
             satirlar.append(f"⚠️ Vadeli coin listesi alınamadı ({_vadeli_onbellek['hata']}) - "
-                            f"şimdilik tüm aktif spot coinler taranıyor, 6 saat sonra tekrar denenecek.")
+                            f"şimdilik tüm aktif spot coinler taranıyor, 30 dk sonra tekrar denenecek.")
     elif kaynak is not None and kaynak.ad != BinanceVadeliKaynak.ad:
         satirlar.append("")
         satirlar.append("⚠️ Binance verisine erişilemedi, başka borsa kullanılıyor - "
