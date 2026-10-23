@@ -42,7 +42,7 @@ TELEGRAM_TOKEN = os.environ.get("ARGE_TELEGRAM_TOKEN", "")
 TELEGRAM_CHAT_ID = os.environ.get("ARGE_TELEGRAM_CHAT_ID", "")
 DATA_DIR = os.environ.get("DATA_DIR", ".")
 
-KRIPTO_SURUM = "kripto-rsi-v3-vadeli-2026-10-23"
+KRIPTO_SURUM = "kripto-rsi-v4-vadeli-filtre-2026-10-23"
 
 RSI_PERIYOT = 14
 RSI_ESIK = float(os.environ.get("KRIPTO_RSI_ESIK", "20"))
@@ -109,6 +109,53 @@ def _uygun_sembol_mu(baz: str) -> bool:
 
 
 AKTIF_LISTE_YENILEME_SN = 6 * 3600
+
+# =============================================================================
+# (v4) BINANCE VADELİ COIN LİSTESİ — CoinGecko üzerinden
+# Render sunucusu ABD'de ve fapi.binance.com ABD'yi engelliyor (451). Vadeli
+# fiyat verisini alamıyoruz, ama hangi coinlerin vadelide olduğunu CoinGecko'nun
+# Binance Futures listesinden öğrenip SPOT taramasını bu coinlerle sınırlıyoruz.
+# Böylece gelen her alarm, kullanıcının Binance vadelide işlem açabileceği bir
+# coin oluyor. Spot ve vadeli fiyatları neredeyse aynı olduğu için RSI da
+# pratikte aynı çıkıyor.
+# =============================================================================
+_VADELI_ON_EKLER = ("1000000", "1000", "1M")
+_vadeli_onbellek = {"harita": {}, "zaman": 0, "hata": None}
+
+
+def _vadeli_normallestir(baz: str) -> str:
+    """Vadelide bazı coinler 1000'li listeleniyor (1000PEPE ↔ spot PEPE)."""
+    for on in _VADELI_ON_EKLER:
+        if baz.startswith(on) and len(baz) > len(on):
+            return baz[len(on):]
+    return baz
+
+
+def binance_vadeli_haritasi():
+    """{spot_adi: vadeli_adi} döner, ör. {"PEPE": "1000PEPE", "BTC": "BTC"}.
+    6 saatte bir yenilenir. Alınamazsa boş sözlük (filtre devre dışı kalır)."""
+    o = _vadeli_onbellek
+    if o["harita"] and time.time() - o["zaman"] < AKTIF_LISTE_YENILEME_SN:
+        return o["harita"]
+    try:
+        veri = _get("https://api.coingecko.com/api/v3/derivatives/exchanges/binance_futures",
+                    {"include_tickers": "unexpired"})
+        harita = {}
+        for t in veri.get("tickers", []):
+            sembol = str(t.get("symbol", "")).upper()
+            if not sembol.endswith("USDT") or "_" in sembol:
+                continue
+            if str(t.get("contract_type", "perpetual")).lower() != "perpetual":
+                continue
+            vadeli_adi = sembol[:-4]
+            harita[_vadeli_normallestir(vadeli_adi)] = vadeli_adi
+        if len(harita) < 50:
+            raise RuntimeError(f"liste çok kısa ({len(harita)})")
+        o.update(harita=harita, zaman=time.time(), hata=None)
+    except Exception as e:
+        o["hata"] = str(e)[:150]
+        print(f"[Kripto] Vadeli listesi alınamadı: {o['hata']}", flush=True)
+    return o["harita"]
 
 
 class BinanceVadeliKaynak:
@@ -183,6 +230,7 @@ class BinanceKaynak:
 
     def evren(self):
         aktif = self._aktif_ciftler()
+        vadeli = binance_vadeli_haritasi()  # (v4) boşsa filtre uygulanmaz
         veri = _get(f"{self.taban}/api/v3/ticker/24hr")
         sonuc = []
         for t in veri:
@@ -192,13 +240,18 @@ class BinanceKaynak:
             baz = s[:-4]
             if not _uygun_sembol_mu(baz):
                 continue
+            if vadeli and baz not in vadeli:
+                continue  # Binance vadelide yok → atla
             try:
-                sonuc.append({"sembol": baz, "kaynak_kodu": s,
-                              "hacim": float(t["quoteVolume"]),
-                              "fiyat": float(t["lastPrice"]),
-                              "degisim": float(t["priceChangePercent"])})
+                coin = {"sembol": baz, "kaynak_kodu": s,
+                        "hacim": float(t["quoteVolume"]),
+                        "fiyat": float(t["lastPrice"]),
+                        "degisim": float(t["priceChangePercent"])}
             except (KeyError, ValueError):
                 continue
+            if vadeli:
+                coin["vadeli_sembol"] = vadeli[baz]
+            sonuc.append(coin)
         return sonuc
 
     def kapanislar(self, kod, zd="4s"):
@@ -389,21 +442,34 @@ ZD_AD = {"4s": "4 saatlik", "1g": "Günlük"}
 
 def _alarm_mesaji(kaynak, coin, zd, yon, rsi_canli, rsi_kapanmis):
     kapanmis_str = f"{rsi_kapanmis:.1f}" if rsi_kapanmis is not None else "?"
+    # (v4) Vadelideki adıyla göster (ör. 1000PEPE) ve vadeli grafiği aç
+    ad = coin.get("vadeli_sembol", coin["sembol"])
+    fiyat = coin["fiyat"]
+    if "vadeli_sembol" in coin:
+        grafik = f"https://www.tradingview.com/chart/?symbol=BINANCE:{ad}USDT.P"
+        # 1000PEPE vadelide spot PEPE'nin 1000 katı fiyattan işlem görüyor
+        carpan = {"1000000": 1_000_000, "1000": 1000, "1M": 1_000_000}
+        for on in _VADELI_ON_EKLER:
+            if ad.startswith(on) and ad != coin["sembol"]:
+                fiyat *= carpan[on]
+                break
+    else:
+        grafik = kaynak.grafik_linki(coin["sembol"])
     if yon == "dusuk":
-        baslik = f"🔻 AŞIRI SATIM — {coin['sembol']}/USDT ({ZD_AD[zd]})"
+        baslik = f"🔻 AŞIRI SATIM — {ad}/USDT ({ZD_AD[zd]})"
         alt = (f"RSI tekrar {RSI_YENIDEN_KURMA:.0f}'in üzerine çıkana kadar bu coin/zaman "
                f"dilimi için yeni alarm gelmeyecek. Al sinyali değil — düşüş devam edebilir.")
     else:
-        baslik = f"🔺 AŞIRI ALIM — {coin['sembol']}/USDT ({ZD_AD[zd]})"
+        baslik = f"🔺 AŞIRI ALIM — {ad}/USDT ({ZD_AD[zd]})"
         alt = (f"RSI tekrar {RSI_UST_YENIDEN_KURMA:.0f}'in altına inene kadar bu coin/zaman "
                f"dilimi için yeni alarm gelmeyecek. Sat sinyali değil — yükseliş devam edebilir.")
     return (
         f"{baslik}\n"
         f"RSI: {rsi_canli:.1f} (canlı mum, henüz kapanmadı)\n"
         f"Son kapanmış mumun RSI'ı: {kapanmis_str}\n"
-        f"Fiyat: ${_fiyat_bicimle(coin['fiyat'])}  |  24s: %{coin['degisim']:+.1f}\n"
+        f"Fiyat: ${_fiyat_bicimle(fiyat)}  |  24s: %{coin['degisim']:+.1f}\n"
         f"Kaynak: {kaynak.ad}\n"
-        f"Grafik: {kaynak.grafik_linki(coin['sembol'])}\n\n"
+        f"Grafik: {grafik}\n\n"
         f"ℹ️ {alt}")
 
 
@@ -563,7 +629,7 @@ def baslangic():
     kaynak, notlar = _calisan_kaynagi_bul()
     kaynak_str = kaynak.ad if kaynak else "❌ HİÇBİRİ ÇALIŞMADI"
     satirlar = [
-        f"🪙 Kripto RSI Tarayıcı AKTİF (v3) — {KRIPTO_SURUM}",
+        f"🪙 Kripto RSI Tarayıcı AKTİF (v4) — {KRIPTO_SURUM}",
         "",
         "v3: artık Binance VADELİ (USDT-M perpetual) taranıyor, borsadan "
         "çıkarılmış eski coinler elendi.",
@@ -577,10 +643,21 @@ def baslangic():
         "",
         "Borsaya bağlanmaz, emir göndermez — işlemleri sen manuel açarsın.",
     ]
-    if kaynak is not None and kaynak.ad != BinanceVadeliKaynak.ad:
+    if kaynak is not None and kaynak.ad == BinanceKaynak.ad:
+        vadeli = binance_vadeli_haritasi()
         satirlar.append("")
-        satirlar.append("⚠️ Binance vadeli verisine bu sunucudan erişilemedi, "
-                        "spot/diğer kaynak kullanılıyor - bazı coinler vadelide olmayabilir.")
+        if vadeli:
+            satirlar.append(f"✅ Sunucu ABD'de olduğu için fiyatlar Binance spottan alınıyor, "
+                            f"ama sadece Binance VADELİDE de olan coinler taranıyor "
+                            f"({len(vadeli)} vadeli coin listesi). Spot ve vadeli fiyatları "
+                            f"neredeyse aynı olduğu için RSI da aynı çıkar.")
+        else:
+            satirlar.append(f"⚠️ Vadeli coin listesi alınamadı ({_vadeli_onbellek['hata']}) - "
+                            f"şimdilik tüm aktif spot coinler taranıyor, 6 saat sonra tekrar denenecek.")
+    elif kaynak is not None and kaynak.ad != BinanceVadeliKaynak.ad:
+        satirlar.append("")
+        satirlar.append("⚠️ Binance verisine erişilemedi, başka borsa kullanılıyor - "
+                        "bazı coinler Binance vadelide olmayabilir.")
     if notlar:
         satirlar.append("")
         satirlar.append("Denenip çalışmayan kaynaklar:")
