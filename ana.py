@@ -42,7 +42,7 @@ import requests
 from flask import Flask
 
 PORT = int(os.environ.get("PORT", "10000"))
-ANA_SURUM = "ana-v3-bist-kapatildi-kripto-rsi-2026-10-23"
+ANA_SURUM = "ana-v4-kripto-rsi-test-2026-10-26"
 
 # 2026-10-23: Kullanıcının kararıyla BIST tarafı (tavan tarayıcı + Midas +
 # Katalizör + Kapsamlı Analiz) KAPATILDI. Aynı Telegram sohbetinde
@@ -177,6 +177,13 @@ except Exception as e:
     KRIPTO = None
     _durum["kripto"] = f"❌ {e}"
     print(f"[ANA] kripto_rsi_tarayici yüklenemedi: {e}", flush=True)
+    traceback.print_exc()
+
+try:
+    import kripto_rsi_backtest as KRIPTO_TEST
+except Exception as e:
+    KRIPTO_TEST = None
+    print(f"[ANA] kripto_rsi_backtest yüklenemedi: {e}", flush=True)
     traceback.print_exc()
 
 if not BIST_AKTIF:
@@ -390,6 +397,15 @@ if __name__ == "__main__":
         threading.Thread(target=_guvenli("Kripto RSI tarama",
                                           KRIPTO.kripto_tarama_dongusu), daemon=True).start()
         print("[ANA] Kripto RSI tarayıcı thread'leri başlatıldı.", flush=True)
+
+    # --- 10b) KRİPTO KOMUTLARI (/rsi_test) ---
+    # Aynı token'ı (ARGE_TELEGRAM_TOKEN) BIST tarayıcının komut döngüsü de
+    # dinliyor - ikisi birden çalışırsa 409 Conflict. Bu yüzden SADECE
+    # BIST kapalıyken başlatılıyor.
+    if KRIPTO_TEST is not None and not BIST_AKTIF:
+        threading.Thread(target=_guvenli("Kripto komut",
+                                          KRIPTO_TEST.komut_dongusu), daemon=True).start()
+        print("[ANA] Kripto komut dinleyici başlatıldı (/rsi_test).", flush=True)
 
     # --- TEK DIŞ PING (hepsi için) ---
     threading.Thread(target=dis_ping, daemon=True).start()
