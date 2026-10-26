@@ -361,12 +361,17 @@ def komut_dongusu():
                 if str(mesaj.get("chat", {}).get("id")) != str(K.TELEGRAM_CHAT_ID):
                     continue
                 metin = (mesaj.get("text") or "").strip().lower()
-                if metin.startswith("/rsi_test"):
+                if metin.startswith("/rsi_test2"):
+                    import kripto_rsi_dogrulama as D  # döngüsel import olmasın diye burada
+                    threading.Thread(target=D.dogrulama_calistir, daemon=True).start()
+                elif metin.startswith("/rsi_test"):
                     threading.Thread(target=rsi_testi_calistir, daemon=True).start()
                 elif metin.startswith("/yardim") or metin.startswith("/start"):
                     K.send_telegram_message(
                         "Komutlar:\n/rsi_test — RSI alarmlarının son 2 yıldaki "
-                        "başarısını 1s / 4s / günlük grafiklerde test eder (15-30 dk).")
+                        "başarısını 1s / 4s / günlük grafiklerde test eder (15-30 dk).\n"
+                        "/rsi_test2 — aşırı satım → LONG bulgusunun doğrulaması: yıllara göre, "
+                        "kalabalık günler hariç, yol boyunca düşüş ve stop etkisi (10-20 dk).")
         except Exception as e:
             print(f"[RSI komut] hata: {e}", flush=True)
             time.sleep(10)
