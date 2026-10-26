@@ -2107,6 +2107,15 @@ def backtest_komut_dongusu():
                         threading.Thread(target=sektor_patlama_nedeni_arastirmasi_calistir, daemon=True).start()
                     elif text.startswith("/form4_backtest"):
                         threading.Thread(target=sec_form4_backtest_calistir, daemon=True).start()
+                    # (2026-10-26) Endeks brifing komutları - aynı token'ı ikinci bir
+                    # döngü dinlemesin diye buradan yönlendiriliyor.
+                    elif text.startswith("/brifing") or text.startswith("/endeks_test"):
+                        try:
+                            import abd_endeks_brifing as EB
+                            hedef = EB.brifing_gonder if text.startswith("/brifing") else EB.endeks_test_calistir
+                            threading.Thread(target=hedef, daemon=True).start()
+                        except Exception as e:
+                            send_telegram_message(f"❌ Endeks brifing modülü yüklenemedi: {e}")
                 _offset_kaydet(offset)
         except Exception as e:
             print(f"[Backtest] Komut döngüsü hatası: {e}", flush=True)

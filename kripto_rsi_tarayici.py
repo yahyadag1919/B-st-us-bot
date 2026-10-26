@@ -42,7 +42,7 @@ TELEGRAM_TOKEN = os.environ.get("ARGE_TELEGRAM_TOKEN", "")
 TELEGRAM_CHAT_ID = os.environ.get("ARGE_TELEGRAM_CHAT_ID", "")
 DATA_DIR = os.environ.get("DATA_DIR", ".")
 
-KRIPTO_SURUM = "kripto-rsi-v5-2026-10-23"
+KRIPTO_SURUM = "kripto-rsi-v6-test-sonuclu-2026-10-26"
 
 RSI_PERIYOT = 14
 RSI_ESIK = float(os.environ.get("KRIPTO_RSI_ESIK", "20"))
@@ -53,7 +53,12 @@ RSI_UST_YENIDEN_KURMA = float(os.environ.get("KRIPTO_RSI_UST_YENIDEN_KURMA", "70
 # (v2) 150 → 400: Binance'teki USDT çiftlerinin pratikte tamamı
 COIN_SAYISI = int(os.environ.get("KRIPTO_COIN_SAYISI", "400"))
 # (v2) İki zaman dilimi: 4 saatlik + günlük
-ZAMAN_DILIMLERI = ["4s", "1g"]
+# (v6) 1 saatlik eklendi - 2 yıllık testte en istikrarlı sonucu verdi
+ZAMAN_DILIMLERI = ["1s", "4s", "1g"]
+# (v6) Aşırı alım (short) alarmları 2 yıllık testte hiçbir zaman diliminde
+# kör çizgiyi geçemedi → varsayılan olarak KAPALI. Açmak için Render'da
+# KRIPTO_ASIRI_ALIM_ALARM=true.
+ASIRI_ALIM_ALARM = os.environ.get("KRIPTO_ASIRI_ALIM_ALARM", "false").lower() == "true"
 TARAMA_ARALIGI_DK = int(os.environ.get("KRIPTO_TARAMA_DK", "5"))
 EVREN_YENILEME_SAAT = 6
 MUM_SAYISI = 120               # RSI'ın oturması için yeterli geçmiş
@@ -268,7 +273,7 @@ class BinanceVadeliKaynak:
 
     def kapanislar(self, kod, zd="4s"):
         veri = _get(f"{self.taban}/fapi/v1/klines",
-                    {"symbol": kod, "interval": {"4s": "4h", "1g": "1d"}[zd], "limit": MUM_SAYISI})
+                    {"symbol": kod, "interval": {"1s": "1h", "4s": "4h", "1g": "1d"}[zd], "limit": MUM_SAYISI})
         return [float(m[4]) for m in veri], int(veri[-1][0])
 
     def grafik_linki(self, sembol):
@@ -322,7 +327,7 @@ class BinanceKaynak:
 
     def kapanislar(self, kod, zd="4s"):
         veri = _get(f"{self.taban}/api/v3/klines",
-                    {"symbol": kod, "interval": {"4s": "4h", "1g": "1d"}[zd], "limit": MUM_SAYISI})
+                    {"symbol": kod, "interval": {"1s": "1h", "4s": "4h", "1g": "1d"}[zd], "limit": MUM_SAYISI})
         return [float(m[4]) for m in veri], int(veri[-1][0])
 
     def grafik_linki(self, sembol):
@@ -356,7 +361,7 @@ class OkxKaynak:
 
     def kapanislar(self, kod, zd="4s"):
         veri = _get(f"{self.taban}/api/v5/market/candles",
-                    {"instId": kod, "bar": {"4s": "4H", "1g": "1Dutc"}[zd], "limit": min(MUM_SAYISI, 300)})
+                    {"instId": kod, "bar": {"1s": "1H", "4s": "4H", "1g": "1Dutc"}[zd], "limit": min(MUM_SAYISI, 300)})
         mumlar = list(reversed(veri.get("data", [])))  # OKX yeniden eskiye veriyor
         return [float(m[4]) for m in mumlar], int(mumlar[-1][0])
 
@@ -389,9 +394,9 @@ class KucoinKaynak:
 
     def kapanislar(self, kod, zd="4s"):
         simdi = int(time.time())
-        saat = {"4s": 4, "1g": 24}[zd]
+        saat = {"1s": 1, "4s": 4, "1g": 24}[zd]
         veri = _get(f"{self.taban}/api/v1/market/candles",
-                    {"symbol": kod, "type": {"4s": "4hour", "1g": "1day"}[zd],
+                    {"symbol": kod, "type": {"1s": "1hour", "4s": "4hour", "1g": "1day"}[zd],
                      "startAt": simdi - MUM_SAYISI * saat * 3600, "endAt": simdi})
         mumlar = list(reversed(veri.get("data", [])))  # KuCoin yeniden eskiye veriyor
         # KuCoin sırası: [zaman, açılış, KAPANIŞ, yüksek, düşük, ...]
@@ -503,7 +508,20 @@ def _fiyat_bicimle(f):
 # =============================================================================
 # TARAMA
 # =============================================================================
-ZD_AD = {"4s": "4 saatlik", "1g": "Günlük"}
+ZD_AD = {"1s": "1 saatlik", "4s": "4 saatlik", "1g": "Günlük"}
+
+# (v6) /rsi_test ve /rsi_test2 sonuçları (2026-10-26, 100 coin, 2 yıl,
+# en kalabalık 10 çöküş günü HARİÇ tutulmuş, daha gerçekçi rakamlar)
+TEST_NOTU = {
+    "1s": ("📈 Geçmiş test (2 yıl): 1 gün sonra ort. +%1.0, isabet %56; 3 gün sonra +%1.8. "
+           "İki yılda da tutarlı.\n🛡 Fiyat önce ort. %3-6 daha düşüyor: stop -%15 civarı, kaldıraç ≤5x. "
+           "Dar stop (-%5/-10) bu sinyali kayba çeviriyor."),
+    "4s": ("📈 Geçmiş test (2 yıl): 1 gün sonra ort. +%1.5, isabet %62 (sert çöküş "
+           "günlerinde çok daha yüksek). En iyi tutma süresi ~1 gün.\n🛡 Stop -%15 civarı, "
+           "kaldıraç ≤5x. Dar stop sonucu ciddi düşürüyor."),
+    "1g": ("⚠️ Günlük grafikte geçmiş veri az (22 farklı gün) - güvenilir bir sonuç yok, "
+           "temkinli ol."),
+}
 
 
 def _alarm_mesaji(kaynak, coin, zd, yon, rsi_canli, rsi_kapanmis):
@@ -523,16 +541,15 @@ def _alarm_mesaji(kaynak, coin, zd, yon, rsi_canli, rsi_kapanmis):
         grafik = kaynak.grafik_linki(coin["sembol"])
     if yon == "dusuk":
         baslik = f"🔻 AŞIRI SATIM — {ad}/USDT ({ZD_AD[zd]})"
-        alt = (f"RSI tekrar {RSI_YENIDEN_KURMA:.0f}'in üzerine çıkana kadar bu coin/zaman "
-               f"dilimi için yeni alarm gelmeyecek. Al sinyali değil — düşüş devam edebilir.")
+        alt = (f"{TEST_NOTU.get(zd, '')}\n\nRSI tekrar {RSI_YENIDEN_KURMA:.0f}'in üzerine "
+               f"çıkana kadar bu coin/zaman dilimi için yeni alarm gelmeyecek.")
     else:
         baslik = f"🔺 AŞIRI ALIM — {ad}/USDT ({ZD_AD[zd]})"
-        alt = (f"RSI tekrar {RSI_UST_YENIDEN_KURMA:.0f}'in altına inene kadar bu coin/zaman "
-               f"dilimi için yeni alarm gelmeyecek. Sat sinyali değil — yükseliş devam edebilir.")
+        alt = ("⚠️ Geçmiş testte aşırı alım → short hiçbir zaman diliminde işe yaramadı. "
+               "Sadece bilgi amaçlı.")
     return (
         f"{baslik}\n"
-        f"RSI: {rsi_canli:.1f} (canlı mum, henüz kapanmadı)\n"
-        f"Son kapanmış mumun RSI'ı: {kapanmis_str}\n"
+        f"Kapanmış mumun RSI'ı: {kapanmis_str}  |  şu anki (canlı mum): {rsi_canli:.1f}\n"
         f"Fiyat: ${_fiyat_bicimle(fiyat)}  |  24s: %{coin['degisim']:+.1f}\n"
         f"Kaynak: {kaynak.ad}\n"
         f"Grafik: {grafik}\n\n"
@@ -556,20 +573,26 @@ def _durumu_isle(kaynak, coin, zd, rsi_canli, rsi_kapanmis):
     Aşırı satım ve aşırı alım birbirinden bağımsız takip ediliyor."""
     sembol = coin["sembol"]
     k_dusuk, k_yuksek = f"{sembol}|{zd}|dusuk", f"{sembol}|{zd}|yuksek"
+    # (v6) Tetik artık KAPANMIŞ mumun RSI'ı - geriye dönük test bu kuralla
+    # yapıldı. Canlı mum RSI'ı mum bitmeden 20'nin altına inip geri
+    # çıkabiliyor; o durumlar test edilmedi.
+    rsi = rsi_kapanmis if rsi_kapanmis is not None else rsi_canli
 
     if k_dusuk in _durum["alarmda"]:
-        if rsi_canli > RSI_YENIDEN_KURMA:
+        if rsi > RSI_YENIDEN_KURMA:
             del _durum["alarmda"][k_dusuk]
-    elif rsi_canli <= RSI_ESIK:
+    elif rsi <= RSI_ESIK:
         send_telegram_message(_alarm_mesaji(kaynak, coin, zd, "dusuk", rsi_canli, rsi_kapanmis))
         _durum["alarmda"][k_dusuk] = round(rsi_canli, 1)
         _sayac_artir(zd, "dusuk")
         _durum_kaydet()
 
+    if not ASIRI_ALIM_ALARM:
+        return
     if k_yuksek in _durum["alarmda"]:
-        if rsi_canli < RSI_UST_YENIDEN_KURMA:
+        if rsi < RSI_UST_YENIDEN_KURMA:
             del _durum["alarmda"][k_yuksek]
-    elif rsi_canli >= RSI_UST_ESIK:
+    elif rsi >= RSI_UST_ESIK:
         send_telegram_message(_alarm_mesaji(kaynak, coin, zd, "yuksek", rsi_canli, rsi_kapanmis))
         _durum["alarmda"][k_yuksek] = round(rsi_canli, 1)
         _sayac_artir(zd, "yuksek")
@@ -621,8 +644,10 @@ def _gunluk_ozet_gerekiyorsa_gonder():
         "Bugün çıkan alarmlar:",
     ]
     for zd in ZAMAN_DILIMLERI:
-        satirlar.append(f"  {ZD_AD[zd]}: 🔻 aşırı satım {sayac.get(zd + '|dusuk', 0)}  |  "
-                        f"🔺 aşırı alım {sayac.get(zd + '|yuksek', 0)}")
+        satir = f"  {ZD_AD[zd]}: 🔻 aşırı satım {sayac.get(zd + '|dusuk', 0)}"
+        if ASIRI_ALIM_ALARM:
+            satir += f"  |  🔺 aşırı alım {sayac.get(zd + '|yuksek', 0)}"
+        satirlar.append(satir)
     for zd in ZAMAN_DILIMLERI:
         rsi = _durum["son_rsi"].get(zd, {}) if isinstance(_durum["son_rsi"], dict) else {}
         if not rsi:
@@ -631,8 +656,9 @@ def _gunluk_ozet_gerekiyorsa_gonder():
         satirlar.append("")
         satirlar.append(f"{ZD_AD[zd]} — RSI en düşük 3: "
                         + ", ".join(f"{s} {r:.0f}" for s, r in sirali[:3]))
-        satirlar.append(f"{ZD_AD[zd]} — RSI en yüksek 3: "
-                        + ", ".join(f"{s} {r:.0f}" for s, r in sirali[-3:][::-1]))
+        if ASIRI_ALIM_ALARM:
+            satirlar.append(f"{ZD_AD[zd]} — RSI en yüksek 3: "
+                            + ", ".join(f"{s} {r:.0f}" for s, r in sirali[-3:][::-1]))
     if sum(sayac.values()) == 0:
         satirlar.append("")
         satirlar.append("Bugün hiç alarm çıkmadı — sistem çalışıyor, sadece hiçbir "
@@ -695,14 +721,17 @@ def baslangic():
     kaynak, notlar = _calisan_kaynagi_bul()
     kaynak_str = kaynak.ad if kaynak else "❌ HİÇBİRİ ÇALIŞMADI"
     satirlar = [
-        f"🪙 Kripto RSI Tarayıcı AKTİF (v5) — {KRIPTO_SURUM}",
+        f"🪙 Kripto RSI Tarayıcı AKTİF (v6) — {KRIPTO_SURUM}",
         "",
         "Sadece Binance VADELİDE işlem gören coinler taranır, borsadan "
         "çıkarılmış eski coinler elenir.",
         f"• En yüksek hacimli {COIN_SAYISI} USDT çifti (sadece şu an işlem görenler)",
-        f"• 4 saatlik VE günlük grafikte RSI({RSI_PERIYOT})",
-        f"• 🔻 RSI ≤ {RSI_ESIK:.0f} → aşırı satım alarmı",
-        f"• 🔺 RSI ≥ {RSI_UST_ESIK:.0f} → aşırı alım alarmı",
+        f"• 1 saatlik, 4 saatlik ve günlük grafikte RSI({RSI_PERIYOT})",
+        f"• 🔻 Kapanmış mumda RSI ≤ {RSI_ESIK:.0f} → aşırı satım alarmı "
+        f"(geriye dönük testle aynı kural)",
+        ("• 🔺 Aşırı alım alarmı AÇIK (testte işe yaramadı, sadece bilgi)" if ASIRI_ALIM_ALARM
+         else "• Aşırı alım alarmları KAPALI (2 yıllık testte işe yaramadı)"),
+        "• Her alarmda geçmiş test sonucu, önerilen stop ve kaldıraç yazar",
         f"• Her {TARAMA_ARALIGI_DK} dakikada bir tarama",
         f"• Her akşam {OZET_SAATI_TR}:00'de günlük özet",
         f"• Veri kaynağı: {kaynak_str}",

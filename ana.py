@@ -42,7 +42,7 @@ import requests
 from flask import Flask
 
 PORT = int(os.environ.get("PORT", "10000"))
-ANA_SURUM = "ana-v4-kripto-rsi-test-2026-10-26"
+ANA_SURUM = "ana-v5-endeks-brifing-2026-10-26"
 
 # 2026-10-23: Kullanıcının kararıyla BIST tarafı (tavan tarayıcı + Midas +
 # Katalizör + Kapsamlı Analiz) KAPATILDI. Aynı Telegram sohbetinde
@@ -54,7 +54,7 @@ app = Flask(__name__)
 _durum = {"us": "yüklenmedi", "sosyal": "yüklenmedi", "futbol": "yüklenmedi",
           "midas": "yüklenmedi", "akilli_para": "yüklenmedi", "katalizor": "yüklenmedi",
           "backtest": "yüklenmedi", "kapsamli": "yüklenmedi", "opsiyon": "yüklenmedi",
-          "indirim": "yüklenmedi", "kripto": "yüklenmedi"}
+          "indirim": "yüklenmedi", "kripto": "yüklenmedi", "endeks": "yüklenmedi"}
 
 
 # =====================================================================
@@ -180,6 +180,15 @@ except Exception as e:
     traceback.print_exc()
 
 try:
+    import abd_endeks_brifing as ENDEKS
+    _durum["endeks"] = "✅ yüklendi"
+except Exception as e:
+    ENDEKS = None
+    _durum["endeks"] = f"❌ {e}"
+    print(f"[ANA] abd_endeks_brifing yüklenemedi: {e}", flush=True)
+    traceback.print_exc()
+
+try:
     import kripto_rsi_backtest as KRIPTO_TEST
 except Exception as e:
     KRIPTO_TEST = None
@@ -268,6 +277,7 @@ def ana_sayfa():
          f"<li>BIST Kapsamlı Analiz: {_durum['kapsamli']}</li>",
          f"<li>ABD Opsiyon Sinyal: {_durum['opsiyon']}</li>",
          f"<li>Kripto RSI Tarayıcı: {_durum['kripto']}</li>",
+         f"<li>ABD Endeks Brifing: {_durum['endeks']}</li>",
          "</ul>"]
     if SOSYAL is not None:
         try:
@@ -406,6 +416,15 @@ if __name__ == "__main__":
         threading.Thread(target=_guvenli("Kripto komut",
                                           KRIPTO_TEST.komut_dongusu), daemon=True).start()
         print("[ANA] Kripto komut dinleyici başlatıldı (/rsi_test).", flush=True)
+
+    # --- 11) ABD AÇILIŞ ÖNCESİ BRİFİNG (ABD sohbeti, sadece gönderir) ---
+    # /brifing ve /endeks_test komutları abd_backtest'in döngüsünden geliyor.
+    if ENDEKS is not None:
+        threading.Thread(target=_tek_seferlik("Endeks brifing başlangıç",
+                                               ENDEKS.baslangic), daemon=True).start()
+        threading.Thread(target=_guvenli("Endeks brifing zamanlayıcı",
+                                          ENDEKS.brifing_zamanlayici), daemon=True).start()
+        print("[ANA] Endeks brifing thread'leri başlatıldı.", flush=True)
 
     # --- TEK DIŞ PING (hepsi için) ---
     threading.Thread(target=dis_ping, daemon=True).start()
