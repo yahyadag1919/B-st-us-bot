@@ -48,6 +48,7 @@ SIRA_ONCEKI_MIN = 50          # ... 50. sıradan daha aşağıdan gelirse
 ALARM_SAAT_NY = (4, 20)       # gece yarısı alarm atmasın (NY 04:00-20:00)
 SABAH_LISTESI_NY = (8, 50)
 LISTE_UZUNLUK = 15
+ENDEKS_FONLARI = {"SPY": "S&P 500", "QQQ": "Nasdaq 100"}
 
 _oturum = requests.Session()
 _oturum.headers.update({"User-Agent": "Mozilla/5.0 (yahya-ozel-bot)"})
@@ -148,7 +149,17 @@ def liste_metni(veri, baslik="📋 Reddit'te en çok konuşulan ABD hisseleri (s
         isaret = " 🔥" if patlama_nedeni(h) else ""
         satirlar.append(f"{h['sira']}. {h['ticker']} — {h['bahsedilme']} kez "
                         f"(düne göre {_degisim(h)}){isaret}")
-    satirlar += ["", "🔥 = son 24 saatte ilgi patladı",
+    # Endeks fonları her zaman ayrıca gösterilsin (ilk 15'te olmasalar bile)
+    endeks = {h["ticker"]: h for h in veri if h["ticker"] in ENDEKS_FONLARI}
+    satirlar += ["", "📊 Endeksler:"]
+    for t, ad in ENDEKS_FONLARI.items():
+        h = endeks.get(t)
+        if h:
+            satirlar.append(f"• {t} ({ad}) — {h['sira']}. sırada, {h['bahsedilme']} kez "
+                            f"(düne göre {_degisim(h)})")
+        else:
+            satirlar.append(f"• {t} ({ad}) — ilk {SAYFA_SAYISI * 100}'de yok")
+    satirlar +=["", "🔥 = son 24 saatte ilgi patladı",
                  "Not: Bu sadece ne kadar konuşulduğunu gösterir, yükselir/düşer demez."]
     return "\n".join(satirlar)
 
