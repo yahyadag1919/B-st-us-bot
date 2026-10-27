@@ -42,7 +42,8 @@ import requests
 from flask import Flask
 
 PORT = int(os.environ.get("PORT", "10000"))
-ANA_SURUM = "ana-v5-endeks-brifing-2026-10-26"
+ANA_SURUM = "ana-v6-reddit-haber-kapali-2026-10-27"
+HABER_AKTIF = False   # ABD Akıllı Para haber bildirimleri (Form4 ayrı, açık kalıyor)
 
 # 2026-10-23: Kullanıcının kararıyla BIST tarafı (tavan tarayıcı + Midas +
 # Katalizör + Kapsamlı Analiz) KAPATILDI. Aynı Telegram sohbetinde
@@ -189,6 +190,15 @@ except Exception as e:
     traceback.print_exc()
 
 try:
+    import abd_reddit_takip as REDDIT
+    _durum["reddit"] = "✅ yüklendi"
+except Exception as e:
+    REDDIT = None
+    _durum["reddit"] = f"❌ {e}"
+    print(f"[ANA] abd_reddit_takip yüklenemedi: {e}", flush=True)
+    traceback.print_exc()
+
+try:
     import kripto_rsi_backtest as KRIPTO_TEST
 except Exception as e:
     KRIPTO_TEST = None
@@ -278,7 +288,16 @@ def ana_sayfa():
          f"<li>ABD Opsiyon Sinyal: {_durum['opsiyon']}</li>",
          f"<li>Kripto RSI Tarayıcı: {_durum['kripto']}</li>",
          f"<li>ABD Endeks Brifing: {_durum['endeks']}</li>",
+         f"<li>ABD Reddit Takip: {_durum.get('reddit', '-')}</li>",
+         f"<li>ABD Akıllı Para Haber: {'açık' if HABER_AKTIF else '⏸️ KAPALI (2026-10-27)'}</li>",
          "</ul>"]
+    if REDDIT is not None:
+        try:
+            h.append(f"<p>Reddit: {REDDIT._durum['tur']} tur, son başarılı "
+                     f"{REDDIT._durum['son_basarili'] or '-'}, hata: "
+                     f"{REDDIT._durum['son_hata'] or 'yok'}</p>")
+        except Exception:
+            pass
     if SOSYAL is not None:
         try:
             h.append(f"<p>Sosyal: {SOSYAL._durum['tur']} tur, "
@@ -363,8 +382,11 @@ if __name__ == "__main__":
                                                AKILLI_PARA.baslangic), daemon=True).start()
         threading.Thread(target=_guvenli("Akıllı Para Form4",
                                           AKILLI_PARA._form4_kontrol_dongusu), daemon=True).start()
-        threading.Thread(target=_guvenli("Akıllı Para Haber",
-                                          AKILLI_PARA._haber_kontrol_dongusu), daemon=True).start()
+        # (2026-10-27) Haber bildirimleri KAPATILDI - Yahya incelemiyordu.
+        # Geri açmak için HABER_AKTIF = True yap.
+        if HABER_AKTIF:
+            threading.Thread(target=_guvenli("Akıllı Para Haber",
+                                              AKILLI_PARA._haber_kontrol_dongusu), daemon=True).start()
         print("[ANA] ABD Akıllı Para thread'leri başlatıldı.", flush=True)
 
     # --- 6) BIST KATALİZÖR (iyi haber, henüz fiyatlanmamış) ---
@@ -425,6 +447,15 @@ if __name__ == "__main__":
         threading.Thread(target=_guvenli("Endeks brifing zamanlayıcı",
                                           ENDEKS.brifing_zamanlayici), daemon=True).start()
         print("[ANA] Endeks brifing thread'leri başlatıldı.", flush=True)
+
+    # --- 12) ABD REDDIT TAKİBİ (ABD sohbeti, sadece gönderir) ---
+    # /reddit komutu abd_backtest'in döngüsünden geliyor.
+    if REDDIT is not None:
+        threading.Thread(target=_tek_seferlik("Reddit başlangıç",
+                                               REDDIT.baslangic), daemon=True).start()
+        threading.Thread(target=_guvenli("Reddit takip",
+                                          REDDIT.reddit_dongusu), daemon=True).start()
+        print("[ANA] Reddit takip thread'leri başlatıldı.", flush=True)
 
     # --- TEK DIŞ PING (hepsi için) ---
     threading.Thread(target=dis_ping, daemon=True).start()

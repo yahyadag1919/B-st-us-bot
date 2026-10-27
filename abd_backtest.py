@@ -2116,6 +2116,13 @@ def backtest_komut_dongusu():
                             threading.Thread(target=hedef, daemon=True).start()
                         except Exception as e:
                             send_telegram_message(f"❌ Endeks brifing modülü yüklenemedi: {e}")
+                    # (2026-10-27) Reddit takip listesi
+                    elif text.startswith("/reddit"):
+                        try:
+                            import abd_reddit_takip as RT
+                            threading.Thread(target=RT.liste_gonder, daemon=True).start()
+                        except Exception as e:
+                            send_telegram_message(f"❌ Reddit modülü yüklenemedi: {e}")
                 _offset_kaydet(offset)
         except Exception as e:
             print(f"[Backtest] Komut döngüsü hatası: {e}", flush=True)
